@@ -1,0 +1,24 @@
+name: CI (nightly)
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nightly:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: full workspace tests
+        run: cargo test --workspace --all-features --release
+      - name: author policy over full history
+        run: scripts/check-author-policy.sh main
+      - name: docs build
+        run: cargo doc --workspace --no-deps --all-features

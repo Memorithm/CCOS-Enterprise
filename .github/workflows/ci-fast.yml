@@ -1,0 +1,40 @@
+name: CI (fast)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fast:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Author policy (single human contributor)
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            scripts/check-author-policy.sh "origin/${{ github.base_ref }}..HEAD"
+          else
+            scripts/check-author-policy.sh HEAD
+          fi
+      - name: Enterprise boundary: no RSI/Forge/Research-Lab dependency
+        run: |
+          ! grep -RniE 'ccos-rsi|forge-core|ccos-forge|ccos-research-lab|self_improvement|self_modify' \
+            --include='Cargo.toml' crates tools Cargo.toml
+          ! cargo tree --workspace --all-features 2>/dev/null | grep -iE 'ccos-rsi|forge|research-lab|scirust|octacore'
+      - run: cargo fmt --all -- --check
+      - run: cargo check --workspace --all-features
+      - run: cargo clippy --workspace --all-features -- -D warnings
+      - run: cargo test --workspace --all-features --release

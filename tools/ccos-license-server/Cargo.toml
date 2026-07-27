@@ -1,0 +1,33 @@
+[package]
+name = "ccos-license-server"
+version = "0.1.0"
+edition = "2021"
+description = "The vendor-side claim counter for CCOS Pro licenses: one-time claim codes → signed single-seat tokens. A zero-framework HTTP/1.1 binary plus the ccos-license-admin vault CLI; runtime verification stays fully offline in the ccos binary."
+license = "LicenseRef-TarekZekriti-Dual"
+publish = false
+
+# Deliberately dependency-light, matching the house style: the HTTP/1.1 loop is
+# hand-rolled over std::net (the same reasoning as the dependency-free MCP
+# server in `ccos_core::mcp`), the vault is a durably-written JSON file, and the
+# claim protocol primitives come from ccos-enterprise-governance while token
+# verification lives in ccos-core — client and counter can never drift.
+# TLS is the reverse proxy's job (Caddy/nginx) — this binary listens on
+# loopback behind it.
+[dependencies]
+ccos-core = { workspace = true, features = ["license"] }
+ccos-enterprise-governance = { path = "../../crates/ccos-enterprise-governance", features = ["license-verify"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+sha2 = "0.10"
+
+[dev-dependencies]
+ed25519-dalek = "2"
+
+[[bin]]
+name = "ccos-license-server"
+path = "src/bin/ccos-license-server.rs"
+
+[[bin]]
+name = "ccos-license-admin"
+path = "src/bin/ccos-license-admin.rs"

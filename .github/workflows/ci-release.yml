@@ -1,0 +1,37 @@
+name: CI (release)
+
+# Dry-run release gates. No release is ever created by CI (charter §45):
+# publication requires the explicit approval of ZEKRITI Tarek.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-gates:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: exact Core rev (no path deps, no branch deps at release time)
+        run: |
+          if grep -rn 'ccos-core = { path' Cargo.toml crates/*/Cargo.toml tools/*/Cargo.toml; then
+            echo "::error::release builds must pin ccos-core to an exact git rev"
+            exit 1
+          fi
+      - name: full gates
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+          scripts/check-author-policy.sh main
+      - name: Core compatibility matrix (artifact)
+        run: |
+          cargo tree --workspace --all-features > core-compat-matrix.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-gates
+          path: core-compat-matrix.txt

@@ -1,0 +1,56 @@
+name: CI (full)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 5 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: boundary + contract tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: gateway namespace contract (Hermes/OpenClaw surface)
+        run: cargo test -p ccos-enterprise-gateway --release
+      - name: RBAC + tenancy + policy contracts
+        run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
+      - name: governance wire formats (claim, manifest, revocation)
+        run: cargo test -p ccos-enterprise-governance --all-features --release
+      - name: license server integration
+        run: cargo test -p ccos-license-server --release
+
+  conformance:
+    name: Core dependency conformance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Core is an exact dependency (never a copy, never a branch)
+        run: |
+          ! grep -rn 'branch\s*=' Cargo.toml crates/*/Cargo.toml tools/*/Cargo.toml
+          grep -rn 'ccos-core' Cargo.toml | head -3
+      - name: no duplicated Core sources
+        run: |
+          ! find crates -name '*.rs' | xargs grep -l 'pub fn qbelief' | grep -v target
+          echo "no Core code duplication"
+
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - run: cargo check --workspace --all-features
+
+  # ── Expansion contract (charter §41): authentication · RBAC · tenant
+  # isolation · cross-tenant leakage · encryption · key rotation · quota ·
+  # budget · model governance · backup/restore · migration · rollback ·
+  # Hermes contract · OpenClaw contract · secure MCP · load · concurrency ·
+  # backpressure · failure recovery · cognitive isolation · agent identity.
+  # Each lands as a named job with failing-first tests as the crates grow.

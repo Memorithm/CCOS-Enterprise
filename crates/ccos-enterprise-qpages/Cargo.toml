@@ -1,0 +1,11 @@
+[package]
+name = "ccos-enterprise-qpages"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ccos-enterprise-auth",
+    "crates/ccos-enterprise-rbac",
+    "crates/ccos-enterprise-tenancy",
+    "crates/ccos-enterprise-policy",
+    "crates/ccos-enterprise-gateway",
+    "crates/ccos-enterprise-observability",
+    "crates/ccos-enterprise-backup",
+    "crates/ccos-enterprise-governance",
+    "crates/ccos-enterprise-qpages",
+    "crates/ccos-enterprise-admin",
+    "tools/ccos-license-server",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.89"
+license = "LicenseRef-TarekZekriti-Dual"
+repository = "https://github.com/Memorithm/CCOS-Enterprise"
+
+[workspace.dependencies]
+# TEMPORARY during local development (charter §29): replaced by an exact
+# git rev dependency before any release. Never `branch = "main"`.
+ccos-core = { path = "../CCOS-Core", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+rand = "0.8"

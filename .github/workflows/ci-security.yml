@@ -1,0 +1,31 @@
+name: CI (security)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  supply-chain:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo deny (advisories, licenses, sources)
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check advisories licenses sources
+      - name: secret detection (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: forbidden capability scan (charter §4.2)
+        run: |
+          ! grep -RniE 'recursive self.improvement|autonomous patch|generated.code execution|self.modification' \
+            --include='*.rs' --include='*.toml' crates tools \
+            | grep -v 'never\|forbid\|outside\|reject'

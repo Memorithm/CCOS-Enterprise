@@ -1,0 +1,16 @@
+# Webroot .htaccess for the shared-hosting counter (copy next to claim.php as
+# `.htaccess`). Three jobs: force HTTPS (a claim code must never transit in
+# clear), give the API the same /claim path the daemon counter uses (the CLI
+# also accepts …/claim.php directly), and keep responses out of caches.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # Force HTTPS — tokens and codes never transit in clear.
+    RewriteCond %{HTTPS} !=on
+    RewriteRule (.*) https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+    # `ccos license claim --from https://licensing.memorithm.fr` posts to /claim.
+    RewriteRule ^claim$ claim.php [L]
+</IfModule>
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Cache-Control "no-store, max-age=0"
+</IfModule>

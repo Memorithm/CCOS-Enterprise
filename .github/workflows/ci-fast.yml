@@ -34,8 +34,12 @@ jobs:
           components: rustfmt, clippy
       - name: Author policy (single human contributor)
         run: |
+          # On pull_request events HEAD is GitHub's synthetic merge ref,
+          # whose fabricated merge commit (author = triggering account,
+          # committer = web-flow) can never satisfy the policy — check the
+          # range up to the PR's real head instead.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            scripts/check-author-policy.sh "origin/${{ github.base_ref }}..HEAD"
+            scripts/check-author-policy.sh "origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}"
           else
             scripts/check-author-policy.sh HEAD
           fi

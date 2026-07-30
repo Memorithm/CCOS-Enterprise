@@ -17,3 +17,12 @@ ccos-enterprise-observability = { path = "../../crates/ccos-enterprise-observabi
 ccos-enterprise-backup = { path = "../../crates/ccos-enterprise-backup" }
 ccos-enterprise-qpages = { path = "../../crates/ccos-enterprise-qpages" }
 ccos-enterprise-admin = { path = "../../crates/ccos-enterprise-admin" }
+# The stress suite drives the licensing stack too: claim-code parsing, the
+# base64url wire codec, and the counter's vault + HTTP loop are as much a part
+# of the product's blast radius as the governed request path.
+ccos-enterprise-governance = { path = "../../crates/ccos-enterprise-governance", features = ["license-verify"] }
+ccos-license-server = { path = "../../tools/ccos-license-server" }
+serde_json = "1"
+
+[dev-dependencies]
+ed25519-dalek = "2"

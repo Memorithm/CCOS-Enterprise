@@ -15,6 +15,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # cargo-deny resolves the full graph, which reaches the ccos-core dev
+      # path dependency (charter §29) — materialize the sibling checkout.
+      # gitleaks below is unaffected: it scans this repository's git
+      # history, and the sibling sits in an untracked directory.
+      - name: Sibling CCOS-Core checkout (dev path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: Memorithm/CCOS-Core
+          path: .ccos-core-sibling
+      - name: Link the sibling where ../CCOS-Core resolves
+        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@stable
       - name: cargo deny (advisories, licenses, sources)
         run: |

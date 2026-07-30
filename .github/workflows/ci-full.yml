@@ -16,6 +16,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Sibling CCOS-Core checkout (dev path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: Memorithm/CCOS-Core
+          path: .ccos-core-sibling
+      - name: Link the sibling where ../CCOS-Core resolves
+        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@stable
       - name: gateway namespace contract (Hermes/OpenClaw surface)
         run: cargo test -p ccos-enterprise-gateway --release
@@ -48,6 +55,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Sibling CCOS-Core checkout (dev path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: Memorithm/CCOS-Core
+          path: .ccos-core-sibling
+      - name: Link the sibling where ../CCOS-Core resolves
+        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@1.89.0
       - run: cargo check --workspace --all-features
 

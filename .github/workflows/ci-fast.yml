@@ -19,6 +19,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # The workspace depends on ccos-core by PATH during development
+      # (charter §29) — materialize the sibling checkout the manifest
+      # expects, exactly like a local clone pair.
+      - name: Sibling CCOS-Core checkout (dev path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: Memorithm/CCOS-Core
+          path: .ccos-core-sibling
+      - name: Link the sibling where ../CCOS-Core resolves
+        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -29,7 +39,7 @@ jobs:
           else
             scripts/check-author-policy.sh HEAD
           fi
-      - name: Enterprise boundary: no RSI/Forge/Research-Lab dependency
+      - name: "Enterprise boundary: no RSI/Forge/Research-Lab dependency"
         run: |
           ! grep -RniE 'ccos-rsi|forge-core|ccos-forge|ccos-research-lab|self_improvement|self_modify' \
             --include='Cargo.toml' crates tools Cargo.toml

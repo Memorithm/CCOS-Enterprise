@@ -1,0 +1,59 @@
+# cargo-deny configuration for the Enterprise workspace — the supply-chain
+# gate ci-security.yml runs. Mirrors CCOS Core's posture, minus anything the
+# Enterprise boundary forbids (no premium-crate git sources here, ever).
+
+[graph]
+all-features = true
+targets = [
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+ignore = []
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# ccos-core is an external path dependency here (not a workspace member), so
+# `private.ignore` does not reach it — allow the house license explicitly.
+exceptions = [
+    { name = "ccos-core", allow = ["LicenseRef-TarekZekriti-Dual"] },
+]
+
+[licenses.private]
+# Workspace crates (and the unpublished ccos-core path dependency) carry the
+# repository's source-available/custom commercial terms — reviewed in
+# LICENSING.md rather than treated as third-party OSI dependencies.
+ignore = true
+registries = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

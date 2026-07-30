@@ -86,6 +86,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-conformance"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-admin",
+ "ccos-enterprise-auth",
+ "ccos-enterprise-backup",
+ "ccos-enterprise-gateway",
+ "ccos-enterprise-observability",
+ "ccos-enterprise-policy",
+ "ccos-enterprise-qpages",
+ "ccos-enterprise-rbac",
+ "ccos-enterprise-tenancy",
+]
+
+[[package]]
 name = "ccos-enterprise-gateway"
 version = "0.1.0-pre"
 dependencies = [

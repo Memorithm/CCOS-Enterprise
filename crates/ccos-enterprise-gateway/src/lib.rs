@@ -24,15 +24,41 @@ pub enum Disposition {
     Reject(String),
 }
 
-/// Namespace policy: Core tools (`ccos.*`) are forwardable; anything
-/// experimental (`rsi.*`, `forge.*`, `slha.*`, `octa.*`) is rejected at the
-/// Enterprise boundary — Research Lab namespaces never traverse Enterprise.
+/// Namespaces that never traverse Enterprise, whatever the caller's privilege.
+///
+/// Two families, both named by the product documentation:
+/// - Research Lab (`rsi.`, `forge.`, `slha.`, `octa.`) — outside the product
+///   boundary entirely (README "Product boundary");
+/// - capability namespaces the Enterprise profile forbids by charter §4.2 and
+///   `docs/HERMES_INTEGRATION.md`: autonomous patch promotion (`patch.`),
+///   process execution (`shell.`) and self-modification (`self.`).
+pub const FORBIDDEN_PREFIXES: &[&str] = &[
+    "rsi.", "forge.", "slha.", "octa.", "patch.", "shell.", "self.",
+];
+
+/// Individually named tools outside the boundary, matched exactly.
+/// `docs/HERMES_INTEGRATION.md` names these two precisely rather than whole
+/// namespaces, so read-only siblings (`code.read`, `repository.read`) are
+/// unaffected — widening them to prefixes would be a product decision, not a
+/// boundary repair.
+pub const FORBIDDEN_TOOLS: &[&str] = &["code.execute", "repository.modify"];
+
+/// Namespace policy: Core tools (`ccos.*`, `memory.*`, `context.*`, `policy.*`,
+/// `audit.*`, `system.health`) are forwardable; everything in
+/// [`FORBIDDEN_PREFIXES`] or [`FORBIDDEN_TOOLS`] is rejected at the Enterprise
+/// boundary, no matter how privileged the caller.
 ///
 /// The check is deliberately defensive: a tool name that is empty or carries
 /// whitespace/control bytes is not a canonical name and is rejected outright
 /// (fail closed — the boundary never forwards what it cannot classify), and
-/// the forbidden-prefix match is case-insensitive so `RSI.x` cannot slip past
-/// a case-normalizing router downstream.
+/// matching is case-insensitive so `RSI.x` cannot slip past a case-normalizing
+/// router downstream.
+///
+/// Note this remains a **deny**-list: an unrecognised tool is forwarded. The
+/// documented catalogue (`docs/HERMES_INTEGRATION.md`) describes an allowlist
+/// — turning this into one requires fixing the tool-naming convention first
+/// (the docs say `memory.*`, this crate's examples say `ccos.*`, Core's MCP
+/// server exposes bare `recall`/`ingest`), which is a product decision.
 pub fn classify(req: &GatewayRequest) -> Disposition {
     if req.tool.is_empty()
         || req
@@ -42,9 +68,10 @@ pub fn classify(req: &GatewayRequest) -> Disposition {
     {
         return Disposition::Reject("tool name is empty or not canonical".into());
     }
-    let forbidden = ["rsi.", "forge.", "slha.", "octa."];
     let lowered = req.tool.to_ascii_lowercase();
-    if forbidden.iter().any(|p| lowered.starts_with(p)) {
+    let forbidden = FORBIDDEN_PREFIXES.iter().any(|p| lowered.starts_with(p))
+        || FORBIDDEN_TOOLS.contains(&lowered.as_str());
+    if forbidden {
         return Disposition::Reject(format!(
             "tool namespace '{}' is outside the Enterprise boundary",
             req.tool

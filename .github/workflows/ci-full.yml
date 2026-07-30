@@ -16,6 +16,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Sibling CCOS-Core checkout (dev path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: Memorithm/CCOS-Core
+          path: .ccos-core-sibling
+      - name: Link the sibling where ../CCOS-Core resolves
+        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@stable
       - name: gateway namespace contract (Hermes/OpenClaw surface)
         run: cargo test -p ccos-enterprise-gateway --release
@@ -34,7 +41,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Core is an exact dependency (never a copy, never a branch)
         run: |
-          ! grep -rn 'branch\s*=' Cargo.toml crates/*/Cargo.toml tools/*/Cargo.toml
+          # Only non-comment occurrences count: the manifest legitimately
+          # *documents* the "never `branch = …`" rule in a comment, and a
+          # naive grep would trip on its own guardrail.
+          ! grep -rnE '^[^#]*branch\s*=' Cargo.toml crates/*/Cargo.toml tools/*/Cargo.toml
           grep -rn 'ccos-core' Cargo.toml | head -3
       - name: no duplicated Core sources
         run: |
@@ -45,6 +55,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Sibling CCOS-Core checkout (dev path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: Memorithm/CCOS-Core
+          path: .ccos-core-sibling
+      - name: Link the sibling where ../CCOS-Core resolves
+        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@1.89.0
       - run: cargo check --workspace --all-features
 

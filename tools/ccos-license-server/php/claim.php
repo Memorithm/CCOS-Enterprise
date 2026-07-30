@@ -44,7 +44,10 @@ const CCOS_RATE_PATH  = __DIR__ . '/../ccos-license/rate.txt';
 const CCOS_RATE_MAX_PER_MIN = 30; // global — 100-bit codes need no more
 
 const CLAIM_SCHEMA = 'ccos.claim/v1';
-const VAULT_SCHEMA = 'ccos.license.vault/v1';
+// v2: entries are keyed by vault_key(code_hash) — a second, domain-separated
+// hash — so vault.json contents cannot be replayed at the claim endpoint.
+// Upgrade a v1 file with `ccos-license-admin --vault vault.json migrate`.
+const VAULT_SCHEMA = 'ccos.license.vault/v2';
 
 ini_set('display_errors', '0'); // never leak paths to clients
 
@@ -103,6 +106,16 @@ function code_hash(string $canonicalCode): string
     return hash('sha256', 'ccos-claim-code-v1|' . $canonicalCode);
 }
 
+/**
+ * The vault key: a second, domain-separated hash over the wire-level code
+ * hash — mirrors ccos::claim::vault_key. The vault stores only this, so a
+ * leaked vault.json holds nothing the claim endpoint would accept.
+ */
+function vault_key(string $codeHash): string
+{
+    return hash('sha256', 'ccos-vault-key-v1|' . $codeHash);
+}
+
 /** Opaque machine fingerprint — mirrors ccos::claim::machine_fingerprint_of. */
 function machine_fingerprint_of(string $machineId): string
 {
@@ -141,15 +154,17 @@ function sign_token_bound(string $seedHex, string $licensee, ?int $exp, ?string 
 // ── The vault state machine (mirrors the Rust Vault::claim) ─────────
 
 /**
- * Claim under the already-held lock. Mutates $vault. Returns
- * [http_status, licensee|null, exp|null, error_message|null].
+ * Claim under the already-held lock. Takes the WIRE-level code hash and
+ * re-derives the vault key from it (mirrors the Rust Vault::claim). Mutates
+ * $vault. Returns [http_status, licensee|null, exp|null, error_message|null].
  */
 function vault_claim(array &$vault, string $codeHash, string $machine, int $now): array
 {
-    if (!isset($vault['entries'][$codeHash])) {
+    $key = vault_key($codeHash);
+    if (!isset($vault['entries'][$key])) {
         return [404, null, null, 'unknown claim code'];
     }
-    $e = &$vault['entries'][$codeHash];
+    $e = &$vault['entries'][$key];
     $status = $e['status'] ?? '';
     if ($status === 'revoked') {
         return [410, null, null, 'this code was revoked by the vendor'];
@@ -258,6 +273,9 @@ if (PHP_SAPI === 'cli') {
     code_hash('CCOS-AAAAA-AAAAA-AAAAA-AAAAA')
         === '387c45ee5457f5e622d1b35c7c1afc302097a81880416bdab8352a2fa7345d79'
         || $fail('code hash diverges from the Rust implementation');
+    vault_key('387c45ee5457f5e622d1b35c7c1afc302097a81880416bdab8352a2fa7345d79')
+        === '836bf706f07466e2c098e17d2521650949555f5054bcb3d398fd93547b050c4b'
+        || $fail('vault key diverges from the Rust implementation');
     $expected = 'eyJsaWNlbnNlZSI6InZlY3Rvci1jb3JwIiwiZXhwIjoxMjM0NTY3ODkwLCJtYWNoaW5lIjoiNmJiNWI1YTg2MjNlOTRkMTgwNjJjOGFjNWYzNzc0NmYwOTViYzkzZjk1MjIzMDczNzFjMWJlYzc5MjhhN2M0NyJ9.ceoCvEpnrf-AgYInOM3vREdXYj2RoR0XGZ7sHvZuj8NTveT6ySqTb0O4UHJiyreQ_L_PPIroCtYieT6_G6x4Bg';
     sign_token_bound($seedHex, 'vector-corp', 1234567890, $machineFp) === $expected
         || $fail('signed token is not byte-identical to the Rust signer');
@@ -276,9 +294,10 @@ if (PHP_SAPI === 'cli') {
     canonical_code('CCOS-SHORT') === null || $fail('short code must be refused');
 
     // The state machine on a throwaway vault: claim → reissue → seat taken →
-    // revoked → (rearm is the admin CLI's job, not the endpoint's).
+    // revoked → (rearm is the admin CLI's job, not the endpoint's). The vault
+    // is keyed by vault_key(wire hash); callers always present the wire hash.
     $vault = ['schema' => VAULT_SCHEMA, 'entries' => [
-        'h1' => ['licensee' => 'Acme', 'days' => 365, 'status' => 'unclaimed', 'created_unix' => 1],
+        vault_key('h1') => ['licensee' => 'Acme', 'days' => 365, 'status' => 'unclaimed', 'created_unix' => 1],
     ]];
     $now = 1000000;
     [$s,, $exp,] = vault_claim($vault, 'h1', 'm1', $now);
@@ -289,7 +308,11 @@ if (PHP_SAPI === 'cli') {
     $s === 410 || $fail('another machine must be refused (single-seat)');
     [$s,,,] = vault_claim($vault, 'nope', 'm1', $now);
     $s === 404 || $fail('unknown code must 404');
-    $vault['entries']['h1']['status'] = 'revoked';
+    // The v2 property: a leaked vault KEY presented at the wire is unknown —
+    // vault contents redeem nothing.
+    [$s,,,] = vault_claim($vault, vault_key('h1'), 'm1', $now);
+    $s === 404 || $fail('a vault key replayed as a claim must 404');
+    $vault['entries'][vault_key('h1')]['status'] = 'revoked';
     [$s,,,] = vault_claim($vault, 'h1', 'm1', $now);
     $s === 410 || $fail('revoked code must 410');
 

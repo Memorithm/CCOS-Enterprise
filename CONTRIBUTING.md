@@ -1,150 +1,126 @@
-# Contributing to CCOS
+# Contributing to CCOS Enterprise
 
-Thanks for your interest! CCOS is a research prototype, but it holds itself to a
-clean bar: deterministic behaviour, enforced invariants, and a green CI. This
-guide gets you productive quickly.
+CCOS Enterprise is the governed, multi-tenant deployment layer around
+[CCOS Core](https://github.com/Memorithm/CCOS-Core). It holds itself to the
+same bar as Core: deterministic behaviour, enforced invariants, and a green
+CI. This guide gets you productive quickly.
 
 - [Local setup](#local-setup)
 - [The development loop](#the-development-loop)
 - [What CI checks](#what-ci-checks)
 - [Coding conventions](#coding-conventions)
-- [Non-negotiable invariants](#non-negotiable-invariants)
-- [Extension recipes](#extension-recipes)
+- [Non-negotiable boundaries](#non-negotiable-boundaries)
 - [Branches & commits](#branches--commits)
 - [Pull-request checklist](#pull-request-checklist)
 
 ## Local setup
 
-You only need a recent **stable** Rust toolchain (CI tracks current stable):
+You need the Rust toolchain pinned by `rust-toolchain.toml` (rustup reads it
+automatically) **and a sibling checkout of CCOS Core** — during development
+the workspace depends on `ccos-core` by path (charter §29; pinned to an exact
+git `rev` before any release, never a branch):
 
 ```bash
-rustup update stable
-rustup component add rustfmt clippy
-git clone <repo> && cd CCOS_EXTENDED
-cargo build --all-targets
-cargo test
+git clone https://github.com/Memorithm/CCOS-Core CCOS-Core
+git clone https://github.com/Memorithm/CCOS-Enterprise CCOS-Enterprise
+cd CCOS-Enterprise
+scripts/install-git-hooks.sh   # author-policy hooks (see Branches & commits)
+cargo build --workspace --all-features
+cargo test  --workspace --all-features
 ```
 
-No system dependencies, no network, no GPU. Tests run fully offline (the LLM
-client falls back deterministically when no Ollama endpoint is reachable).
+No system dependencies, no network, no GPU: every test runs fully offline.
+The only optional extra is a PHP ≥ 8.0 CLI with `sodium` if you touch the
+shared-hosting counter (`tools/ccos-license-server/php/claim.php` — verify
+with `php claim.php selftest`).
 
 ## The development loop
 
-Run these four before every push — they mirror CI exactly, so if they pass
-locally CI will too:
+Run these before every push — they mirror `ci-fast.yml` exactly, so if they
+pass locally CI will too:
 
 ```bash
-cargo fmt --all                          # format (CI runs --check)
-cargo clippy --all-targets --all-features -- -D warnings  # lint; warnings are errors
-cargo test                               # the default-build unit + integration suite
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features  # docs must build clean
+cargo fmt --all                                            # format (CI runs --check)
+cargo clippy --workspace --all-features -- -D warnings     # lint; warnings are errors
+cargo test --workspace --all-features                      # the full suite
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+scripts/check-author-policy.sh HEAD                        # the single-author policy
 ```
 
-Touching a fused/premium module (`slha_full`, `octacore_bridge`, `rsi_bridge`,
-`mcp_ext`, a `crates/ccos-*` member)? Also run the profile that compiles it:
+Touching the licensing stack (`ccos-enterprise-governance`,
+`tools/ccos-license-server`)? Also prove the cross-implementation contract:
 
 ```bash
-cargo test --features pro-default        # every deterministic premium tier
-cargo test --features all-full           # + the REPLAY-RELAX full kernels
-```
-
-Useful extras:
-
-```bash
-cargo test --lib query::                 # one module's unit tests
-cargo test -- --ignored                  # opt-in 1,000,000-cycle stability run
-cargo bench                              # criterion delta benchmark
-cargo run -- analyze src --cycles        # exercise the CLI on our own source
+cargo test -p ccos-enterprise-governance --all-features
+cargo test -p ccos-license-server
+php tools/ccos-license-server/php/claim.php selftest
 ```
 
 ## What CI checks
 
-`.github/workflows/ci.yml` runs a **single consolidated job** (one checkout, one
-toolchain, one cached `target/` so dependencies compile once) to keep Actions
-minute usage low on this private repo. It uses **only** GitHub-authored actions
-(`actions/checkout`, `actions/cache`) plus the runner's `rustup`, so no
-third-party action can be blocked by org policy. Steps run cheapest-first
-(fail-fast):
-
-| Step | Command | Blocking |
-| --- | ------- | -------- |
-| **Format** | `cargo fmt --all --check` | yes |
-| **Clippy** | `cargo clippy --all-targets --all-features --locked -- -D warnings` | yes |
-| **Test (core matrix)** | `cargo test` (default = real AST), `--no-default-features` (heuristic fallback), then per-feature: `llm`, `learned-embed`, `license`, `license-pq`, `license,license-pq`, `octasoma` (+ example) | yes |
-| **Byte-identity guard** | default `cargo tree` must pull **no** premium crate (scirust / octasoma / octacore / rsi) | yes |
-| **Test (fused profiles)** | `cargo test --features pro-default` and `--features all-full` | yes |
-| **Test (fused members)** | `cargo test -p scirust -p slha-mcp -p slha-c -p ccos-memory-runtime -p octasoma -p octacore -p rsi` | yes |
-| **Premium CLI smoke** | `rsi status` / `slha explain` / `octa explain`, and community-tier `slha audit` must refuse with **exit 3** | yes |
-| **Docs** | `cargo doc --no-deps --all-features` with `RUSTDOCFLAGS=-D warnings` | yes |
-| **CLI smoke** | `analyze → verify → replay → top → blame → export → chaos → license → doctor` | yes |
-
-A broken command fails the smoke step even without a dedicated test. The slower
-`cargo audit` lives in `.github/workflows/audit.yml`, which runs **weekly** (and
-on demand via *Run workflow*) rather than on every push.
+| Workflow | When | What |
+| -------- | ---- | ---- |
+| `ci-fast.yml` | every push/PR | author policy, Enterprise boundary greps, `fmt`, `clippy -D warnings`, full test suite (release) |
+| `ci-full.yml` | push/PR + nightly | per-crate contract tests (gateway, RBAC/tenancy/policy, governance wire formats, license server), Core-dependency conformance, MSRV |
+| `ci-security.yml` | push/PR + weekly | `cargo deny` (advisories/licenses/sources), gitleaks, forbidden-capability scan (charter §4.2) |
+| `ci-nightly.yml` | nightly | full tests, author policy over the whole history, docs build |
+| `ci-release.yml` | manual | release gates — exact Core `rev` required, full checks, compatibility matrix artifact. CI never publishes (charter §45) |
 
 ## Coding conventions
 
-- **Format with `rustfmt`** (default settings). No manual alignment that the
+- **Format with `rustfmt`** (default settings). No manual alignment the
   formatter would undo.
-- **Zero clippy warnings.** Prefer iterators, avoid needless clones/allocations,
-  and don't `#[allow(...)]` without a one-line reason.
-- **Document public items.** Every public module/type/fn needs a rustdoc line;
-  `cargo doc -D warnings` is enforced, so intra-doc links must resolve and
-  must not be redundant (`[`Type`]`, not `[`Type`](crate::m::Type)` when the
-  short form resolves).
+- **Zero clippy warnings.** Prefer iterators, avoid needless clones and
+  allocations, and don't `#[allow(...)]` without a one-line reason.
+- **Document public items.** Every public module/type/fn carries a rustdoc
+  line; `RUSTDOCFLAGS="-D warnings" cargo doc` must pass, so intra-doc links
+  must resolve.
 - **Avoid panics on the library path.** Return `Result`/`Option`; reserve
   `unwrap`/`expect` for tests or genuinely-impossible cases (with a comment).
-- **Keep determinism.** Any time you iterate a `HashMap`/`HashSet` to produce
-  output, impose a total order before emitting (sort by a stable key, ties
-  broken by `NodeId`). See `MemoryGraph::get_node_scores` /
-  `enforce_paging` for the pattern.
+- **Keep determinism.** Iterate `BTreeMap`/`BTreeSet` (not hash maps) whenever
+  order reaches output, audit logs, or wire formats.
+- **Fail closed.** A gate that cannot decide (unknown schema, missing key,
+  unclassifiable request) refuses — with an announced, specific error.
+- **Wire formats are contracts.** Anything serialized across a boundary
+  (claim protocol, vault, tokens, manifests, revocation lists) gets a schema
+  tag, a bump discipline, and tests pinning byte-exact vectors — including
+  the PHP counter's selftest when the licensing wire is involved.
 
-## Non-negotiable invariants
+## Non-negotiable boundaries
 
-These are enforced in code and covered by tests; don't regress them.
+These are enforced by CI greps and tests; don't regress them.
 
-| Invariant | Lives in |
-| --------- | -------- |
-| `edges ⊆ nodes × nodes` (no dangling edges) | `MemoryGraph::add_edge`, `prune_dangling_edges`, `enforce_paging` |
-| Node count ≤ `max_in_memory_nodes` | `enforce_paging` |
-| Deterministic eviction / ordering | total order *(score, NodeId)* across `memory` |
-| Guard output is always valid JSON | `GuardLayer::validate_and_sanitize` → `fallback_response` |
-| Hash chain is tamper-evident | `EventLog::verify_integrity` (primary log) + `DistributedEventLog::verify_integrity` |
-
-Regression coverage lives in `tests/graph_invariants.rs`,
-`tests/snapshot_differential.rs`, `tests/long_term_stability.rs`,
-`tests/llm_adversarial_test.rs`, and `tests/property_invariants.rs` (proptest).
-
-## Extension recipes
-
-- **New node/edge type** — add a variant to `NodeType`/`EdgeType` (serde-tagged
-  enums) and update the color/label maps in `MemoryGraph::to_dot` and
-  `query::to_graphml`.
-- **New event** — add a variant to `event_log::EventPayload`, handle it in
-  `EventReplayer::handle_event`, and (if it should be hashed) in
-  `tests/snapshot_differential.rs::event_log_hash`.
-- **New CLI command** — add a match arm in `main()`, an `OptsX::parse(&[String])`,
-  and a `run_x(...) -> i32`; document it in `print_help`, `README.md`,
-  `docs/USAGE.md`, and the smoke run in `ci.yml`.
-- **New graph query** — add a pure function to `query` with unit tests; reuse it
-  from a command rather than reimplementing traversal.
-- **New invariant** — add a `MemoryGraph` method that checks/repairs it plus a
-  test in `tests/graph_invariants.rs`.
+| Boundary | Lives in |
+| -------- | -------- |
+| No dependency on `ccos-rsi`, `forge-core`, `ccos-forge`, Research Lab | `ci-fast.yml` boundary step, `cargo tree` scan |
+| Research namespaces (`rsi.*`, `forge.*`, `slha.*`, `octa.*`) rejected at the gateway | `ccos-enterprise-gateway::classify` + tests |
+| Core is depended on, never copied | `ci-full.yml` conformance job |
+| Advanced Q-Pages are policy-activated per tenant, never imposed | `ccos-enterprise-qpages::QPageRegistry` + tests |
+| A stolen license vault redeems nothing | `vault_key` double-hash keying, Rust + PHP tests |
+| Single human contributor | `scripts/check-author-policy.sh`, `.githooks/` |
 
 ## Branches & commits
 
 - Work on a feature branch; keep `main` green.
-- Write imperative, scoped commit subjects (`parser: strip inline block
-  comments`), with a body explaining *why* when it isn't obvious.
+- Write imperative, scoped commit subjects (`gateway: reject non-canonical
+  tool names`), with a body explaining *why* when it isn't obvious.
 - Keep formatting-only churn out of logic commits.
+- **Author policy (§43):** every commit is authored and committed by
+  ZEKRITI Tarek — no other identities, no contribution trailers. CI checks
+  every PR range and the whole history nightly;
+  `scripts/install-git-hooks.sh` installs the local hooks that catch a
+  violation before it leaves your machine.
 
 ## Pull-request checklist
 
-- [ ] `cargo fmt --all --check` clean
-- [ ] `cargo clippy --all-targets -- -D warnings` clean
-- [ ] `cargo test` green (add/extend tests for new behaviour)
-- [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` clean
-- [ ] Docs updated (`README.md` / `docs/USAGE.md` / `docs/ARCHITECTURE.md`) for
-      any user-facing or structural change
-- [ ] `CHANGELOG.md` updated under *Unreleased*
-- [ ] No new invariant regressions; determinism preserved
+- [ ] `cargo fmt --all -- --check` clean
+- [ ] `cargo clippy --workspace --all-features -- -D warnings` clean
+- [ ] `cargo test --workspace --all-features` green (new behaviour arrives
+      with its tests — failing-first where practical, charter §41)
+- [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+      --all-features` clean
+- [ ] `php tools/ccos-license-server/php/claim.php selftest` green if the
+      licensing wire changed
+- [ ] Docs updated (`README.md`, `docs/`) for any user-facing or structural
+      change
+- [ ] Boundaries preserved (see the table above); determinism preserved

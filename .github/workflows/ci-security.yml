@@ -15,15 +15,36 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # cargo-deny resolves the full graph, which reaches the ccos-core dev
+      # path dependency (charter §29) — materialize the sibling checkout.
+      # gitleaks below is unaffected: it scans this repository's git
+      # history, and the sibling sits in an untracked directory.
+      - name: Sibling CCOS-Core checkout (dev path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: Memorithm/CCOS-Core
+          path: .ccos-core-sibling
+      - name: Link the sibling where ../CCOS-Core resolves
+        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@stable
       - name: cargo deny (advisories, licenses, sources)
         run: |
           cargo install cargo-deny --locked
           cargo deny check advisories licenses sources
       - name: secret detection (gitleaks)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The gitleaks BINARY is MIT-licensed and free for everyone; only
+          # the gitleaks-action wrapper demands a paid org license key
+          # ('[Memorithm] is an organization. License key is required.').
+          # Pin the release, verify its published checksum, run the same
+          # scan. The sibling checkout is untracked here, so the git-history
+          # scan covers exactly this repository.
+          curl -sSfL -o gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.0/gitleaks_8.30.0_linux_x64.tar.gz
+          echo "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks detect --source . --no-banner --redact
+          rm -f gitleaks gitleaks.tar.gz
       - name: forbidden capability scan (charter §4.2)
         run: |
           ! grep -RniE 'recursive self.improvement|autonomous patch|generated.code execution|self.modification' \

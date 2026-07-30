@@ -4,17 +4,21 @@
 //!
 //! The protocol in one paragraph: at sale time the vendor generates a
 //! high-entropy **claim code** (`CCOS-XXXXX-XXXXX-XXXXX-XXXXX`, 100 bits) and
-//! records only its **hash** in the claim counter's vault. To activate, the
-//! client sends `{sha256(code), machine_fingerprint}` — never the code itself,
-//! and never a raw hardware identifier — and receives a signed annual,
-//! single-seat token with the fingerprint bound into the signed payload. The
-//! counter flips the code `unclaimed → claimed` atomically (that flip *is* the
-//! single-use property; re-claiming from the **same** machine re-issues the
-//! same license, any other machine is refused). Verification of the received
-//! token stays exactly the existing offline path ([`crate::license`]): the
-//! client checks the signature against the public key baked into its own
-//! binary before installing anything, so a compromised counter can refuse
-//! service but can never mint or tamper.
+//! records only a **double hash** of it in the claim counter's vault — the
+//! [`vault_key`], a domain-separated hash *of* the wire-level [`code_hash`],
+//! so the vault holds neither the code nor anything replayable at the claim
+//! endpoint. To activate, the client sends `{sha256(code),
+//! machine_fingerprint}` — never the code itself, and never a raw hardware
+//! identifier — the counter re-derives the vault key from the received hash
+//! and receives a signed annual, single-seat token with the fingerprint bound
+//! into the signed payload. The counter flips the code `unclaimed → claimed`
+//! atomically (that flip *is* the single-use property; re-claiming from the
+//! **same** machine re-issues the same license, any other machine is
+//! refused). Verification of the received token stays exactly the existing
+//! offline path ([`ccos_core::license`]): the client checks the signature
+//! against the public key baked into its own binary before installing
+//! anything, so a compromised counter can refuse service but can never mint
+//! or tamper.
 //!
 //! Privacy: the machine fingerprint is `sha256("ccos-machine-v1|" + machine-id)`
 //! — an opaque 32-byte value. The vendor never learns CPU serials, disk ids,
@@ -131,11 +135,22 @@ pub fn canonical_code(input: &str) -> Option<String> {
     ))
 }
 
-/// The vault key and wire form of a claim code: domain-separated SHA-256 of
-/// the canonical code. The counter stores and receives only this — a stolen
-/// vault contains nothing redeemable.
+/// The **wire form** of a claim code: domain-separated SHA-256 of the
+/// canonical code. This is what the client sends to the counter — the code
+/// itself never leaves the host. Because presenting this value redeems the
+/// seat, the vault does NOT store it: vault entries are keyed by
+/// [`vault_key`], one hash further.
 pub fn code_hash(canonical_code: &str) -> String {
     ccos_core::util::sha256_hex(&format!("ccos-claim-code-v1|{canonical_code}"))
+}
+
+/// The **vault key** for a claim code: a second, domain-separated SHA-256
+/// over the wire-level [`code_hash`]. The counter stores entries under this
+/// key and re-derives it from the received hash, so a stolen vault contains
+/// nothing redeemable — neither the codes (behind two hashes) nor the wire
+/// hashes the claim endpoint accepts (behind one).
+pub fn vault_key(code_hash: &str) -> String {
+    ccos_core::util::sha256_hex(&format!("ccos-vault-key-v1|{code_hash}"))
 }
 
 /// The opaque machine fingerprint bound into a single-seat token:
@@ -231,6 +246,26 @@ mod tests {
         assert_eq!(
             machine_fingerprint_of("abc123\n"),
             machine_fingerprint_of("abc123")
+        );
+    }
+
+    #[test]
+    fn vault_key_is_a_distinct_domain_and_matches_the_php_counter() {
+        let wire = code_hash("CCOS-AAAAA-AAAAA-AAAAA-AAAAA");
+        let key = vault_key(&wire);
+        assert!(is_sha256_hex(&key));
+        // One hash further than the wire value, never equal to it.
+        assert_ne!(key, wire);
+        assert_ne!(key, vault_key(&key), "not idempotent — it is a real hash");
+        // Cross-implementation vector, asserted verbatim by the PHP counter's
+        // selftest (php/claim.php) — a drift here is a protocol break.
+        assert_eq!(
+            wire,
+            "387c45ee5457f5e622d1b35c7c1afc302097a81880416bdab8352a2fa7345d79"
+        );
+        assert_eq!(
+            key,
+            "836bf706f07466e2c098e17d2521650949555f5054bcb3d398fd93547b050c4b"
         );
     }
 

@@ -2,16 +2,20 @@
 //!
 //! One small server, one small truth: a **claim code is a bearer secret whose
 //! single-use property is a server-side state flip**, not a property of the
-//! code itself. The vault maps `sha256(code) → entry`; a claim atomically flips
-//! `unclaimed → claimed`, signs an **annual, single-seat** token binding the
-//! caller's opaque machine fingerprint, persists the flip durably, and only
-//! then discloses the token. Re-claiming from the *same* machine re-issues the
-//! same license (self-service recovery of a lost token — the expiry is stored,
-//! never extended); any other machine gets an announced refusal.
+//! code itself. The vault maps `vault_key(sha256(code)) → entry` — the key is
+//! a *second*, domain-separated hash over the wire value (see
+//! [`ccos_enterprise_governance::claim::vault_key`]); a claim re-derives the
+//! key from the received hash, atomically flips `unclaimed → claimed`, signs
+//! an **annual, single-seat** token binding the caller's opaque machine
+//! fingerprint, persists the flip durably, and only then discloses the token.
+//! Re-claiming from the *same* machine re-issues the same license
+//! (self-service recovery of a lost token — the expiry is stored, never
+//! extended); any other machine gets an announced refusal.
 //!
 //! What this server can and cannot do, by construction:
-//! - it never sees a claim code (only hashes arrive) — a stolen vault holds
-//!   nothing redeemable;
+//! - it never sees a claim code (only hashes arrive), and the vault stores
+//!   only second-degree hashes — a stolen vault holds nothing redeemable,
+//!   neither codes nor wire hashes the `/claim` endpoint would accept;
 //! - it never learns hardware identity (fingerprints are opaque hashes);
 //! - a compromised counter can refuse service or issue tokens for codes it
 //!   holds, but every issued token is verified by the client against the
@@ -30,14 +34,25 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-/// Vault schema tag, bumped on any breaking shape change.
-pub const VAULT_SCHEMA: &str = "ccos.license.vault/v1";
+/// Vault schema tag, bumped on any breaking shape change. v2: entries are
+/// keyed by `vault_key(code_hash)` (a second, domain-separated hash) instead
+/// of the wire-level `code_hash`, so vault contents cannot be replayed at the
+/// claim endpoint. `ccos-license-admin migrate` upgrades a v1 file in place.
+pub const VAULT_SCHEMA: &str = "ccos.license.vault/v2";
+
+/// The v1 schema tag ([`VAULT_SCHEMA`]'s predecessor) — recognized only by
+/// `ccos-license-admin migrate`; the server refuses it (fail closed).
+pub const VAULT_SCHEMA_V1: &str = "ccos.license.vault/v1";
 
 /// Hard caps on what we will read from a socket — the whole request is two
 /// hashes in a small JSON body, so anything bigger is not a client.
 const MAX_HEAD: usize = 8 * 1024;
 const MAX_BODY: usize = 4 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ceiling on one whole request (head + body), whatever the drip rate — the
+/// per-read timeout alone would let a client that sends one byte every few
+/// seconds hold this sequential server for hours.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 
 // ── The vault ────────────────────────────────────────────────────────
 
@@ -80,7 +95,8 @@ pub struct Entry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vault {
     pub schema: String,
-    /// `sha256(code) → entry`.
+    /// `vault_key(sha256(code)) → entry` — see
+    /// [`ccos_enterprise_governance::claim::vault_key`].
     pub entries: BTreeMap<String, Entry>,
 }
 
@@ -110,8 +126,33 @@ impl Vault {
     }
 
     /// Load from `path`; a missing file is an explicit error (the admin CLI
-    /// creates vaults — the server never conjures one into being).
+    /// creates vaults — the server never conjures one into being), and so is
+    /// any schema other than [`VAULT_SCHEMA`] (fail closed: under an older
+    /// schema the keys mean something else, and silently missing every lookup
+    /// would refuse real customers while looking healthy).
     pub fn load(path: &Path) -> io::Result<Self> {
+        let vault = Self::load_any_schema(path)?;
+        if vault.schema != VAULT_SCHEMA {
+            let hint = if vault.schema == VAULT_SCHEMA_V1 {
+                " — upgrade it with `ccos-license-admin --vault <path> migrate`"
+            } else {
+                ""
+            };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "vault schema is '{}', this build expects '{VAULT_SCHEMA}'{hint}",
+                    vault.schema
+                ),
+            ));
+        }
+        Ok(vault)
+    }
+
+    /// Load without the schema gate — for `ccos-license-admin migrate`, which
+    /// exists precisely to read the previous schema. Everything else goes
+    /// through [`Vault::load`].
+    pub fn load_any_schema(path: &Path) -> io::Result<Self> {
         let text = std::fs::read_to_string(path)?;
         serde_json::from_str(&text)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("vault: {e}")))
@@ -125,17 +166,16 @@ impl Vault {
     }
 
     /// The claim state machine (pure — persistence and signing are the
-    /// caller's). Returns the expiry to sign for, or the refusal.
+    /// caller's). Takes the **wire-level** `code_hash` and re-derives the
+    /// vault key from it. Returns the expiry to sign for, or the refusal.
     pub fn claim(
         &mut self,
         code_hash: &str,
         machine: &str,
         now: u64,
     ) -> Result<(String, Option<u64>), Refusal> {
-        let entry = self
-            .entries
-            .get_mut(code_hash)
-            .ok_or(Refusal::UnknownCode)?;
+        let key = ccos_enterprise_governance::claim::vault_key(code_hash);
+        let entry = self.entries.get_mut(&key).ok_or(Refusal::UnknownCode)?;
         match entry.status {
             Status::Revoked => Err(Refusal::Revoked),
             Status::Claimed => {
@@ -149,7 +189,11 @@ impl Vault {
                 }
             }
             Status::Unclaimed => {
-                let exp = entry.days.map(|d| now + d * 86_400);
+                // Saturating: a vendor-side `days` typo must not wrap the
+                // expiry into the past (which release-mode `+` would allow).
+                let exp = entry
+                    .days
+                    .map(|d| now.saturating_add(d.saturating_mul(86_400)));
                 entry.status = Status::Claimed;
                 entry.claimed_unix = Some(now);
                 entry.exp_unix = exp;
@@ -291,15 +335,22 @@ fn err_body(msg: &str) -> String {
 // ── The zero-framework HTTP/1.1 loop ─────────────────────────────────
 
 /// Serve claims forever on `listener`. Connections are handled sequentially
-/// with hard read/write timeouts — at one small request per *sale*, latency
-/// fairness is not a design pressure, and no thread pool means no thread-pool
-/// bugs. TLS is the reverse proxy's job.
+/// with hard read/write timeouts AND a whole-request deadline — at one small
+/// request per *sale*, latency fairness is not a design pressure, and no
+/// thread pool means no thread-pool bugs; the deadline keeps one slow client
+/// from parking the queue. TLS is the reverse proxy's job.
 pub fn serve(listener: TcpListener, mut counter: Counter) -> io::Result<()> {
     for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
+        let Ok(mut stream) = stream else {
+            // Transient accept failure (EMFILE, ECONNABORTED, …): don't spin
+            // hot on the error — breathe, then keep serving.
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        };
         let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-        let (status, body) = match read_request(&mut stream) {
+        let deadline = Instant::now() + REQUEST_DEADLINE;
+        let (status, body) = match read_request(&mut stream, deadline) {
             Some((method, path, body)) => {
                 counter.handle(&method, &path, &body, ccos_core::license::now_unix())
             }
@@ -311,13 +362,16 @@ pub fn serve(listener: TcpListener, mut counter: Counter) -> io::Result<()> {
 }
 
 /// Parse one HTTP/1.1 request off the socket: request line, `Content-Length`,
-/// body. `None` on anything oversized or malformed — we answer 400 and move on.
-fn read_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
+/// body. `None` on anything oversized, malformed, or still incomplete at
+/// `deadline` — we answer 400 and move on. The deadline is what bounds a
+/// drip-feeding client: per-read timeouts alone never fire as long as bytes
+/// keep trickling in.
+fn read_request(stream: &mut TcpStream, deadline: Instant) -> Option<(String, String, String)> {
     let mut head = Vec::with_capacity(1024);
     let mut byte = [0u8; 1];
     // Read byte-wise until the blank line; the head is tiny and bounded.
     while !head.ends_with(b"\r\n\r\n") {
-        if head.len() >= MAX_HEAD {
+        if head.len() >= MAX_HEAD || Instant::now() >= deadline {
             return None;
         }
         match stream.read(&mut byte) {
@@ -339,7 +393,17 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
         return None;
     }
     let mut body = vec![0u8; content_length];
-    stream.read_exact(&mut body).ok()?;
+    let mut read = 0;
+    while read < body.len() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        match stream.read(&mut body[read..]) {
+            Ok(0) => return None, // EOF before the announced length
+            Ok(n) => read += n,
+            Err(_) => return None,
+        }
+    }
     Some((method, path, String::from_utf8_lossy(&body).into_owned()))
 }
 
@@ -373,12 +437,15 @@ mod tests {
     const NOW: u64 = 1_000_000;
     const SEED: [u8; 32] = [7u8; 32];
 
+    /// A vault holding one unclaimed seat; returns the **wire-level** code
+    /// hash (what a client sends) — the vault itself is keyed one hash
+    /// further, by `vault_key(hash)`.
     fn vault_with_code() -> (Vault, String) {
         let code = ccos_enterprise_governance::claim::code_from_entropy(&[42; 16]);
         let hash = ccos_enterprise_governance::claim::code_hash(&code);
         let mut vault = Vault::new();
         vault.entries.insert(
-            hash.clone(),
+            ccos_enterprise_governance::claim::vault_key(&hash),
             Entry {
                 licensee: "Acme Corp".into(),
                 label: Some("invoice-001".into()),
@@ -400,6 +467,7 @@ mod tests {
     #[test]
     fn claim_state_machine_single_use_reissue_and_refusals() {
         let (mut vault, hash) = vault_with_code();
+        let key = ccos_enterprise_governance::claim::vault_key(&hash);
 
         // Unknown code.
         assert_eq!(
@@ -410,7 +478,7 @@ mod tests {
         let (licensee, exp) = vault.claim(&hash, &fp("m1"), NOW).expect("issues");
         assert_eq!(licensee, "Acme Corp");
         assert_eq!(exp, Some(NOW + 365 * 86_400));
-        let e = &vault.entries[&hash];
+        let e = &vault.entries[&key];
         assert_eq!(e.status, Status::Claimed);
         assert_eq!(e.machine.as_deref(), Some(fp("m1").as_str()));
 
@@ -424,14 +492,43 @@ mod tests {
         assert_eq!(vault.claim(&hash, &fp("m2"), NOW), Err(Refusal::SeatTaken));
 
         // Revocation wins over everything.
-        vault.entries.get_mut(&hash).unwrap().status = Status::Revoked;
+        vault.entries.get_mut(&key).unwrap().status = Status::Revoked;
         assert_eq!(vault.claim(&hash, &fp("m1"), NOW), Err(Refusal::Revoked));
+    }
+
+    #[test]
+    fn a_stolen_vault_key_cannot_be_replayed_as_a_claim() {
+        // THE property the v2 vault exists for: presenting a vault KEY (what
+        // a leaked vault.json contains) at the wire is an unknown code — only
+        // the wire-level code hash, which the vault does not store, redeems.
+        let (mut vault, hash) = vault_with_code();
+        let leaked_key = vault.entries.keys().next().unwrap().clone();
+        assert_ne!(leaked_key, hash, "the vault never stores the wire hash");
+        assert_eq!(
+            vault.claim(&leaked_key, &fp("thief"), NOW),
+            Err(Refusal::UnknownCode),
+            "vault contents are not redeemable"
+        );
+        // The honest wire hash still redeems.
+        assert!(vault.claim(&hash, &fp("m1"), NOW).is_ok());
+    }
+
+    #[test]
+    fn absurd_day_counts_saturate_instead_of_wrapping_into_the_past() {
+        let (mut vault, hash) = vault_with_code();
+        let key = ccos_enterprise_governance::claim::vault_key(&hash);
+        vault.entries.get_mut(&key).unwrap().days = Some(u64::MAX / 4);
+        let (_, exp) = vault.claim(&hash, &fp("m1"), NOW).expect("issues");
+        let exp = exp.expect("an expiry exists");
+        assert!(exp >= NOW, "never earlier than the claim instant");
+        assert_eq!(exp, u64::MAX, "saturated, not wrapped");
     }
 
     #[test]
     fn perpetual_codes_issue_tokens_without_expiry() {
         let (mut vault, hash) = vault_with_code();
-        vault.entries.get_mut(&hash).unwrap().days = None;
+        let key = ccos_enterprise_governance::claim::vault_key(&hash);
+        vault.entries.get_mut(&key).unwrap().days = None;
         let (_, exp) = vault.claim(&hash, &fp("m1"), NOW).unwrap();
         assert_eq!(exp, None);
     }
@@ -486,7 +583,8 @@ mod tests {
 
         // The flip reached disk before the token was disclosed.
         let on_disk = Vault::load(&dir.join("vault.json")).unwrap();
-        assert_eq!(on_disk.entries[&hash].status, Status::Claimed);
+        let key = ccos_enterprise_governance::claim::vault_key(&hash);
+        assert_eq!(on_disk.entries[&key].status, Status::Claimed);
 
         // Second machine → 410; same machine → 200 re-issue.
         let (status, _) = c.handle("POST", "/claim", &claim_body(&hash, &fp("m2")), NOW);
@@ -532,6 +630,56 @@ mod tests {
             429
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vault_schema_gate_fails_closed() {
+        let dir = tmp("schema");
+        let path = dir.join("vault.json");
+        let mut v = Vault::new();
+        v.schema = VAULT_SCHEMA_V1.into();
+        v.save(&path).unwrap();
+        let err = Vault::load(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("migrate"),
+            "the v1 refusal points at the fix: {err}"
+        );
+        // The migration path can still read it.
+        assert_eq!(
+            Vault::load_any_schema(&path).unwrap().schema,
+            VAULT_SCHEMA_V1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drip_feeding_client_is_cut_at_the_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).unwrap();
+            // One byte every 20 ms — each read succeeds, so per-read timeouts
+            // never fire; only the whole-request deadline can end this.
+            for _ in 0..100 {
+                if s.write_all(b"X").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+        let started = Instant::now();
+        let out = read_request(&mut stream, Instant::now() + Duration::from_millis(300));
+        assert!(out.is_none(), "an unfinished request is refused");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cut at the deadline, not at the drip rate: {:?}",
+            started.elapsed()
+        );
+        drop(stream);
+        let _ = client.join();
     }
 
     #[test]

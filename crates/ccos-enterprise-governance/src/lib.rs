@@ -54,7 +54,12 @@ pub mod b64url {
         out
     }
 
-    /// Inverse of [`encode`]. `None` on any non-alphabet byte or truncated group.
+    /// Inverse of [`encode`]. `None` on any non-alphabet byte, a truncated
+    /// group, or non-zero padding bits in the final group — every byte string
+    /// has exactly ONE accepted encoding, so signed artifacts cannot be
+    /// re-encoded into a different string that decodes identically (which
+    /// would, for example, change a token's `token_sha256` without breaking
+    /// its signature).
     pub fn decode(s: &str) -> Option<Vec<u8>> {
         fn val(b: u8) -> Option<u32> {
             match b {
@@ -75,6 +80,15 @@ pub mod b64url {
             let mut n: u32 = 0;
             for (i, &c) in chunk.iter().enumerate() {
                 n |= val(c)? << (18 - 6 * i);
+            }
+            // Canonicality: the bits below the carried bytes must be zero.
+            let pad_mask = match chunk.len() {
+                2 => 0xF000, // 1 byte carried in 12 bits → 4 padding bits
+                3 => 0xC0,   // 2 bytes carried in 18 bits → 2 padding bits
+                _ => 0,
+            };
+            if n & pad_mask != 0 {
+                return None;
             }
             out.push((n >> 16) as u8);
             if chunk.len() > 2 {
@@ -103,5 +117,28 @@ mod b64url_tests {
     fn rejects_bad_alphabet_and_truncation() {
         assert!(b64url::decode("a+b/").is_none());
         assert!(b64url::decode("a").is_none());
+    }
+
+    #[test]
+    fn rejects_non_canonical_padding_bits() {
+        // "AA" is the one canonical encoding of [0]; "AB".."AP" decode to the
+        // same byte under a lax decoder — exactly the malleability we refuse.
+        assert_eq!(b64url::decode("AA").as_deref(), Some(&[0u8][..]));
+        assert!(
+            b64url::decode("AB").is_none(),
+            "4 padding bits must be zero"
+        );
+        assert_eq!(b64url::decode("AAA").as_deref(), Some(&[0u8, 0][..]));
+        assert!(
+            b64url::decode("AAB").is_none(),
+            "2 padding bits must be zero"
+        );
+        // Every canonical encoding of every 1- and 2-byte value still decodes.
+        for b in 0u8..=255 {
+            let one = b64url::encode(&[b]);
+            assert_eq!(b64url::decode(&one).as_deref(), Some(&[b][..]));
+            let two = b64url::encode(&[b, 0xA7]);
+            assert_eq!(b64url::decode(&two).as_deref(), Some(&[b, 0xA7][..]));
+        }
     }
 }

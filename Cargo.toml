@@ -12,6 +12,7 @@ members = [
     "crates/ccos-enterprise-qpages",
     "crates/ccos-enterprise-admin",
     "tools/ccos-license-server",
+    "tests/ccos-enterprise-conformance",
 ]
 
 [workspace.package]

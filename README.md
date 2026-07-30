@@ -35,5 +35,6 @@ git `rev` before any release; never `branch = "main"`).
 | `ccos-enterprise-qpages` | advanced Q-Page variant registry (policy-gated) |
 | `ccos-enterprise-admin` | administrative action validation + audit |
 | `tools/ccos-license-server` | vendor claim counter (HTTP/1.1) + vault admin CLI + PHP shared-hosting flow |
+| `tests/ccos-enterprise-conformance` | the composed product path end to end: governed request admission, tenant isolation, the Hermes tool-catalogue contract, adversarial scenarios |
 
 Sole human maintainer: **ZEKRITI Tarek** (see GOVERNANCE.md).

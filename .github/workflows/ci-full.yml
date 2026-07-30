@@ -34,7 +34,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Core is an exact dependency (never a copy, never a branch)
         run: |
-          ! grep -rn 'branch\s*=' Cargo.toml crates/*/Cargo.toml tools/*/Cargo.toml
+          # Only non-comment occurrences count: the manifest legitimately
+          # *documents* the "never `branch = …`" rule in a comment, and a
+          # naive grep would trip on its own guardrail.
+          ! grep -rnE '^[^#]*branch\s*=' Cargo.toml crates/*/Cargo.toml tools/*/Cargo.toml
           grep -rn 'ccos-core' Cargo.toml | head -3
       - name: no duplicated Core sources
         run: |

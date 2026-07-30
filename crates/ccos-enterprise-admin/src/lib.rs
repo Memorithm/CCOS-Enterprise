@@ -31,7 +31,13 @@ pub fn validate(a: &AdminAction) -> Result<(), String> {
     if a.actor.is_empty() || a.action.is_empty() || a.target.is_empty() {
         return Err("actor, action and target are required".into());
     }
-    if JUSTIFICATION_REQUIRED.contains(&a.action.as_str()) && a.justification.is_none() {
+    // A justification must be *written*: `Some("")` or whitespace is the same
+    // audit hole as `None`.
+    let justified = a
+        .justification
+        .as_deref()
+        .is_some_and(|j| !j.trim().is_empty());
+    if JUSTIFICATION_REQUIRED.contains(&a.action.as_str()) && !justified {
         return Err(format!("'{}' requires a written justification", a.action));
     }
     Ok(())
@@ -52,6 +58,24 @@ mod tests {
         };
         assert!(validate(&a).is_err());
         a.justification = Some("contract terminated 2026-07-01".into());
+        assert!(validate(&a).is_ok());
+    }
+
+    #[test]
+    fn blank_justification_is_no_justification() {
+        let mut a = AdminAction {
+            actor: "root".into(),
+            action: "license.revoke".into(),
+            target: "lic-0001".into(),
+            unix_time: 0,
+            justification: Some(String::new()),
+        };
+        assert!(validate(&a).is_err(), "empty string is not written");
+        a.justification = Some("  \t ".into());
+        assert!(validate(&a).is_err(), "whitespace is not written");
+        // Non-sensitive actions still pass without one.
+        a.action = "tenant.rename".into();
+        a.justification = None;
         assert!(validate(&a).is_ok());
     }
 }

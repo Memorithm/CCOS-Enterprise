@@ -19,11 +19,15 @@ impl CounterRegistry {
     pub const MAX_SERIES: usize = 4096;
 
     pub fn inc(&mut self, name: &str, by: u64) {
+        // Saturating adds: a counter pinned at `u64::MAX` is deterministic in
+        // release and debug alike, where a wrapping/panicking add is neither.
         if self.counters.len() >= Self::MAX_SERIES && !self.counters.contains_key(name) {
-            *self.counters.entry("overflow".into()).or_default() += by;
+            let c = self.counters.entry("overflow".into()).or_default();
+            *c = c.saturating_add(by);
             return;
         }
-        *self.counters.entry(name.into()).or_default() += by;
+        let c = self.counters.entry(name.into()).or_default();
+        *c = c.saturating_add(by);
     }
 
     pub fn get(&self, name: &str) -> u64 {
@@ -53,5 +57,15 @@ mod tests {
             "overflow folded"
         );
         assert!(r.get("overflow") >= 10);
+    }
+
+    #[test]
+    fn counters_saturate_instead_of_wrapping() {
+        let mut r = CounterRegistry::default();
+        r.inc("hot", u64::MAX - 1);
+        r.inc("hot", 5);
+        assert_eq!(r.get("hot"), u64::MAX, "pinned at MAX, never wrapped");
+        r.inc("hot", 1);
+        assert_eq!(r.get("hot"), u64::MAX, "stays pinned");
     }
 }

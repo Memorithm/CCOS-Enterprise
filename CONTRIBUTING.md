@@ -110,6 +110,14 @@ These are enforced by CI greps and tests; don't regress them.
   every PR range and the whole history nightly;
   `scripts/install-git-hooks.sh` installs the local hooks that catch a
   violation before it leaves your machine.
+- **Merging a pull request:** use a **merge commit** (the "Create a merge
+  commit" button) or merge locally. Merge commits are exempt from the
+  identity rules — GitHub stamps them with the clicking account and
+  `GitHub <noreply@github.com>`, which nobody can set to the maintainer —
+  but their *message* is still scanned. **Squash merge from the web UI
+  fails the policy** by design: it produces an ordinary commit committed by
+  `GitHub`. Squash locally if you want a single commit. A pull-request body
+  containing an AI-attribution footer must never become a commit message.
 
 ## Pull-request checklist
 

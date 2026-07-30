@@ -11,6 +11,20 @@
 # Ollama, …) — the project ships provider adapters (mission §30). Attribution
 # is forbidden, interoperability is not.
 #
+# MERGE COMMITS are exempt from the IDENTITY rules only. GitHub's "Merge pull
+# request" button stamps the clicking account as author and
+# `GitHub <noreply@github.com>` as committer — identities no contributor can
+# set — so enforcing them there makes the policy unsatisfiable for any merge
+# performed through the web UI, and permanently reddens main. A merge commit
+# also carries no content of its own: every commit it merges is checked on its
+# own line, so nothing escapes review. Their MESSAGE is still scanned, which is
+# what matters — a merge message is hand-editable, and a squash merge can carry
+# a whole pull-request body.
+#
+# Squash merges are NOT exempt (they produce ordinary single-parent commits):
+# merging that way from the web UI writes `GitHub` as committer and will fail
+# here by design. Merge with a merge commit, or merge locally.
+#
 # Usage:
 #   scripts/check-author-policy.sh           # check HEAD commit
 #   scripts/check-author-policy.sh A..B      # check a commit range
@@ -25,24 +39,33 @@ TRAILER_RE='^(co-?authored-by|co-developed-by|contributed-by|generated-by|assist
 ATTRIBUTION_RE='generated (by|with) (claude|chatgpt|codex|copilot|gemini|kimi|opencode|ai)|ai[- ]generated|ai[- ]assisted|written by (claude|chatgpt|codex|kimi|ai)'
 
 fail=0
-while IFS=$'\t' read -r h an ae cn ce; do
-  if [ "$an" != "$EXPECTED_NAME" ] || [ "$cn" != "$EXPECTED_NAME" ]; then
-    echo "::error::$h author/committer is '$an'/'$cn', expected '$EXPECTED_NAME'"
-    fail=1
+while IFS=$'\t' read -r h an ae cn ce parents; do
+  # More than one parent = a merge commit (see the header): identity exempt,
+  # message still enforced.
+  case "$parents" in
+    *' '*) is_merge=1 ;;
+    *) is_merge=0 ;;
+  esac
+  if [ "$is_merge" -eq 0 ]; then
+    if [ "$an" != "$EXPECTED_NAME" ] || [ "$cn" != "$EXPECTED_NAME" ]; then
+      echo "::error::$h author/committer is '$an'/'$cn', expected '$EXPECTED_NAME'"
+      fail=1
+    fi
+    if echo "$an$ae$cn$ce" | grep -Eiq "$IDENTITY_RE"; then
+      echo "::error::$h AI/bot identity detected"
+      fail=1
+    fi
   fi
-  if echo "$an$ae$cn$ce" | grep -Eiq "$IDENTITY_RE"; then
-    echo "::error::$h AI/bot identity detected"
-    fail=1
-  fi
-  if git log -1 --format='%B' "$h" | grep -Eiq "$TRAILER_RE"; then
+  message=$(git log -1 --format='%B' "$h")
+  if echo "$message" | grep -Eiq "$TRAILER_RE"; then
     echo "::error::$h forbidden contribution trailer"
     fail=1
   fi
-  if git log -1 --format='%B' "$h" | grep -Eiq "$ATTRIBUTION_RE"; then
+  if echo "$message" | grep -Eiq "$ATTRIBUTION_RE"; then
     echo "::error::$h AI attribution phrase in commit message"
     fail=1
   fi
-done < <(git log --format='%H%x09%an%x09%ae%x09%cn%x09%ce' "$RANGE")
+done < <(git log --format='%H%x09%an%x09%ae%x09%cn%x09%ce%x09%P' "$RANGE")
 
 if [ "$fail" -ne 0 ]; then
   echo "AUTHOR POLICY: FAILED"

@@ -32,6 +32,16 @@ jobs:
         run: cargo test -p ccos-enterprise-governance --all-features --release
       - name: license server integration
         run: cargo test -p ccos-license-server --release
+      # The composed product path — the behaviour that only exists once the
+      # crates are wired together (see tests/ccos-enterprise-conformance).
+      - name: Hermes/OpenClaw tool-catalogue contract
+        run: cargo test -p ccos-enterprise-conformance --test boundary_contract --release
+      - name: governed request path (identity → tenancy → authz → policy → boundary → audit)
+        run: cargo test -p ccos-enterprise-conformance --test governed_path --release
+      - name: tenant isolation + cross-tenant leakage + concurrency
+        run: cargo test -p ccos-enterprise-conformance --test isolation --release
+      - name: adversarial (escalation, quota abuse, forged restore, admin trail)
+        run: cargo test -p ccos-enterprise-conformance --test adversarial --release
 
   conformance:
     name: Core dependency conformance
@@ -70,4 +80,13 @@ jobs:
   # budget · model governance · backup/restore · migration · rollback ·
   # Hermes contract · OpenClaw contract · secure MCP · load · concurrency ·
   # backpressure · failure recovery · cognitive isolation · agent identity.
-  # Each lands as a named job with failing-first tests as the crates grow.
+  #
+  # Covered by the contract job above (tests/ccos-enterprise-conformance):
+  # authentication · agent identity · RBAC · tenant isolation · cross-tenant
+  # leakage · quota · budget · model governance · restore gates · Hermes
+  # tool-catalogue contract · concurrency · determinism under replay.
+  #
+  # Still to land as the crates grow: encryption · key rotation · backup
+  # round-trip against real snapshots · schema migration · rollback ·
+  # OpenClaw contract · secure MCP transport · load · backpressure ·
+  # failure recovery · cognitive isolation.

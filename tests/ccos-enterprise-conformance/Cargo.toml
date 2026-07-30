@@ -1,0 +1,19 @@
+[package]
+name = "ccos-enterprise-conformance"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The composed Enterprise product path, exercised end to end. The individual crates own their unit tests; this package owns the behaviour that only exists once they are wired together."
+
+[dependencies]
+ccos-enterprise-auth = { path = "../../crates/ccos-enterprise-auth" }
+ccos-enterprise-rbac = { path = "../../crates/ccos-enterprise-rbac" }
+ccos-enterprise-tenancy = { path = "../../crates/ccos-enterprise-tenancy" }
+ccos-enterprise-policy = { path = "../../crates/ccos-enterprise-policy" }
+ccos-enterprise-gateway = { path = "../../crates/ccos-enterprise-gateway" }
+ccos-enterprise-observability = { path = "../../crates/ccos-enterprise-observability" }
+ccos-enterprise-backup = { path = "../../crates/ccos-enterprise-backup" }
+ccos-enterprise-qpages = { path = "../../crates/ccos-enterprise-qpages" }
+ccos-enterprise-admin = { path = "../../crates/ccos-enterprise-admin" }

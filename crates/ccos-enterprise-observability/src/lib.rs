@@ -37,6 +37,17 @@ impl CounterRegistry {
     pub fn series(&self) -> usize {
         self.counters.len()
     }
+
+    /// A deterministic snapshot for exporters (Prometheus/OTel at the gateway)
+    /// and for audit diffing: name/value pairs in `BTreeMap` order, identical
+    /// for identical histories. Without this the registry's ordering guarantee
+    /// is unobservable — nothing could read the counters back out.
+    pub fn export(&self) -> Vec<(&str, u64)> {
+        self.counters
+            .iter()
+            .map(|(name, value)| (name.as_str(), *value))
+            .collect()
+    }
 }
 
 #[cfg(test)]

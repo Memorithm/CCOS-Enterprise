@@ -85,7 +85,7 @@ fn the_exposed_catalogue_still_traverses() {
         "policy.get",
         "audit.query",
         "system.health",
-        // The crate's own convention for Core tools.
+        // The `ccos.` alias this crate shipped with stays accepted.
         "ccos.recall",
     ] {
         assert_eq!(
@@ -96,32 +96,64 @@ fn the_exposed_catalogue_still_traverses() {
     }
 }
 
-/// Neighbours of a forbidden entry are not collateral damage. The docs name
-/// `code.execute` and `repository.modify` precisely, not whole namespaces,
-/// so read-only siblings must survive — widening them to prefixes would be a
-/// product decision, not a boundary repair.
+/// The exposed catalogue is a published constant too, so widening the
+/// surface is a visible edit rather than a side effect.
 #[test]
-fn exactly_named_forbidden_tools_do_not_swallow_their_namespace() {
+fn the_published_catalogue_matches_the_documented_classes() {
+    use ccos_enterprise_gateway::{ALLOWED_PREFIXES, ALLOWED_TOOLS};
+
+    for class in ["memory.", "context.", "policy.", "audit."] {
+        assert!(
+            ALLOWED_PREFIXES.contains(&class),
+            "'{class}' is documented as exposed but is not in ALLOWED_PREFIXES"
+        );
+    }
+    assert!(ALLOWED_TOOLS.contains(&"system.health"));
+    // `system.` is one exposed tool, not an open namespace.
+    assert!(!ALLOWED_PREFIXES.contains(&"system."));
+    // No entry may appear on both sides of the boundary.
+    use ccos_enterprise_gateway::{FORBIDDEN_PREFIXES, FORBIDDEN_TOOLS};
+    for allowed in ALLOWED_PREFIXES {
+        assert!(
+            !FORBIDDEN_PREFIXES.contains(allowed),
+            "{allowed} is on both lists"
+        );
+    }
+    for allowed in ALLOWED_TOOLS {
+        assert!(
+            !FORBIDDEN_TOOLS.contains(allowed),
+            "{allowed} is on both lists"
+        );
+    }
+}
+
+/// Deny by default: an unlisted tool does not traverse. But an omission is
+/// not a violation, and the audit trail must let an operator tell them
+/// apart — "nobody exposed this yet" is a catalogue question, "this is
+/// `shell.exec`" is a boundary question.
+#[test]
+fn unlisted_tools_are_refused_as_omissions_not_violations() {
+    // Neighbours of an exactly-named forbidden entry: the docs name
+    // `code.execute` and `repository.modify` precisely, not whole namespaces,
+    // so these are not boundary violations — they are simply unlisted.
     for tool in [
         "code.read",
         "code.lint",
         "repository.read",
         "repository.list",
-    ] {
-        assert_eq!(
-            classify(&req(tool)),
-            Disposition::Forward,
-            "'{tool}' is not the forbidden entry"
-        );
-    }
-    // …and words that merely start like a forbidden namespace are untouched.
-    for tool in [
+        // Words that merely start like a forbidden namespace, likewise.
         "selfcare.report",
         "shellfish.count",
         "patchwork.list",
         "forget.nothing",
     ] {
-        assert_eq!(classify(&req(tool)), Disposition::Forward, "'{tool}'");
+        let Disposition::Reject(why) = classify(&req(tool)) else {
+            panic!("'{tool}' is not in the catalogue and must not traverse");
+        };
+        assert!(
+            why.contains("not in the Enterprise catalogue"),
+            "'{tool}' is an omission, not a boundary violation: {why}"
+        );
     }
 }
 

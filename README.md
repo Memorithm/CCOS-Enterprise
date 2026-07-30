@@ -15,8 +15,13 @@ git `rev` before any release; never `branch = "main"`).
 - **Never** contains or depends on: `ccos-rsi`, `forge-core`, `ccos-forge`,
   recursive self-improvement, autonomous patch promotion, generated-code
   execution, self-modification, or CCOS Research Lab.
-- Research namespaces (`rsi.*`, `forge.*`, `slha.*`, `octa.*`) are rejected at
-  the gateway (`ccos-enterprise-gateway`).
+- The gateway (`ccos-enterprise-gateway`) is an **allowlist**: a tool traverses
+  only if it is in the exposed catalogue (`memory.*`, `context.*`, `policy.*`,
+  `audit.*`, `system.health`; `ccos.*` accepted as an alias). Research
+  namespaces (`rsi.*`, `forge.*`, `slha.*`, `octa.*`) and the capabilities the
+  profile refuses outright (`patch.*`, `shell.*`, `self.*`, `code.execute`,
+  `repository.modify`) are rejected ahead of it, and no privilege reaches past
+  either — see `docs/HERMES_INTEGRATION.md`.
 - Advanced Q-Page variants are **policy-activated per tenant**
   (`ccos-enterprise-qpages`); Core's standard primitives are untouched.
 

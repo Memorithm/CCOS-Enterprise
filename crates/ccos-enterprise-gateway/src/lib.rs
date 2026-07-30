@@ -39,27 +39,52 @@ pub const FORBIDDEN_PREFIXES: &[&str] = &[
 
 /// Individually named tools outside the boundary, matched exactly.
 /// `docs/HERMES_INTEGRATION.md` names these two precisely rather than whole
-/// namespaces, so read-only siblings (`code.read`, `repository.read`) are
-/// unaffected — widening them to prefixes would be a product decision, not a
-/// boundary repair.
+/// namespaces, so a sibling like `code.read` is not a boundary *violation* —
+/// it is simply not in the exposed catalogue, and [`classify`] says so with a
+/// different refusal. Widening these to whole namespaces would be a product
+/// decision, not a boundary repair.
 pub const FORBIDDEN_TOOLS: &[&str] = &["code.execute", "repository.modify"];
 
-/// Namespace policy: Core tools (`ccos.*`, `memory.*`, `context.*`, `policy.*`,
-/// `audit.*`, `system.health`) are forwardable; everything in
-/// [`FORBIDDEN_PREFIXES`] or [`FORBIDDEN_TOOLS`] is rejected at the Enterprise
-/// boundary, no matter how privileged the caller.
+/// The **exposed catalogue**: the tool classes Enterprise offers toward Core
+/// (`docs/HERMES_INTEGRATION.md`). Anything not named here does not traverse.
+///
+/// Names are **capability classes**, not provenance: the prefix says what a
+/// tool touches, which is what the authorization layer keys permissions on
+/// (`memory.recall` needs `memory.read`). Core itself exposes bare
+/// `recall`/`ingest` over MCP, so the gateway is deliberately a translation
+/// boundary — that is what lets Enterprise pin its surface, so a Core upgrade
+/// cannot widen it silently.
+///
+/// `ccos.` is kept as an accepted alias for the catalogue this crate shipped
+/// with, so nothing that already speaks it breaks; class names are canonical
+/// for anything new.
+pub const ALLOWED_PREFIXES: &[&str] = &["memory.", "context.", "policy.", "audit.", "ccos."];
+
+/// Individually exposed tools, matched exactly — `system.health` is one tool,
+/// not an open `system.` namespace.
+pub const ALLOWED_TOOLS: &[&str] = &["system.health"];
+
+/// Classify a fully qualified request against the Enterprise boundary.
+///
+/// **Deny by default**, matching the posture of every other gate in the
+/// product (unknown roles grant nothing; unlisted models are denied): a tool
+/// traverses only if it is in [`ALLOWED_PREFIXES`] or [`ALLOWED_TOOLS`].
+/// The refusals are distinguishable on purpose —
+///
+/// - *outside the Enterprise boundary* — [`FORBIDDEN_PREFIXES`] /
+///   [`FORBIDDEN_TOOLS`]: a capability the product must never carry, checked
+///   first so it is reported as a boundary violation even if some future
+///   catalogue edit were to also match it;
+/// - *not in the Enterprise catalogue* — merely unlisted: unknown, perhaps a
+///   Core tool nobody has exposed yet. Refused just as firmly, but it is an
+///   omission, not a violation, and an operator reading the audit trail
+///   should be able to tell the two apart.
 ///
 /// The check is deliberately defensive: a tool name that is empty or carries
 /// whitespace/control bytes is not a canonical name and is rejected outright
 /// (fail closed — the boundary never forwards what it cannot classify), and
 /// matching is case-insensitive so `RSI.x` cannot slip past a case-normalizing
 /// router downstream.
-///
-/// Note this remains a **deny**-list: an unrecognised tool is forwarded. The
-/// documented catalogue (`docs/HERMES_INTEGRATION.md`) describes an allowlist
-/// — turning this into one requires fixing the tool-naming convention first
-/// (the docs say `memory.*`, this crate's examples say `ccos.*`, Core's MCP
-/// server exposes bare `recall`/`ingest`), which is a product decision.
 pub fn classify(req: &GatewayRequest) -> Disposition {
     if req.tool.is_empty()
         || req
@@ -75,6 +100,14 @@ pub fn classify(req: &GatewayRequest) -> Disposition {
     if forbidden {
         return Disposition::Reject(format!(
             "tool namespace '{}' is outside the Enterprise boundary",
+            req.tool
+        ));
+    }
+    let exposed = ALLOWED_PREFIXES.iter().any(|p| lowered.starts_with(p))
+        || ALLOWED_TOOLS.contains(&lowered.as_str());
+    if !exposed {
+        return Disposition::Reject(format!(
+            "tool '{}' is not in the Enterprise catalogue",
             req.tool
         ));
     }
@@ -120,10 +153,40 @@ mod tests {
         for t in ["", " rsi.status", "rsi .status", "ccos.\trecall", "a\nb"] {
             assert!(matches!(classify(&req(t)), Disposition::Reject(_)), "{t:?}");
         }
-        // Legitimate names are untouched — including ones that merely share
-        // letters with a forbidden namespace without the dot boundary.
-        for t in ["ccos.recall", "ccos.qpage.read", "forget.nothing", "octant"] {
+        // Catalogue names are untouched, including the `ccos.` alias.
+        for t in [
+            "ccos.recall",
+            "ccos.qpage.read",
+            "memory.recall",
+            "system.health",
+        ] {
             assert_eq!(classify(&req(t)), Disposition::Forward, "{t}");
         }
+    }
+
+    #[test]
+    fn unlisted_tools_are_refused_but_not_as_boundary_violations() {
+        let req = |tool: &str| GatewayRequest {
+            tenant: "acme".into(),
+            actor: "agent-1".into(),
+            tool: tool.into(),
+            request_id: "r-3".into(),
+        };
+        // Deny by default: merely sharing letters with a namespace, forbidden
+        // or exposed, does not put a tool in the catalogue.
+        for t in ["forget.nothing", "octant", "memoryleak", "systemhealth"] {
+            let Disposition::Reject(why) = classify(&req(t)) else {
+                panic!("{t} is not in the catalogue and must not traverse");
+            };
+            assert!(
+                why.contains("not in the Enterprise catalogue"),
+                "{t}: {why}"
+            );
+        }
+        // …and an omission still reads differently from a violation.
+        let Disposition::Reject(why) = classify(&req("shell.exec")) else {
+            panic!("forbidden tools never traverse");
+        };
+        assert!(why.contains("outside the Enterprise boundary"), "{why}");
     }
 }

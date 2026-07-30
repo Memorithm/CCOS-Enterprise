@@ -45,8 +45,12 @@ jobs:
           tar -xzf gitleaks.tar.gz gitleaks
           ./gitleaks detect --source . --no-banner --redact
           rm -f gitleaks gitleaks.tar.gz
+      # Every line naming one of these capabilities must also say, ON THAT
+      # LINE, that it is refused — so a mention can never read as an
+      # intention. `tests` is scanned too: it holds workspace code, and a
+      # gate that skips a package is a hole in the gate.
       - name: forbidden capability scan (charter §4.2)
         run: |
           ! grep -RniE 'recursive self.improvement|autonomous patch|generated.code execution|self.modification' \
-            --include='*.rs' --include='*.toml' crates tools \
+            --include='*.rs' --include='*.toml' crates tools tests Cargo.toml \
             | grep -v 'never\|forbid\|outside\|reject'

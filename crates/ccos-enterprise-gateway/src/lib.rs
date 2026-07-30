@@ -29,9 +29,10 @@ pub enum Disposition {
 /// Two families, both named by the product documentation:
 /// - Research Lab (`rsi.`, `forge.`, `slha.`, `octa.`) — outside the product
 ///   boundary entirely (README "Product boundary");
-/// - capability namespaces the Enterprise profile forbids by charter §4.2 and
-///   `docs/HERMES_INTEGRATION.md`: autonomous patch promotion (`patch.`),
-///   process execution (`shell.`) and self-modification (`self.`).
+/// - capabilities this profile refuses outright (charter §4.2,
+///   `docs/HERMES_INTEGRATION.md`): autonomous patch promotion — forbidden
+///   (`patch.`); process execution — forbidden (`shell.`); self-modification
+///   — forbidden (`self.`).
 pub const FORBIDDEN_PREFIXES: &[&str] = &[
     "rsi.", "forge.", "slha.", "octa.", "patch.", "shell.", "self.",
 ];

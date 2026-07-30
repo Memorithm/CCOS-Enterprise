@@ -26,21 +26,24 @@ fn req(tool: &str) -> GatewayRequest {
 fn the_forbidden_catalogue_never_traverses() {
     let forbidden = [
         // Research Lab namespaces (README "Product boundary").
-        ("rsi.status", "recursive self-improvement"),
-        ("rsi.propose", "recursive self-improvement"),
+        ("rsi.status", "forbidden: recursive self-improvement"),
+        ("rsi.propose", "forbidden: recursive self-improvement"),
         ("forge.run", "Forge"),
         ("forge.generate", "Forge"),
         ("slha.explain", "Research Lab"),
         ("octa.recall", "Research Lab"),
         // Capabilities charter §4.2 forbids the Enterprise profile.
-        ("patch.apply", "autonomous patch promotion"),
-        ("patch.promote", "autonomous patch promotion"),
+        ("patch.apply", "forbidden: autonomous patch promotion"),
+        ("patch.promote", "forbidden: autonomous patch promotion"),
         ("shell.exec", "process execution"),
         ("shell.spawn", "process execution"),
-        ("code.execute", "generated-code execution"),
-        ("repository.modify", "repository self-modification"),
-        ("self.rewrite", "self-modification"),
-        ("self.improve", "self-modification"),
+        ("code.execute", "forbidden: generated-code execution"),
+        (
+            "repository.modify",
+            "forbidden: repository self-modification",
+        ),
+        ("self.rewrite", "forbidden: self-modification"),
+        ("self.improve", "forbidden: self-modification"),
     ];
 
     for (tool, why) in forbidden {

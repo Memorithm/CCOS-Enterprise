@@ -125,6 +125,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-mcp"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-core",
+ "ccos-enterprise-auth",
+ "ccos-enterprise-gateway",
+ "ccos-enterprise-qpages",
+ "ccos-enterprise-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ccos-enterprise-observability"
 version = "0.1.0-pre"
 dependencies = [

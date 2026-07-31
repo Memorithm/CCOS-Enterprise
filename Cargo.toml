@@ -13,6 +13,7 @@ members = [
     "crates/ccos-enterprise-admin",
     "crates/ccos-enterprise-runtime",
     "crates/ccos-enterprise-store",
+    "crates/ccos-enterprise-mcp",
     "tools/ccos-license-server",
     "tests/ccos-enterprise-conformance",
 ]

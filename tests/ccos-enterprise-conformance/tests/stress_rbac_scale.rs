@@ -671,6 +671,7 @@ fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::PermissionDenied),
@@ -690,6 +691,13 @@ fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
         "role mutation is not even in the justification-required list"
     );
 
+    // The escalated reader now performs the administrative act. A reason is
+    // supplied, because layer 6 demands one for `policy.set` — and supplying
+    // it *sharpens* this finding rather than blunting it. The call is
+    // justified and recorded; the grant that made the call possible is
+    // neither. An auditor reading the trail sees a well-formed administrative
+    // act by a principal who, an hour earlier, could not have performed it,
+    // and nothing anywhere says how that changed.
     let now = request("acme", "bob", "policy.set", "r-after");
     assert_eq!(
         d.admit(Call {
@@ -698,9 +706,15 @@ fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: Some("rotating the model allowlist, ticket 902"),
         }),
         Outcome::Forwarded,
         "DEFECT: the reader is an administrator now, and nothing recorded why"
+    );
+    assert_eq!(
+        d.audit().last().and_then(|r| r.justification.as_deref()),
+        Some("rotating the model allowlist, ticket 902"),
+        "the act is justified — the escalation that permitted it is not"
     );
     assert_eq!(
         d.spent("acme"),
@@ -771,6 +785,7 @@ fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::MalformedRequest("actor".into())),
@@ -785,6 +800,7 @@ fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::MalformedRequest("actor".into())),
@@ -805,6 +821,7 @@ fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
                 model: "claude-opus",
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::MalformedRequest(field.into())),
@@ -1166,6 +1183,7 @@ fn assigning_an_unknown_role_grants_nothing_now_or_later() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::PermissionDenied),
@@ -1215,6 +1233,7 @@ fn authorization_is_keyed_on_the_authenticated_identity_not_the_request() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::PermissionDenied)
@@ -1229,6 +1248,7 @@ fn authorization_is_keyed_on_the_authenticated_identity_not_the_request() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ActorMismatch),
@@ -1262,6 +1282,7 @@ fn authorization_is_keyed_on_the_authenticated_identity_not_the_request() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ActorMismatch),
@@ -1277,6 +1298,7 @@ fn authorization_is_keyed_on_the_authenticated_identity_not_the_request() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::MalformedRequest("actor".into())),
@@ -1293,6 +1315,7 @@ fn authorization_is_keyed_on_the_authenticated_identity_not_the_request() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::TenantNotOwnedByOrg),
@@ -1310,6 +1333,7 @@ fn authorization_is_keyed_on_the_authenticated_identity_not_the_request() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::Unauthenticated),
@@ -1366,6 +1390,7 @@ fn role_grants_are_deployment_global_not_tenant_scoped() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded,
         "an acme grant is honoured inside globex: RBAC is not tenant-scoped"
@@ -1389,6 +1414,7 @@ fn role_grants_are_deployment_global_not_tenant_scoped() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded,
         "DEFECT: a tenant created seconds ago already has alice as a writer"
@@ -1405,6 +1431,7 @@ fn role_grants_are_deployment_global_not_tenant_scoped() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::PermissionDenied),
@@ -1452,6 +1479,7 @@ fn admission_stays_exact_with_fifty_thousand_roles_and_tools() {
                 model: "claude-opus",
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             }),
             Outcome::Forwarded,
             "granted tool {i} refused at scale"
@@ -1470,6 +1498,7 @@ fn admission_stays_exact_with_fifty_thousand_roles_and_tools() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::PermissionDenied),
@@ -1485,6 +1514,7 @@ fn admission_stays_exact_with_fifty_thousand_roles_and_tools() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ToolNotGoverned)

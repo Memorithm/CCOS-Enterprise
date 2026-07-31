@@ -616,6 +616,7 @@ fn unlimited_budget_undercounts_without_bound() {
             model: "m",
             cost_tokens: cost,
             variant: None,
+            justification: None,
         });
         assert_eq!(outcome, Outcome::Forwarded, "call {i} was admitted");
         declared += u128::from(cost);
@@ -707,6 +708,7 @@ fn a_zero_charge_is_allowed_forever_even_when_exhausted() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -721,6 +723,7 @@ fn a_zero_charge_is_allowed_forever_even_when_exhausted() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::BudgetExhausted)
@@ -736,6 +739,7 @@ fn a_zero_charge_is_allowed_forever_even_when_exhausted() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: None,
+            justification: None,
         });
         assert_eq!(
             outcome,
@@ -802,6 +806,7 @@ fn the_ledger_is_private_and_a_live_tenant_is_never_reprovisioned() {
             model: "claude-opus",
             cost_tokens: cost,
             variant: None,
+            justification: None,
         })
     };
 
@@ -887,6 +892,7 @@ fn the_ledger_is_private_and_a_live_tenant_is_never_reprovisioned() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::TenantNotOwnedByOrg),
@@ -1070,6 +1076,7 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
             model,
             cost_tokens: cost,
             variant,
+            justification: None,
         });
 
         match &outcome {
@@ -1164,6 +1171,7 @@ fn refusal_index(r: &Refusal) -> usize {
         Refusal::BudgetExhausted => 7,
         Refusal::ActorMismatch => 8,
         Refusal::TenantNotOwnedByOrg => 9,
+        Refusal::JustificationRequired => 11,
         Refusal::MalformedRequest(_) => 10,
     }
 }
@@ -1200,6 +1208,7 @@ fn the_audit_trail_reconciles_the_ledger() {
                 model: "claude-opus",
                 cost_tokens: cost,
                 variant: None,
+                justification: None,
             }),
             Outcome::Forwarded
         );
@@ -1254,6 +1263,7 @@ fn the_audit_trail_reconciles_the_ledger() {
             model: "claude-opus",
             cost_tokens: 500,
             variant: None,
+            justification: None,
         })
         .refusal()
         .is_some());
@@ -1295,6 +1305,7 @@ fn a_replayed_request_id_is_billed_once() {
                 model: "claude-opus",
                 cost_tokens: 100,
                 variant: None,
+                justification: None,
             }),
             Outcome::Forwarded,
             "replay {i} keeps returning the prior outcome"
@@ -1333,6 +1344,7 @@ fn a_replayed_request_id_is_billed_once() {
             model: "claude-opus",
             cost_tokens: 100,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -1349,6 +1361,7 @@ fn a_replayed_request_id_is_billed_once() {
             model: "claude-opus",
             cost_tokens: 100,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -1369,6 +1382,7 @@ fn a_replayed_request_id_is_billed_once() {
             model: "gpt-5",
             cost_tokens: 50,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -1422,6 +1436,7 @@ fn no_authenticated_actor_can_drain_another_tenants_budget() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::TenantNotOwnedByOrg)
@@ -1438,6 +1453,7 @@ fn no_authenticated_actor_can_drain_another_tenants_budget() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ActorMismatch),
@@ -1459,6 +1475,7 @@ fn no_authenticated_actor_can_drain_another_tenants_budget() {
             model: "gpt-5",
             cost_tokens: 500,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ActorMismatch)
@@ -1482,6 +1499,7 @@ fn no_authenticated_actor_can_drain_another_tenants_budget() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ActorMismatch),
@@ -1500,6 +1518,7 @@ fn no_authenticated_actor_can_drain_another_tenants_budget() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::PermissionDenied),
@@ -1538,6 +1557,7 @@ fn no_authenticated_actor_can_drain_another_tenants_budget() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded,
         "the binding refuses impersonation, not the real principal"
@@ -1569,6 +1589,7 @@ fn spent_distinguishes_an_unknown_tenant_from_an_empty_one() {
             model: "claude-opus",
             cost_tokens: 42,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -1653,6 +1674,7 @@ fn an_empty_allowlist_denies_everything_including_the_empty_string() {
                 model,
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::ModelNotAllowed),
@@ -1784,6 +1806,7 @@ fn the_allowlist_is_case_sensitive_but_the_gateway_is_not() {
             model: "Claude-Opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         // NOT ModelNotAllowed: the *tool* name survived case folding at the
@@ -1813,6 +1836,7 @@ fn the_allowlist_is_case_sensitive_but_the_gateway_is_not() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::PermissionDenied),
@@ -1826,6 +1850,7 @@ fn the_allowlist_is_case_sensitive_but_the_gateway_is_not() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded,
         "FOOTGUN: the same capability, one capital letter apart, under a weaker permission"
@@ -1865,6 +1890,7 @@ fn the_allowlist_accepts_non_canonical_entries() {
                 model,
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             }),
             Outcome::Forwarded,
             "TRUTH: {model:?} is a perfectly good model name to the allowlist"
@@ -1992,6 +2018,7 @@ fn the_budget_gate_leaks_the_balance_to_anyone_who_shares_the_tenant() {
             model: "m",
             cost_tokens: SECRET_SPEND,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -2013,6 +2040,7 @@ fn the_budget_gate_leaks_the_balance_to_anyone_who_shares_the_tenant() {
                 model: "m",
                 cost_tokens: cost,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::ActorMismatch),
@@ -2026,6 +2054,7 @@ fn the_budget_gate_leaks_the_balance_to_anyone_who_shares_the_tenant() {
                 model: "m",
                 cost_tokens: cost,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::TenantNotOwnedByOrg),
@@ -2056,6 +2085,7 @@ fn the_budget_gate_leaks_the_balance_to_anyone_who_shares_the_tenant() {
             model: "m",
             cost_tokens: cost,
             variant: None,
+            justification: None,
         })
         .is_forwarded()
     };
@@ -2167,6 +2197,7 @@ fn counters_and_meter_can_be_made_to_disagree_arbitrarily() {
                 model: "claude-opus",
                 cost_tokens: 0,
                 variant: None,
+                justification: None,
             }),
             Outcome::Forwarded
         );
@@ -2240,6 +2271,7 @@ fn the_journal_is_bounded_and_the_meter_is_not() {
                 model: "m",
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             }),
             Outcome::Forwarded
         );

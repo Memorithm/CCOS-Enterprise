@@ -840,6 +840,7 @@ fn the_composed_path_can_no_longer_forward_or_bill_a_wrapped_shell_exec() {
             model: "claude-opus",
             cost_tokens: 7,
             variant: None,
+            justification: None,
         });
         assert!(
             matches!(outcome.refusal(), Some(Refusal::OutsideBoundary(_))),
@@ -878,6 +879,7 @@ fn the_composed_path_can_no_longer_forward_or_bill_a_wrapped_shell_exec() {
         model: "claude-opus",
         cost_tokens: 7,
         variant: None,
+        justification: None,
     });
     assert!(matches!(
         outcome.refusal(),
@@ -1258,6 +1260,7 @@ fn the_composed_path_collapses_three_refusals_into_one_boundary_label() {
             model: "claude-opus",
             cost_tokens: 5,
             variant: None,
+            justification: None,
         });
         assert!(
             matches!(outcome.refusal(), Some(Refusal::OutsideBoundary(_))),
@@ -1316,6 +1319,7 @@ fn boundary_is_case_insensitive_but_authorization_is_not() {
         model: "claude-opus",
         cost_tokens: 5,
         variant: None,
+        justification: None,
     });
     assert_eq!(
         outcome.refusal(),
@@ -1465,6 +1469,7 @@ fn a_refused_request_retains_a_bounded_number_of_attacker_bytes() {
         model: "claude-opus",
         cost_tokens: 1,
         variant: None,
+        justification: None,
     });
 
     let Some(Refusal::OutsideBoundary(message)) = outcome.refusal() else {
@@ -1523,6 +1528,7 @@ fn a_refused_request_retains_a_bounded_number_of_attacker_bytes() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         });
     }
     let total: usize = d
@@ -1567,6 +1573,7 @@ fn a_refused_request_retains_a_bounded_number_of_attacker_bytes() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         });
     }
     assert_eq!(
@@ -1619,6 +1626,7 @@ fn hostile_tool_names_cannot_explode_metric_cardinality() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         });
     }
     let metrics = d.metrics();
@@ -1735,6 +1743,7 @@ fn hostile_identifiers_never_traverse_the_composed_path() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -1753,6 +1762,7 @@ fn hostile_identifiers_never_traverse_the_composed_path() {
             model: "claude-opus",
             cost_tokens: 500,
             variant: None,
+            justification: None,
         })
     };
 
@@ -1834,6 +1844,7 @@ fn hostile_identifiers_never_traverse_the_composed_path() {
                 model: "claude-opus",
                 cost_tokens: 500,
                 variant: None,
+                justification: None,
             });
             let Some(refusal) = outcome.refusal() else {
                 panic!("hostile {field} {s:?} traversed the composed path");

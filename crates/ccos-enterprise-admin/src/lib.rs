@@ -96,6 +96,21 @@ fn renders_blank(s: &str) -> bool {
         .all(|c| c.is_whitespace() || c.is_control() || ZERO_WIDTH.contains(&c))
 }
 
+/// Whether a justification is one an operator could actually read.
+///
+/// This is **the** definition in the product, and it is public so the composed
+/// admission path can enforce the same rule rather than reimplement it. The
+/// workspace already has one duplicated predicate — the sha256-hex shape lives
+/// in two crates and agrees only by luck — and a second one, on the rule that
+/// decides whether a privileged act is recorded, is not a debt worth taking.
+///
+/// The bar is deliberately "legible", not "good": no string check can judge
+/// the quality of a written reason, and pretending otherwise only teaches
+/// operators to type `x`.
+pub fn is_written_justification(justification: Option<&str>) -> bool {
+    justification.is_some_and(|j| !renders_blank(j))
+}
+
 /// Validate an administrative action before it takes effect (fail closed).
 ///
 /// Three rules, in order. The first two are refusals of *unreasonable input*
@@ -123,11 +138,9 @@ pub fn validate(a: &AdminAction) -> Result<(), String> {
 
     // A justification must be *readable*: `Some("")`, whitespace, control
     // bytes and zero-width formatting are all the same audit hole as `None`.
-    let justified = a
-        .justification
-        .as_deref()
-        .is_some_and(|j| !renders_blank(j));
-    if JUSTIFICATION_REQUIRED.contains(&action.as_str()) && !justified {
+    if JUSTIFICATION_REQUIRED.contains(&action.as_str())
+        && !is_written_justification(a.justification.as_deref())
+    {
         return Err(format!("'{action}' requires a written justification"));
     }
     Ok(())

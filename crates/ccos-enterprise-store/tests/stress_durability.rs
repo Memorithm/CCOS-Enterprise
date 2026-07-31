@@ -74,6 +74,7 @@ fn forwarded(seq: u64, id: &str) -> AuditRecord {
         actor: "alice".into(),
         tool: "memory.ingest".into(),
         cost: 1,
+        justification: None,
         outcome: Outcome::Forwarded,
     }
 }
@@ -104,6 +105,7 @@ fn populated(tag: &str, n: usize) -> (PathBuf, Vec<u8>, Vec<u8>, u64) {
             model: "claude-opus",
             cost_tokens: 3,
             variant: None,
+            justification: None,
         });
         let fresh: Vec<_> = d
             .audit()
@@ -403,6 +405,7 @@ fn every_refusal_variant_round_trips_through_the_journal() {
             actor: "alice".into(),
             tool: "memory.recall".into(),
             cost: 0,
+            justification: None,
             outcome: Outcome::Refused(r.clone()),
         })
         .collect();

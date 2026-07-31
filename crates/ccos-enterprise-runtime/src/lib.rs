@@ -24,10 +24,13 @@
 //! 4. **namespace boundary** — *before* every tenant-configurable gate,
 //!    because no tenant's roles, allowlists or budgets may ever widen it;
 //! 5. **authorization** — deny by default, ungoverned tools included;
-//! 6. **model governance**, then **Q-Page activation**;
-//! 7. **replay** — a `request_id` already decided returns its prior outcome
+//! 6. **justification** — an administrative act needs a reason a human can
+//!    read. After authorization on purpose: refusing earlier would tell an
+//!    unauthorized prober which tools are sensitive;
+//! 7. **model governance**, then **Q-Page activation**;
+//! 8. **replay** — a `request_id` already decided returns its prior outcome
 //!    rather than being billed twice;
-//! 8. **budget** — charged **last**, so a call refused for any other reason
+//! 9. **budget** — charged **last**, so a call refused for any other reason
 //!    costs the tenant nothing.
 //!
 //! Both ordering choices are load-bearing and pinned by tests: the boundary is
@@ -47,6 +50,22 @@
 //! ([`Refusal::TenantNotOwnedByOrg`]). That second rule is what [`OrgId`] is
 //! for; before this crate it was carried on every credential and read by
 //! nothing.
+//!
+//! ## Layer 6, and where it lives
+//!
+//! `docs/ENTERPRISE_SECURITY_MODEL.md` calls layer 6 "administrative acts
+//! validated and journaled with justification". `ccos_enterprise_admin`
+//! implemented the rule — for an `AdminAction` type nothing in the product
+//! constructed — while this path forwarded and journaled the deployment's one
+//! administrative tool with no "why" at all. The layer was enforced on a
+//! surface nobody called and absent from the one everybody called.
+//!
+//! [`Deployment::require_justification`] marks a governed tool as an
+//! administrative act. The predicate is
+//! `ccos_enterprise_admin::is_written_justification` **itself**, not a copy:
+//! the workspace already carries one duplicated predicate that agrees only by
+//! luck, and the rule deciding whether a privileged act is recorded is not the
+//! place for a second.
 //!
 //! ## What this crate bounds, and what it does not
 //!
@@ -109,6 +128,9 @@ pub enum Refusal {
     VariantNotActivated,
     /// The call would exceed the tenant's token budget.
     BudgetExhausted,
+    /// The tool is an administrative act and the call carried no legible
+    /// reason. See [`Deployment::require_justification`].
+    JustificationRequired,
 }
 
 /// The outcome of one admission decision, as journaled.
@@ -149,6 +171,13 @@ pub struct AuditRecord {
     pub tool: String,
     /// Tokens actually charged. Always `0` for a refusal.
     pub cost: u64,
+    /// The reason the caller gave, for an act that needed one.
+    ///
+    /// `None` for the overwhelming majority of traffic, which is not
+    /// administrative. When the tool *is* administrative this is `Some` on
+    /// every forwarded record, because the call could not have been admitted
+    /// otherwise — which is the whole point of the field.
+    pub justification: Option<String>,
     pub outcome: Outcome,
 }
 
@@ -203,6 +232,13 @@ pub struct Call<'a> {
     /// Set when the call needs an advanced Q-Page variant; `None` uses only
     /// Core's standard primitives, which every tenant has.
     pub variant: Option<AdvancedQPageVariant>,
+    /// Why the caller is performing an administrative act.
+    ///
+    /// Required — and required to be *legible* — for any tool the deployment
+    /// has marked with [`Deployment::require_justification`]. Ignored for
+    /// every other tool, and journaled either way when present, so a reason
+    /// offered voluntarily is still recorded.
+    pub justification: Option<&'a str>,
 }
 
 /// `TenantScope`'s key form: the tenant is part of every key, so there is no
@@ -219,6 +255,9 @@ pub struct Deployment {
     /// tool → the permission it requires. A tool absent from this map is
     /// refused: governance is opt-in, exposure is not.
     governed_tools: BTreeMap<String, Permission>,
+    /// Tools that are administrative acts: admitted only with a legible
+    /// reason, which is then journaled with the decision.
+    justification_required: BTreeSet<String>,
     /// Tenant-scoped storage, standing in for Core's memory roots.
     store: BTreeMap<TenantScopeKey, String>,
     metrics: CounterRegistry,
@@ -248,6 +287,7 @@ impl Deployment {
             tenant_owner: BTreeMap::new(),
             roles: RoleBook::default(),
             governed_tools: BTreeMap::new(),
+            justification_required: BTreeSet::new(),
             store: BTreeMap::new(),
             metrics: CounterRegistry::default(),
             audit: VecDeque::new(),
@@ -314,6 +354,30 @@ impl Deployment {
     }
 
     /// Declare which permission a tool requires. Undeclared tools are refused.
+    /// Mark a governed tool as an **administrative act**: it is admitted only
+    /// when the call carries a reason a human could read, and that reason is
+    /// journaled with the decision.
+    ///
+    /// This is layer 6 of `docs/ENTERPRISE_SECURITY_MODEL.md` — "administrative
+    /// acts validated and journaled with justification" — reaching the composed
+    /// path at last. `ccos_enterprise_admin::validate` implemented the rule for
+    /// an `AdminAction` type nothing in the product constructed; meanwhile the
+    /// deployment's one administrative tool was forwarded and journaled with no
+    /// "why" at all. The layer was enforced on a surface nobody called and
+    /// absent from the one everybody called.
+    ///
+    /// The predicate is `ccos_enterprise_admin::is_written_justification`, not
+    /// a copy of it: there is one definition of "legible" in the product.
+    pub fn require_justification(&mut self, tool: &str) -> &mut Self {
+        self.justification_required.insert(tool.to_string());
+        self
+    }
+
+    /// Whether a tool is an administrative act in this deployment.
+    pub fn requires_justification(&self, tool: &str) -> bool {
+        self.justification_required.contains(tool)
+    }
+
     pub fn govern_tool(&mut self, tool: &str, permission: &str) -> &mut Self {
         self.governed_tools
             .insert(tool.to_string(), Permission(permission.to_string()));
@@ -396,6 +460,10 @@ impl Deployment {
             actor: clamp(&call.request.actor),
             tool: clamp(&call.request.tool),
             cost,
+            // Recorded whenever offered, not only when demanded: a reason
+            // given voluntarily is still evidence, and dropping it would make
+            // the trail depend on configuration rather than on what happened.
+            justification: call.justification.map(clamp),
             outcome: outcome.clone(),
         });
     }
@@ -447,6 +515,19 @@ impl Deployment {
         };
         if !self.roles.allows(&call.actor.actor.0, permission) {
             return refuse(Refusal::PermissionDenied);
+        }
+
+        // 5b. Administrative acts need a recorded reason.
+        //
+        // Placed *after* authorization on purpose: "this act needs a reason" is
+        // only a meaningful answer to a caller who is entitled to perform it,
+        // and refusing earlier would tell an unauthorized prober which tools
+        // are sensitive. Placed *before* the budget, like every other refusal,
+        // so a missing reason costs the tenant nothing.
+        if self.justification_required.contains(&call.request.tool)
+            && !ccos_enterprise_admin::is_written_justification(call.justification)
+        {
+            return refuse(Refusal::JustificationRequired);
         }
 
         // 6. Model governance, then Q-Page activation.
@@ -557,6 +638,7 @@ fn tag(r: &Refusal) -> &'static str {
         Refusal::ModelNotAllowed => "model_not_allowed",
         Refusal::VariantNotActivated => "variant_not_activated",
         Refusal::BudgetExhausted => "budget_exhausted",
+        Refusal::JustificationRequired => "justification_required",
     }
 }
 
@@ -600,6 +682,10 @@ pub struct DeploymentSnapshot {
     pub tenants: BTreeMap<String, TenantSnapshot>,
     pub roles: RoleBook,
     pub governed_tools: BTreeMap<String, Permission>,
+    /// Tools that are administrative acts. Persisted because a restart that
+    /// forgot them would silently stop demanding reasons.
+    #[serde(default)]
+    pub justification_required: BTreeSet<String>,
     /// Tenant-scoped cells, as `(tenant, key, value)` triples.
     pub cells: Vec<(String, String, String)>,
 }
@@ -708,6 +794,7 @@ impl Deployment {
                 .collect(),
             roles: self.roles.clone(),
             governed_tools: self.governed_tools.clone(),
+            justification_required: self.justification_required.clone(),
             cells: self
                 .store
                 .iter()
@@ -743,6 +830,7 @@ impl Deployment {
         d.required_strength = snapshot.required_strength;
         d.roles = snapshot.roles;
         d.governed_tools = snapshot.governed_tools;
+        d.justification_required = snapshot.justification_required;
         d.audit_dropped = snapshot.audit_dropped;
 
         for (name, t) in snapshot.tenants {
@@ -880,7 +968,11 @@ pub fn two_tenant_deployment() -> Deployment {
         .govern_tool("memory.recall", "memory.read")
         .govern_tool("memory.ingest", "memory.write")
         .govern_tool("policy.set", "policy.admin")
-        .govern_tool("audit.query", "memory.read");
+        .govern_tool("audit.query", "memory.read")
+        // `policy.set` is the deployment's one administrative act: it changes
+        // what the tenant is allowed to do. It is the tool `stress_admin_fuzz`
+        // used to demonstrate that layer 6 was enforced nowhere.
+        .require_justification("policy.set");
 
     let mut acme = TenantState::new(1_000);
     acme.allow_model("claude-opus")
@@ -913,6 +1005,7 @@ mod tests {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         });
         assert_eq!(outcome.refusal(), Some(&Refusal::ActorMismatch));
         assert_eq!(d.spent("acme"), Some(0), "an impersonation costs nothing");
@@ -936,6 +1029,7 @@ mod tests {
                 model: "claude-opus",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::TenantNotOwnedByOrg)
@@ -954,6 +1048,7 @@ mod tests {
             model: "claude-opus",
             cost_tokens: 400,
             variant: None,
+            justification: None,
         });
         assert_eq!(d.spent("acme"), Some(400));
 
@@ -977,6 +1072,7 @@ mod tests {
                     model: "claude-opus",
                     cost_tokens: 100,
                     variant: None,
+                    justification: None,
                 }),
                 Outcome::Forwarded
             );
@@ -1003,6 +1099,7 @@ mod tests {
                 model: "claude-opus",
                 cost_tokens: *cost,
                 variant: None,
+                justification: None,
             });
         }
         let trail: Vec<&AuditRecord> = d.audit().collect();
@@ -1035,6 +1132,7 @@ mod tests {
                 model: "m",
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             });
         }
         assert_eq!(d.audit().count(), 8, "the buffer never grows past its cap");
@@ -1042,6 +1140,141 @@ mod tests {
         // The retained window is the newest, and still ordered.
         let seqs: Vec<u64> = d.audit().map(|r| r.sequence).collect();
         assert_eq!(seqs, (92..100).collect::<Vec<_>>());
+    }
+
+    /// Layer 6 reaching the composed path. `policy.set` changes what a tenant
+    /// may do; before this it was forwarded and journaled with no "why".
+    #[test]
+    fn an_administrative_act_needs_a_reason_and_the_reason_is_journaled() {
+        let mut d = two_tenant_deployment();
+        let root = actor("memorithm", "root", AuthStrength::Strong);
+        let req = request("acme", "root", "policy.set", "r-1");
+
+        assert_eq!(
+            d.admit(Call {
+                actor: &root,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: None,
+            })
+            .refusal(),
+            Some(&Refusal::JustificationRequired)
+        );
+        assert_eq!(d.spent("acme"), Some(0), "a missing reason costs nothing");
+
+        // An invisible reason is no reason — the rule is the admin crate's,
+        // not a second copy of it.
+        for blank in ["", "   ", "\u{200b}", "\u{feff}\t\u{202e}"] {
+            let req = request("acme", "root", "policy.set", &format!("r-{blank:?}"));
+            assert_eq!(
+                d.admit(Call {
+                    actor: &root,
+                    request: &req,
+                    model: "claude-opus",
+                    cost_tokens: 10,
+                    variant: None,
+                    justification: Some(blank),
+                })
+                .refusal(),
+                Some(&Refusal::JustificationRequired),
+                "{blank:?} passed as a reason"
+            );
+        }
+
+        // With a legible reason it is admitted, and the reason is in the trail.
+        let req = request("acme", "root", "policy.set", "r-ok");
+        assert_eq!(
+            d.admit(Call {
+                actor: &root,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: Some("tightening the allowlist after the audit"),
+            }),
+            Outcome::Forwarded
+        );
+        let record = d
+            .audit()
+            .find(|r| r.request_id == "r-ok")
+            .expect("journaled");
+        assert_eq!(
+            record.justification.as_deref(),
+            Some("tightening the allowlist after the audit")
+        );
+        // Every *forwarded* administrative record carries one, necessarily.
+        assert!(d
+            .audit()
+            .filter(|r| r.tool == "policy.set" && r.outcome.is_forwarded())
+            .all(|r| r.justification.is_some()));
+    }
+
+    /// The gate must not spread. A reason is demanded for the tools marked
+    /// administrative and for no others, and it is *recorded* whenever offered
+    /// — so the trail reflects what happened, not what was configured.
+    #[test]
+    fn an_ordinary_tool_neither_demands_a_reason_nor_discards_one() {
+        let mut d = two_tenant_deployment();
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+
+        let req = request("acme", "alice", "memory.ingest", "r-plain");
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: None,
+            }),
+            Outcome::Forwarded,
+            "an ordinary tool must not inherit the requirement"
+        );
+
+        let req = request("acme", "alice", "memory.ingest", "r-volunteered");
+        d.admit(Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 10,
+            variant: None,
+            justification: Some("bulk import, ticket 4471"),
+        });
+        assert_eq!(
+            d.audit()
+                .find(|r| r.request_id == "r-volunteered")
+                .and_then(|r| r.justification.as_deref()),
+            Some("bulk import, ticket 4471"),
+            "a reason given voluntarily is still evidence"
+        );
+        assert!(!d.requires_justification("memory.ingest"));
+        assert!(d.requires_justification("policy.set"));
+    }
+
+    /// Ordering: the reason is demanded only of a caller entitled to the act.
+    /// Asking earlier would tell an unauthorized prober which tools are
+    /// sensitive — a free map of the administrative surface.
+    #[test]
+    fn a_caller_without_the_permission_is_refused_before_being_asked_for_a_reason() {
+        let mut d = two_tenant_deployment();
+        // bob is a reader; `policy.set` needs `policy.admin`.
+        let bob = actor("memorithm", "bob", AuthStrength::Token);
+        let req = request("acme", "bob", "policy.set", "r-probe");
+        assert_eq!(
+            d.admit(Call {
+                actor: &bob,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 0,
+                variant: None,
+                justification: None,
+            })
+            .refusal(),
+            Some(&Refusal::PermissionDenied),
+            "an unauthorized caller must not learn that this tool is administrative"
+        );
     }
 
     #[test]

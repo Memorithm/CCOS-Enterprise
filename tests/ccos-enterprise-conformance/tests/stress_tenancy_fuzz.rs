@@ -991,6 +991,7 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
             model,
             cost_tokens: *cost,
             variant: *variant,
+            justification: None,
         });
         assert_eq!(
             std::mem::discriminant(&got),
@@ -1022,6 +1023,7 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
                         model,
                         cost_tokens: *cost,
                         variant: *variant,
+                        justification: None,
                     })
                     .refusal(),
                 Some(&Refusal::TenantNotOwnedByOrg),
@@ -1085,6 +1087,7 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
                 model: "claude-opus",
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             })
             .refusal(),
         Some(&Refusal::UnknownTenant),
@@ -1174,6 +1177,7 @@ fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
                 model: "gpt-5", // globex's own allowlisted model
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             })
             .refusal(),
         Some(&Refusal::TenantNotOwnedByOrg),
@@ -1246,6 +1250,7 @@ fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::UnknownTenant),
@@ -1261,6 +1266,7 @@ fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::BudgetExhausted)
@@ -1572,6 +1578,7 @@ fn refused_calls_fill_a_bounded_journal_and_displace_a_real_tenants_trail() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: None,
+            justification: None,
         });
         assert_eq!(
             outcome,
@@ -1641,6 +1648,7 @@ fn refused_calls_fill_a_bounded_journal_and_displace_a_real_tenants_trail() {
         model: "claude-opus",
         cost_tokens: 42,
         variant: None,
+        justification: None,
     });
     assert_eq!(small.spent("acme"), Some(42));
     assert!(small.audit().any(|r| r.request_id == "the-billed-one"));
@@ -1654,6 +1662,7 @@ fn refused_calls_fill_a_bounded_journal_and_displace_a_real_tenants_trail() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: None,
+            justification: None,
         });
     }
     assert_eq!(small.audit().count(), 4, "the cap holds");
@@ -1797,6 +1806,7 @@ fn the_credential_binds_both_the_actor_and_the_tenants_owning_org() {
                 model: "claude-opus",
                 cost_tokens: 250,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::TenantNotOwnedByOrg),
@@ -1817,6 +1827,7 @@ fn the_credential_binds_both_the_actor_and_the_tenants_owning_org() {
             model: "claude-opus",
             cost_tokens: 250,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ActorMismatch),
@@ -1835,6 +1846,7 @@ fn the_credential_binds_both_the_actor_and_the_tenants_owning_org() {
             model: "claude-opus",
             cost_tokens: 250,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -1897,6 +1909,7 @@ fn re_provisioning_is_refused_but_the_store_still_outlives_the_tenant_record() {
             model: "claude-opus",
             cost_tokens: 900,
             variant: Some(AdvancedQPageVariant::Hierarchical),
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -1924,6 +1937,7 @@ fn re_provisioning_is_refused_but_the_store_still_outlives_the_tenant_record() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::BudgetExhausted),
@@ -1940,6 +1954,7 @@ fn re_provisioning_is_refused_but_the_store_still_outlives_the_tenant_record() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: Some(AdvancedQPageVariant::Hierarchical),
+            justification: None,
         }),
         Outcome::Forwarded,
         "activations are not dropped by a refused re-provisioning"
@@ -2041,6 +2056,7 @@ fn visually_identical_tenant_names_are_distinct_silent_namespaces() {
                 model: "claude-opus",
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             }),
             Outcome::Forwarded,
             "{t:?} is a fully operational tenant"

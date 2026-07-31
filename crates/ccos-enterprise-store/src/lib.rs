@@ -486,6 +486,7 @@ mod tests {
                 model: "claude-opus",
                 cost_tokens: *cost,
                 variant: None,
+                justification: None,
             });
             let fresh: Vec<_> = d
                 .audit()
@@ -563,6 +564,7 @@ mod tests {
                     model: "claude-opus",
                     cost_tokens: 1,
                     variant: None,
+                    justification: None,
                 })
                 .refusal(),
             Some(&Refusal::BudgetExhausted),
@@ -592,6 +594,7 @@ mod tests {
                 model: "claude-opus",
                 cost_tokens: 100,
                 variant: None,
+                justification: None,
             }),
             Outcome::Forwarded
         );
@@ -738,6 +741,7 @@ mod tests {
             actor: "alice".into(),
             tool: "memory.ingest".into(),
             cost: 1,
+            justification: None,
             outcome: Outcome::Forwarded,
         };
         let err = store
@@ -831,6 +835,7 @@ mod tests {
             actor: "alice".into(),
             tool: "memory.ingest".into(),
             cost: 1,
+            justification: None,
             outcome: Outcome::Forwarded,
         };
         let mut skips = good.clone();
@@ -926,6 +931,7 @@ mod tests {
             actor: "a\"lice\\".into(),
             tool: "memory.\u{202e}recall\u{0000}".into(),
             cost: 0,
+            justification: None,
             outcome: Outcome::Refused(Refusal::OutsideBoundary(
                 "line one\nline two\r\n\"quoted\"".into(),
             )),

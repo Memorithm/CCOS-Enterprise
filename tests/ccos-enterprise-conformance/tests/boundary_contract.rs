@@ -237,6 +237,7 @@ fn no_privilege_reaches_past_the_boundary() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         });
         assert!(
             matches!(outcome.refusal(), Some(Refusal::OutsideBoundary(_))),
@@ -256,6 +257,7 @@ fn no_privilege_reaches_past_the_boundary() {
             model: "claude-opus",
             cost_tokens: 7,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded,
         "this credential is genuinely admitted; only the boundary refused it"
@@ -283,6 +285,7 @@ fn a_decided_request_id_does_not_carry_a_forbidden_tool_past_the_boundary() {
             model: "claude-opus",
             cost_tokens: 25,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -296,6 +299,7 @@ fn a_decided_request_id_does_not_carry_a_forbidden_tool_past_the_boundary() {
             model: "claude-opus",
             cost_tokens: 25,
             variant: None,
+            justification: None,
         });
         assert!(
             matches!(outcome.refusal(), Some(Refusal::OutsideBoundary(_))),

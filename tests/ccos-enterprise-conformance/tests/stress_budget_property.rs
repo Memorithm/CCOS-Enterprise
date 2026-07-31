@@ -301,7 +301,8 @@ fn one_million_random_charges_hold_the_ledger_invariants() {
     );
 }
 
-/// The same property at 50× the volume, for a nightly soak. Kept out of the
+/// The same property at 50× the volume — a full **one million independent
+/// charge sequences**, 50 charges each — for a nightly soak. Kept out of the
 /// default run to hold the suite under a minute; run it with
 ///
 /// ```text
@@ -1158,10 +1159,11 @@ fn any_authenticated_actor_can_drain_any_tenants_budget() {
     );
 }
 
-/// `Deployment::spent` folds "no such tenant" into `0`. A quota dashboard or
-/// invoice run that misspells a tenant reports zero usage for ever instead of
-/// failing. Same shape as defect 3: the meter is trusted, and there is no way
-/// to tell an empty meter from a missing one.
+/// **DEFECT 8 (low, observability).** `Deployment::spent` folds "no such
+/// tenant" into `0`. A quota dashboard or invoice run that misspells a tenant
+/// reports zero usage for ever instead of failing. Same shape as defect 3:
+/// the meter is trusted, and there is no way to tell an empty meter from a
+/// missing one.
 #[test]
 fn spent_of_an_unknown_tenant_is_a_silent_zero() {
     let mut d = two_tenant_deployment();
@@ -1388,6 +1390,44 @@ fn the_allowlist_is_case_sensitive_but_the_gateway_is_not() {
         "the boundary admits MEMORY.INGEST; the governance map has never heard of it"
     );
     assert_eq!(d.spent("acme"), 0, "at least the refusal is free");
+
+    // The sharp edge of the same disagreement. Because the boundary treats
+    // `MEMORY.INGEST` and `memory.ingest` as one tool but the governance map
+    // treats them as two, a deployment can hold two different permissions for
+    // what the boundary considers the same capability — and the weaker one
+    // wins for anyone who types it. Here `bob` holds only `memory.read`, is
+    // correctly refused `memory.ingest`, and gets the identical capability
+    // through a capitalised spelling. It is a configuration mistake to make,
+    // but nothing in the product can detect or refuse it: `govern_tool` is a
+    // raw `insert`, so the collision is silent.
+    d.govern_tool("MEMORY.INGEST", "memory.read");
+    let bob = actor("memorithm", "bob", AuthStrength::Token);
+    let denied = request("acme", "bob", "memory.ingest", "r-lower");
+    assert_eq!(
+        d.admit(Call {
+            actor: &bob,
+            request: &denied,
+            model: "claude-opus",
+            cost_tokens: 10,
+            variant: None,
+        })
+        .refusal(),
+        Some(&Refusal::PermissionDenied),
+        "a reader may not ingest"
+    );
+    let escalated = request("acme", "bob", "MEMORY.INGEST", "r-upper");
+    assert_eq!(
+        d.admit(Call {
+            actor: &bob,
+            request: &escalated,
+            model: "claude-opus",
+            cost_tokens: 10,
+            variant: None,
+        }),
+        Outcome::Forwarded,
+        "FOOTGUN: the same capability, one capital letter apart, under a weaker permission"
+    );
+    assert_eq!(d.spent("acme"), 10, "and it is billed like any other call");
 }
 
 /// The allowlist accepts entries the gateway would refuse outright for a tool:

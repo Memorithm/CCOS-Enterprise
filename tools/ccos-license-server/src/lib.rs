@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 /// Vault schema tag, bumped on any breaking shape change. v2: entries are
 /// keyed by `vault_key(code_hash)` (a second, domain-separated hash) instead
@@ -78,6 +78,7 @@ pub enum Status {
 /// absent — the code itself (only its hash keys the entry) and any hardware
 /// identity (the machine field is the client's opaque fingerprint).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Entry {
     /// Licensee name carried into the signed token (an invoice reference works
     /// as well as a company name — the counter does not need to know who).
@@ -85,7 +86,14 @@ pub struct Entry {
     /// Free-form vendor note (invoice id, contract ref). Never signed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// License duration in days from the moment of claim; `None` = perpetual.
+    /// License duration in days from the moment of claim; `null` = perpetual.
+    ///
+    /// The field must be **present** in the file. Serde defaults every
+    /// `Option<T>` to `None` when a field is missing, so an entry that simply
+    /// omitted `days` used to sell a perpetual license — the most expensive
+    /// default in the product, reachable by deleting one line. `null` still
+    /// means perpetual; saying nothing at all no longer does.
+    #[serde(deserialize_with = "required_days")]
     pub days: Option<u64>,
     pub status: Status,
     pub created_unix: u64,
@@ -102,11 +110,58 @@ pub struct Entry {
 
 /// The durably-persisted code ledger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Vault {
     pub schema: String,
     /// `vault_key(sha256(code)) → entry` — see
     /// [`ccos_enterprise_governance::claim::vault_key`].
+    #[serde(deserialize_with = "unique_entries")]
     pub entries: BTreeMap<String, Entry>,
+}
+
+/// Deserialize `days`, refusing a **missing** field while still accepting an
+/// explicit `null`.
+///
+/// `Option<u64>` alone cannot express this: serde's derive fills a missing
+/// `Option` field with `None` and never calls a deserializer at all. Naming
+/// one is what turns absence back into an error.
+fn required_days<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(d)
+}
+
+/// Deserialize the entry map, refusing a **duplicate key** instead of letting
+/// the last one win.
+///
+/// `serde_json` into a `BTreeMap` overwrites silently, so appending a second
+/// entry under a key that was already there un-revokes a revoked code — with
+/// no error, no warning and nothing in the file to show two ever existed. JSON
+/// permits duplicate names; a ledger does not.
+fn unique_entries<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Entry>, D::Error> {
+    struct Unique;
+
+    impl<'de> de::Visitor<'de> for Unique {
+        type Value = BTreeMap<String, Entry>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a map of vault keys to entries, each key appearing once")
+        }
+
+        fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((key, entry)) = map.next_entry::<String, Entry>()? {
+                if out.insert(key.clone(), entry).is_some() {
+                    return Err(de::Error::custom(format!(
+                        "vault key {key:?} appears twice — the later entry would \
+                         silently replace the earlier one, which is how a revoked \
+                         code comes back to life"
+                    )));
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    d.deserialize_map(Unique)
 }
 
 impl Default for Vault {
@@ -124,6 +179,119 @@ pub enum Refusal {
     SeatTaken,
     /// The vendor revoked the code.
     Revoked,
+    /// The entry exists but is not one the counter can honour, and acting on
+    /// it would cost the customer their seat. Carries the reason so an
+    /// operator can find the line.
+    ///
+    /// This is the **vendor's** fault, not the caller's, which is why it is a
+    /// distinct refusal rather than folded into `UnknownCode`: a 404 would
+    /// tell a paying customer their code does not exist, and tell the vendor
+    /// nothing at all.
+    Unserviceable(String),
+}
+
+impl Entry {
+    /// Whether this entry is one the counter can honour, and if not, why.
+    ///
+    /// A vault is money. Every rule here exists because its absence let a file
+    /// that loaded cleanly cost a customer their seat or hand one away:
+    ///
+    /// * **`days: 0`** flipped the code to `Claimed`, burned the single seat
+    ///   and signed a token whose entire validity window was the claim
+    ///   instant. Every later re-claim re-issued the same dead expiry, so the
+    ///   protocol had no recovery path — only vault surgery. The admin CLI
+    ///   already refuses `--days 0`; this is the other way in.
+    /// * **`Claimed` with no owner** answered `SeatTaken` to every machine
+    ///   *including the customer's*, forever. `machine` is
+    ///   `#[serde(default)]`, so a hand edit, a partial restore or a migration
+    ///   that dropped a field produced it silently. `Some("")` is the same
+    ///   trap over the wire, since no client can present the empty owner.
+    /// * **`Unclaimed` carrying an owner or an expiry** is a state the claim
+    ///   machine cannot produce, so it is a state nothing downstream reasons
+    ///   about correctly.
+    ///
+    /// Returning the reason rather than a bool is deliberate: an operator
+    /// whose server refuses to start needs to know which line of a
+    /// hundred-thousand-line file to look at.
+    pub fn validate(&self, key: &str) -> Result<(), String> {
+        use ccos_enterprise_governance::claim::is_sha256_hex;
+
+        if !is_sha256_hex(key) {
+            return Err(format!(
+                "vault key {key:?} is not a 64-character lowercase sha256 hex digest"
+            ));
+        }
+        if self.licensee.trim().is_empty() {
+            return Err(format!("entry {key}: licensee is empty"));
+        }
+        if self.days == Some(0) {
+            return Err(format!(
+                "entry {key}: days is 0 — claiming it would burn the seat and \
+                 issue a license that expires at the instant of claim, with no \
+                 recovery path. Write null for a perpetual license."
+            ));
+        }
+        if let Some(exp) = self.exp_unix {
+            if exp <= self.created_unix {
+                return Err(format!(
+                    "entry {key}: exp_unix {exp} is not after created_unix {} — \
+                     the license was over before it was sold",
+                    self.created_unix
+                ));
+            }
+        }
+        match self.status {
+            Status::Claimed => {
+                match self.machine.as_deref() {
+                    None => {
+                        return Err(format!(
+                            "entry {key}: claimed with no machine — it would answer \
+                             SeatTaken to every machine including the customer's, \
+                             forever"
+                        ))
+                    }
+                    Some(m) if !is_sha256_hex(m) => {
+                        return Err(format!(
+                            "entry {key}: machine {m:?} is not a fingerprint any \
+                             client could present, so the seat is unreachable"
+                        ))
+                    }
+                    Some(_) => {}
+                }
+                if self.claimed_unix.is_none() {
+                    return Err(format!(
+                        "entry {key}: claimed with no claimed_unix — the flip is \
+                         not dateable, so the trail cannot say when the seat went"
+                    ));
+                }
+            }
+            Status::Unclaimed => {
+                for (what, present) in [
+                    ("machine", self.machine.is_some()),
+                    ("claimed_unix", self.claimed_unix.is_some()),
+                    ("exp_unix", self.exp_unix.is_some()),
+                ] {
+                    if present {
+                        return Err(format!(
+                            "entry {key}: unclaimed but carries {what} — a state the \
+                             claim machine cannot produce"
+                        ));
+                    }
+                }
+            }
+            // A revoked seat may or may not have been claimed first, so the
+            // only rule is the one that always holds: an owner it does carry
+            // must be one a client could have presented.
+            Status::Revoked => {
+                if let Some(m) = self.machine.as_deref() {
+                    if !is_sha256_hex(m) {
+                        return Err(format!("entry {key}: machine {m:?} is not a fingerprint"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Vault {
@@ -163,8 +331,29 @@ impl Vault {
     /// through [`Vault::load`].
     pub fn load_any_schema(path: &Path) -> io::Result<Self> {
         let text = std::fs::read_to_string(path)?;
-        serde_json::from_str(&text)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("vault: {e}")))
+        let vault: Self = serde_json::from_str(&text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("vault: {e}")))?;
+        // Every read path in the product goes through here, `migrate`
+        // included: a migration that carried a dead seat forward would launder
+        // it into the new schema.
+        vault.validate()?;
+        Ok(vault)
+    }
+
+    /// Check every entry ([`Entry::validate`]). Fails on the **first** bad
+    /// one, naming it.
+    ///
+    /// Whole-file refusal is the existing posture and is kept: there is no
+    /// per-entry quarantine, so one bad line stops the counter serving anyone.
+    /// That blast radius is a separate, still-open finding — what changes here
+    /// is only *which* files are bad, and a file holding a dead seat now is.
+    pub fn validate(&self) -> io::Result<()> {
+        for (key, entry) in &self.entries {
+            entry
+                .validate(key)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("vault: {e}")))?;
+        }
+        Ok(())
     }
 
     /// Write durably (atomic rename + fsync — the flip must survive a crash
@@ -186,8 +375,22 @@ impl Vault {
         let key = ccos_enterprise_governance::claim::vault_key(code_hash);
         let entry = self.entries.get_mut(&key).ok_or(Refusal::UnknownCode)?;
         match entry.status {
+            // Checked before validation on purpose: a revoked code's answer
+            // does not depend on the rest of the entry, nothing is issued and
+            // nothing burns, so a malformed field must not turn an accurate,
+            // actionable 410 into a 500.
             Status::Revoked => Err(Refusal::Revoked),
             Status::Claimed => {
+                // Everything below either issues a token or refuses the seat's
+                // own owner, and both are irreversible from the customer's
+                // side. `Vault::load` runs the same check over the whole file,
+                // but a vault can also be built in memory — and the two states
+                // this catches cost a seat the instant the machine acts on
+                // them: a `Claimed` entry with no owner answers SeatTaken to
+                // everyone including the customer, forever.
+                if let Err(why) = entry.validate(&key) {
+                    return Err(Refusal::Unserviceable(why));
+                }
                 // Same machine → idempotent re-issue with the stored expiry
                 // (lost-token self-service; never an extension). Anything else
                 // is the single-seat refusal.
@@ -198,6 +401,12 @@ impl Vault {
                 }
             }
             Status::Unclaimed => {
+                // The flip below burns the single seat. `days: 0` used to make
+                // that flip issue a license whose entire validity window was
+                // the claim instant, with no recovery path but vault surgery.
+                if let Err(why) = entry.validate(&key) {
+                    return Err(Refusal::Unserviceable(why));
+                }
                 // Saturating: a vendor-side `days` typo must not wrap the
                 // expiry into the past (which release-mode `+` would allow).
                 let exp = entry
@@ -394,6 +603,23 @@ impl Counter {
             Err(Refusal::Revoked) => {
                 eprintln!("[counter] revoked code: {}…", &req.code_hash[..12]);
                 (410, err_body("this code was revoked by the vendor"))
+            }
+            // 500, not 4xx: the caller did nothing wrong and retrying will not
+            // help until the vendor fixes the entry. The reason goes to the
+            // operator's log, never over the wire — it names an internal state
+            // an unauthenticated caller has no business learning.
+            Err(Refusal::Unserviceable(why)) => {
+                eprintln!(
+                    "[counter] UNSERVICEABLE entry for {}…: {why}",
+                    &req.code_hash[..12]
+                );
+                (
+                    500,
+                    err_body(
+                        "this code cannot be served — the vendor has been notified. \
+                         Nothing was issued and your seat was not consumed.",
+                    ),
+                )
             }
         }
     }

@@ -56,3 +56,13 @@ jobs:
       # covers Core and Enterprise in one command, the thing two repositories
       # could never do.
       - run: cargo test --workspace
+      # The identity verifier and the fixtures that drive the gates live behind
+      # non-default features, so `--workspace` compiles neither. Without this
+      # step the 18 adversarial tests in `ccos-enterprise-auth` would be exactly
+      # the failure that crate was written to remove: a security mechanism no
+      # build compiles and no run exercises, passing CI by being absent.
+      - name: identity verifier (non-default features)
+        run: |
+          cargo test -p ccos-enterprise-auth --features token-auth,test-identities
+          cargo clippy -p ccos-enterprise-auth --features token-auth,test-identities \
+            --all-targets -- -D warnings

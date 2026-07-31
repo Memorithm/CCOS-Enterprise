@@ -6,6 +6,33 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Both features are OFF by default, and the default build is the honest one:
+# identity types with no way to mint one. A deployment that wants to
+# authenticate anybody has to say so.
+default = []
+
+# The ed25519 identity-token verifier and its issuer. Optional because it is
+# one *mechanism*, not the model — mTLS and OIDC land beside it, not through
+# it.
+token-auth = ["dep:ed25519-dalek", "dep:ccos-enterprise-governance"]
+
+# `AuthenticatedActor::asserted` — an identity nobody proved. Test scaffolding
+# only, and a feature flag rather than a naming convention: the whole point of
+# the private fields is that no caller can mint an identity, and a `pub fn`
+# named `asserted` is still a `pub fn`.
+test-identities = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+ed25519-dalek = { version = "2", optional = true }
+# For `b64url`, whose decoder refuses non-canonical padding — the property that
+# stops one token from having sixteen spellings. Not a layering inversion:
+# governance depends on no Enterprise crate, so there is no cycle, and the
+# alternative was a second base64 implementation to keep in step with the
+# first.
+ccos-enterprise-governance = { path = "../ccos-enterprise-governance", optional = true }
+
+[dev-dependencies]
+ed25519-dalek = "2"

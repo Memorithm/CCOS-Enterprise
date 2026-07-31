@@ -7,6 +7,14 @@ license.workspace = true
 publish = false
 description = "The composed Enterprise admission path: identity, tenancy, authorization, policy, Q-Page activation and the namespace boundary, wired into the single decision docs/ENTERPRISE_SECURITY_MODEL.md describes."
 
+[features]
+default = []
+# Scenario constructors for tests — including `actor`, which asserts an
+# identity nobody proved. Off by default: it was unconditional public API, and
+# a shipped build that exports a way to mint an `AuthenticatedActor` has no
+# authentication regardless of what the auth crate guarantees.
+test-fixtures = ["ccos-enterprise-auth/test-identities"]
+
 [dependencies]
 ccos-enterprise-auth = { path = "../ccos-enterprise-auth" }
 ccos-enterprise-rbac = { path = "../ccos-enterprise-rbac" }

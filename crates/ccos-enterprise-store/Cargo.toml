@@ -14,4 +14,9 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+# The scenario constructors live behind `test-fixtures` because one of them
+# asserts an identity nobody proved. Enabled here, in dev-dependencies only,
+# so the tests can drive the gates while the shipped build cannot mint an
+# actor.
+ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime", features = ["test-fixtures"] }
 ccos-enterprise-auth = { path = "../ccos-enterprise-auth" }

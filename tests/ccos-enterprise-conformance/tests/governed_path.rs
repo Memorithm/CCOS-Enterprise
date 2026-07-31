@@ -532,7 +532,7 @@ fn the_path_is_deterministic_under_replay() {
         for (i, (who, tenant, tool, model, cost)) in script.iter().enumerate() {
             // The request names the actor its credential proves: anything
             // else is refused before it reaches a gate this test is about.
-            let req = request(tenant, &who.actor.0, tool, &format!("r-{i}"));
+            let req = request(tenant, &who.actor().0, tool, &format!("r-{i}"));
             d.admit(Call {
                 actor: who,
                 request: &req,

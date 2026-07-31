@@ -1222,7 +1222,7 @@ impl Deployment {
         let refuse = |r: Refusal| (Outcome::Refused(r), 0u64);
 
         // 1. Identity.
-        if call.actor.strength < self.required_strength {
+        if call.actor.strength() < self.required_strength {
             return refuse(Refusal::Unauthenticated);
         }
 
@@ -1239,13 +1239,15 @@ impl Deployment {
 
         // 3. The credential binds the request. Checked before tenant
         //    resolution so a probe cannot enumerate tenants by their refusal.
-        if call.request.actor != call.actor.actor.0 {
+        if call.request.actor != call.actor.actor().0 {
             return refuse(Refusal::ActorMismatch);
         }
         let tenant_id = TenantId(call.request.tenant.clone());
         match self.tenant_owner.get(&tenant_id) {
             None => return refuse(Refusal::UnknownTenant),
-            Some(owner) if *owner != call.actor.org => return refuse(Refusal::TenantNotOwnedByOrg),
+            Some(owner) if *owner != *call.actor.org() => {
+                return refuse(Refusal::TenantNotOwnedByOrg)
+            }
             Some(_) => {}
         }
         if !self.tenants.contains_key(&tenant_id) {
@@ -1262,7 +1264,7 @@ impl Deployment {
         let Some(permission) = self.governed_tools.get(&call.request.tool) else {
             return refuse(Refusal::ToolNotGoverned);
         };
-        if !self.roles.allows(&call.actor.actor.0, permission) {
+        if !self.roles.allows(&call.actor.actor().0, permission) {
             return refuse(Refusal::PermissionDenied);
         }
 
@@ -1947,14 +1949,25 @@ pub fn request(tenant: &str, actor: &str, tool: &str, request_id: &str) -> Gatew
     }
 }
 
-/// An authenticated actor at the given strength.
+/// An authenticated actor at the given strength — **asserted, not proved**.
+///
+/// Behind `test-fixtures`, which is off by default. This function used to be
+/// unconditional public API, and it took three strings and returned a verified
+/// identity: the whole forgery that `AuthenticatedActor`'s private fields
+/// exist to prevent, relocated one crate over and re-exported. Any caller who
+/// could reach the runtime could mint an administrator.
+///
+/// It goes through `asserted` and inherits its gate rather than routing around
+/// it. A scaffold able to build an identity the product cannot would be
+/// exercising a different type than the one that ships.
+// `test` as well as the feature: this crate's own unit tests need the
+// constructor, and a crate cannot enable its own feature from dev-dependencies.
+// `cfg(test)` is true only when compiling this crate's test harness — never
+// when it is built as somebody's dependency — so the shipped artifact is
+// unaffected either way.
+#[cfg(any(test, feature = "test-fixtures"))]
 pub fn actor(org: &str, name: &str, strength: AuthStrength) -> AuthenticatedActor {
-    use ccos_enterprise_auth::ActorId;
-    AuthenticatedActor {
-        org: OrgId(org.to_string()),
-        actor: ActorId(name.to_string()),
-        strength,
-    }
+    AuthenticatedActor::asserted(org, name, strength)
 }
 
 /// A two-tenant deployment resembling a real install: `acme` and `globex`,

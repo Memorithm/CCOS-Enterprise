@@ -26,4 +26,9 @@ ccos-license-server = { path = "../../tools/ccos-license-server" }
 serde_json = "1"
 
 [dev-dependencies]
+# The scenario constructors live behind `test-fixtures` because one of them
+# asserts an identity nobody proved. Enabled here, in dev-dependencies only,
+# so the tests can drive the gates while the shipped build cannot mint an
+# actor.
+ccos-enterprise-runtime = { path = "../../crates/ccos-enterprise-runtime", features = ["test-fixtures"] }
 ed25519-dalek = "2"

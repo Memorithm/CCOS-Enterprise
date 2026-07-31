@@ -150,6 +150,8 @@ dependencies = [
 name = "ccos-enterprise-auth"
 version = "0.1.0-pre"
 dependencies = [
+ "ccos-enterprise-governance",
+ "ed25519-dalek",
  "serde",
  "serde_json",
 ]

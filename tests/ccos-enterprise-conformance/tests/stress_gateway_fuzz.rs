@@ -72,22 +72,31 @@
 //! now passes through `sanitize()`: at most 64 chars, every non-graphic char
 //! replaced by U+FFFD, ellipsis if truncated.
 //!
+//! **The audit journal no longer retains what the attacker sent (high).** It
+//! was an uncapped `Vec` holding every rejected tool name untruncated, so a
+//! flood turned N bytes of request into ~N bytes of permanently retained heap,
+//! linear in request count, with nothing counting it. Moving the composed path
+//! into `ccos_enterprise_runtime` closed both halves: every wire-supplied
+//! identifier is clamped to `MAX_IDENTIFIER_BYTES` before it is journaled, and
+//! the journal itself is a bounded buffer (`DEFAULT_AUDIT_CAPACITY`, settable
+//! with `Deployment::with_audit_capacity`) that drops the oldest record and
+//! counts the loss in `Deployment::audit_dropped`. Pinned by
+//! [`a_refused_request_retains_a_bounded_number_of_attacker_bytes`], which
+//! floods exactly as it used to and now measures the bound instead of the
+//! growth. Dropping is a deliberate, announced loss — it bounds memory, it is
+//! not by itself an audit story.
+//!
 //! ## What is still open
 //!
 //! - **Refusal taxonomy collapses on the composed path (medium, spec
 //!   violation).** The gateway distinguishes violation / omission /
-//!   malformed-name; `ccos_enterprise_conformance`'s `Deployment::decide`
-//!   folds all three into `Refusal::OutsideBoundary` and one counter. Pinned
-//!   by [`the_composed_path_collapses_three_refusals_into_one_boundary_label`].
+//!   malformed-name; `ccos_enterprise_runtime`'s `Deployment::decide` folds
+//!   all three into `Refusal::OutsideBoundary` and one counter. Pinned by
+//!   [`the_composed_path_collapses_three_refusals_into_one_boundary_label`].
 //! - **`gateway.refused.*` still cannot count boundary probes (medium).**
 //!   Canonicality is checked before the boundary, so appending `\0` to
 //!   `shell.exec` relabels the probe as malformed. Pinned by
 //!   [`canonicality_check_precedes_the_boundary_check`].
-//! - **The audit journal is uncapped and stores the untruncated tool name
-//!   (medium).** The >2x amplification is gone with the refusal message, but
-//!   one full copy of every rejected name is still retained per request, with
-//!   no cap on the `Vec`. Pinned by
-//!   [`a_refused_request_no_longer_retains_more_attacker_bytes_than_it_carries`].
 //! - **The boundary lowercases and the authorizer does not (low).**
 //!   `MEMORY.RECALL` clears the boundary and misses `governed_tools`; that
 //!   fails closed, but by accident. Pinned by
@@ -99,7 +108,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use ccos_enterprise_auth::AuthStrength;
-use ccos_enterprise_conformance::{actor, request, two_tenant_deployment, Call, Outcome, Refusal};
+use ccos_enterprise_conformance::{
+    actor, request, two_tenant_deployment, AuditRecord, Call, Deployment, Outcome, Refusal,
+    TenantState, DEFAULT_AUDIT_CAPACITY, MAX_IDENTIFIER_BYTES,
+};
 use ccos_enterprise_gateway::{
     classify, Disposition, GatewayRequest, ALLOWED_PREFIXES, ALLOWED_TOOLS, FORBIDDEN_PREFIXES,
     FORBIDDEN_TOOLS,
@@ -836,7 +848,11 @@ fn the_composed_path_can_no_longer_forward_or_bill_a_wrapped_shell_exec() {
     }
 
     // …and none of it costs the tenant budget, i.e. no call went live.
-    assert_eq!(d.spent("acme"), 0, "nothing was forwarded, nothing billed");
+    assert_eq!(
+        d.spent("acme"),
+        Some(0),
+        "nothing was forwarded, nothing billed"
+    );
 
     // The audit trail records three refusals, not three ordinary successes.
     let journal = d.audit_of("acme");
@@ -867,7 +883,7 @@ fn the_composed_path_can_no_longer_forward_or_bill_a_wrapped_shell_exec() {
         outcome.refusal(),
         Some(Refusal::OutsideBoundary(_))
     ));
-    assert_eq!(d.spent("acme"), 0, "the refusal was not billed");
+    assert_eq!(d.spent("acme"), Some(0), "the refusal was not billed");
 }
 
 /// REPAIRED (was high): the exposed prefixes used to forward a *bare
@@ -1202,13 +1218,16 @@ fn canonicality_check_precedes_the_boundary_check() {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// STILL OPEN (medium, spec violation) —
-/// `tests/ccos-enterprise-conformance/src/lib.rs`:
+/// `crates/ccos-enterprise-runtime/src/lib.rs`:
 ///
 /// ```text
 /// if let Disposition::Reject(why) = classify(call.request) {
-///     return Outcome::Refused(Refusal::OutsideBoundary(why));
+///     return refuse(Refusal::OutsideBoundary(why));
 /// }
 /// ```
+///
+/// Unchanged by the move out of the test harness and into a shipped crate:
+/// the composition is now owned, but this collapse moved with it verbatim.
 ///
 /// The gateway crate goes to deliberate trouble to distinguish a boundary
 /// *violation* from a catalogue *omission* (its own docs: "an operator
@@ -1255,7 +1274,7 @@ fn the_composed_path_collapses_three_refusals_into_one_boundary_label() {
     );
     assert_eq!(metrics.get("gateway.refused.tool_not_governed"), None);
     // Nothing was billed — that part of the contract holds.
-    assert_eq!(d.spent("acme"), 0);
+    assert_eq!(d.spent("acme"), Some(0));
 
     // The information does survive in the message, which is the only reason
     // this is a taxonomy defect and not a total loss.
@@ -1303,7 +1322,7 @@ fn boundary_is_case_insensitive_but_authorization_is_not() {
         Some(&Refusal::ToolNotGoverned),
         "authorization does not lowercase — fail-closed, but by accident"
     );
-    assert_eq!(d.spent("acme"), 0);
+    assert_eq!(d.spent("acme"), Some(0));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1403,24 +1422,37 @@ fn an_oversized_name_is_refused_by_length_not_scanned() {
     );
 }
 
-/// REPAIRED (was high, exhaustion): every rejected request used to store the
-/// attacker's entire tool name **twice** — once in `AuditRecord::tool`, once
-/// inside the `Refusal::OutsideBoundary` message `classify` built with
-/// `format!("tool '{}' is not in the Enterprise catalogue", req.tool)`. N
-/// bytes of request became >2N bytes of permanently retained heap.
+/// REPAIRED (was high, exhaustion), in three separate places. The original
+/// finding had three halves and every one of them is now closed; this test
+/// keeps the same hostile inputs and asserts the opposite of what it used to.
 ///
-/// The second copy is gone: names over 256 bytes are refused before any
-/// message is formatted, and the two messages that do name a tool truncate it
-/// to 64 chars via `sanitize()`. Amplification is now ~1.0x.
-///
-/// STILL OPEN (medium): the audit `Vec` has no cap and `AuditRecord::tool`
-/// still holds the caller's untruncated name, so a flood still converts N
-/// bytes of request into ~N bytes of permanently retained heap, linear in
-/// request count, with no counter or quota reacting. Both halves are pinned
-/// below — the closed one so it stays closed, the open one so it is not
-/// mistaken for fixed.
+/// 1. **The refusal message used to carry the name back out.** Every rejected
+///    request stored the attacker's entire tool name **twice** — once in
+///    `AuditRecord::tool`, once inside the `Refusal::OutsideBoundary` message
+///    `classify` built with `format!("tool '{}' is not in the Enterprise
+///    catalogue", req.tool)`. N bytes of request became >2N bytes of
+///    permanently retained heap. Names over 256 bytes are now refused before
+///    any message is formatted, and the two messages that do name a tool
+///    truncate it to 64 chars via `sanitize()`.
+/// 2. **The journal used to store the untruncated name.** This test asserted
+///    `record.tool.len() == 1 MiB` as an open finding. `Deployment::journal`
+///    now clamps every wire-supplied identifier to `MAX_IDENTIFIER_BYTES`
+///    (128), so a 1 MiB name retains 128 bytes: amplification fell from ~1.0x
+///    to ~0.0001x, and the assertion below is the same measurement with the
+///    opposite expectation.
+/// 3. **The journal had no cap.** It was a `Vec` that only grew, so a flood
+///    converted N bytes of request into ~N bytes of retained heap, linear in
+///    request count, with no counter or quota reacting — the shape that let an
+///    unauthenticated caller retain 1.15 GiB across five million refused
+///    calls. The journal is now a bounded buffer
+///    (`DEFAULT_AUDIT_CAPACITY`, overridable via
+///    `Deployment::with_audit_capacity`) that drops the oldest record and
+///    counts the loss in `Deployment::audit_dropped`. The flood below no
+///    longer measures unbounded growth; it measures the **bound** and the
+///    **drop count**, which is the honest failure mode announced in
+///    `ccos_enterprise_runtime`'s module docs.
 #[test]
-fn a_refused_request_no_longer_retains_more_attacker_bytes_than_it_carries() {
+fn a_refused_request_retains_a_bounded_number_of_attacker_bytes() {
     const MIB: usize = 1 << 20;
     let mut d = two_tenant_deployment();
     let bob = actor("memorithm", "bob", AuthStrength::Token);
@@ -1438,7 +1470,7 @@ fn a_refused_request_no_longer_retains_more_attacker_bytes_than_it_carries() {
     let Some(Refusal::OutsideBoundary(message)) = outcome.refusal() else {
         panic!("expected a boundary-labelled refusal, got {outcome:?}");
     };
-    // REPAIRED: the message is a constant, not a copy of the 1 MiB name.
+    // REPAIRED (1): the message is a constant, not a copy of the 1 MiB name.
     assert_eq!(
         message, "tool name is empty or not canonical",
         "the refusal message must not embed the attacker's name"
@@ -1448,12 +1480,21 @@ fn a_refused_request_no_longer_retains_more_attacker_bytes_than_it_carries() {
         "refusal messages are bounded ({} bytes)",
         message.len()
     );
-    let record = &d.audit()[0];
-    // STILL OPEN: the journal keeps the one untruncated copy.
+    let trail: Vec<&AuditRecord> = d.audit().collect();
+    let record = trail[0];
+    // ── REGRESSION GUARD (high) ──────────────────────────────────────────
+    // REPAIRED (2): this used to assert `== MIB`, with the comment "the
+    // journal still stores the untruncated name". Same 1 MiB input, opposite
+    // expectation: the record keeps only what identifies the attempt.
     assert_eq!(
         record.tool.len(),
-        MIB,
-        "the journal still stores the untruncated name"
+        MAX_IDENTIFIER_BYTES,
+        "the journal must clamp a wire-supplied name, not store all {MIB} bytes"
+    );
+    assert!(
+        record.tool.chars().all(|c| c == 'z'),
+        "the retained prefix is the attacker's own bytes, just bounded: {:?}",
+        record.tool
     );
     let retained = record.tool.len()
         + match &record.outcome {
@@ -1461,18 +1502,17 @@ fn a_refused_request_no_longer_retains_more_attacker_bytes_than_it_carries() {
             other => panic!("{other:?}"),
         };
     assert!(
-        retained < MIB + 256,
-        "amplification factor {:.3}x per refused request — must stay ~1.0x",
+        retained < MAX_IDENTIFIER_BYTES + 256,
+        "amplification factor {:.6}x per refused request — a 1 MiB name must \
+         not retain more than a clamped identifier plus a constant message",
         retained as f64 / MIB as f64
     );
-    assert!(
-        retained >= MIB,
-        "STILL OPEN: one full copy of the name is retained ({retained} bytes)"
-    );
 
-    // Growth is still linear in request count: nothing folds or caps the
-    // journal, only the second copy is gone. 24 x 128 KiB keeps the test
-    // cheap while proving the shape.
+    // ── REGRESSION GUARD (high) ──────────────────────────────────────────
+    // REPAIRED (3): growth used to be linear in request count and this block
+    // asserted it ("STILL OPEN: no journal cap"). Same flood, opposite claim:
+    // 24 x 128 KiB of hostile request — 3 MiB on the wire — now retains a few
+    // kilobytes, because each record is clamped.
     let mut d = two_tenant_deployment();
     let chunk = "q".repeat(128 * 1024);
     for i in 0..24 {
@@ -1487,7 +1527,6 @@ fn a_refused_request_no_longer_retains_more_attacker_bytes_than_it_carries() {
     }
     let total: usize = d
         .audit()
-        .iter()
         .map(|r| {
             r.tool.len()
                 + match &r.outcome {
@@ -1496,20 +1535,64 @@ fn a_refused_request_no_longer_retains_more_attacker_bytes_than_it_carries() {
                 }
         })
         .sum();
-    assert_eq!(d.audit().len(), 24, "STILL OPEN: no journal cap");
+    assert_eq!(
+        d.audit().count(),
+        24,
+        "24 records fit inside the default cap"
+    );
+    assert_eq!(d.audit_dropped(), 0, "so nothing was dropped");
     assert!(
-        total < 24 * (128 * 1024 + 256),
-        "24 refused 128 KiB requests retained {total} bytes — the >2x \
-         amplification through the refusal message is back"
+        total <= 24 * (MAX_IDENTIFIER_BYTES + 256),
+        "24 refused 128 KiB requests retained {total} bytes — the journal is \
+         storing untruncated names again"
     );
     assert!(
-        total >= 24 * 128 * 1024,
-        "STILL OPEN: {total} bytes retained, one full copy per request, \
-         unbounded in request count"
+        total < 128 * 1024,
+        "REPAIRED: 3 MiB of hostile request must retain less than one of its \
+         own requests, got {total} bytes"
     );
-    // And none of it was billed, so the budget gate never notices.
-    assert_eq!(d.spent("acme"), 0);
+
+    // ── REGRESSION GUARD (high) ──────────────────────────────────────────
+    // And the record *count* is bounded too, which is what turns "linear in
+    // request count" into "flat". A deliberately tiny capacity makes the drop
+    // arithmetic exact and the test cheap; the default is
+    // `DEFAULT_AUDIT_CAPACITY` and the mechanism is the same one.
+    assert_eq!(DEFAULT_AUDIT_CAPACITY, 100_000, "the announced default cap");
+    let mut d = two_tenant_deployment().with_audit_capacity(16);
+    for i in 0..500 {
+        let r = request("acme", "bob", &chunk, &format!("r-{i}"));
+        d.admit(Call {
+            actor: &bob,
+            request: &r,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+        });
+    }
+    assert_eq!(
+        d.audit().count(),
+        16,
+        "500 refused floods must not grow the journal past its capacity"
+    );
+    assert_eq!(
+        d.audit_dropped(),
+        484,
+        "and the deployment says exactly how many records it lost, so an \
+         operator knows the buffer is not the audit story"
+    );
+    let flooded: usize = d.audit().map(|r| r.tool.len()).sum();
+    assert!(
+        flooded <= 16 * MAX_IDENTIFIER_BYTES,
+        "64 MiB of hostile request retained {flooded} bytes — the bound is off"
+    );
+    // The retained window is the newest, and still ordered by decision.
+    let seqs: Vec<u64> = d.audit().map(|r| r.sequence).collect();
+    assert_eq!(seqs, (484..500).collect::<Vec<_>>());
+
+    // And none of it was billed, so the budget gate never notices (HELD).
+    assert_eq!(d.spent("acme"), Some(0));
     // Nor does the metric registry: refusal labels are low-cardinality (HELD).
+    // `audit.dropped` is a fixed series name, not one per dropped record.
     assert!(
         d.metrics().len() <= 8,
         "metric cardinality stays bounded under name flooding: {:?}",
@@ -1594,6 +1677,223 @@ fn heavy_million_name_sweep() {
         );
         println!("{bytes} bytes → {:?}", t0.elapsed());
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 8. Hostile identifiers on the composed path
+// ─────────────────────────────────────────────────────────────────────────
+
+/// REGRESSION GUARD (was critical), composed path. Everything above attacks
+/// the *tool* name; the composed path takes three more strings straight off
+/// the wire — tenant, actor and request_id — and until the composition became
+/// a shipped crate, nothing bounded them and nothing bound them to the
+/// credential. `Deployment::admit` read only `AuthenticatedActor`'s
+/// **strength**, then keyed RBAC on `request.actor` (a plain client string)
+/// and resolved the tenant from `request.tenant`, so any token-strength
+/// principal could present another actor's name and another tenant's id and
+/// act with their permissions against their budget. `OrgId` was carried on
+/// every credential and read by nothing.
+///
+/// The rest of this file relies on that hole being shut — every composed-path
+/// test above pairs `bob`'s credential with `bob`'s request — without ever
+/// saying so. This test says so, with the same generator pointed at the three
+/// identifier fields instead of the tool name, and pins four claims:
+///
+/// 1. the request must name the actor its credential proves, so `bob` asking
+///    to be `alice` (who *can* write) is `ActorMismatch`, not a forwarded
+///    write;
+/// 2. the credential's org must own the tenant, so a `memorithm` principal
+///    cannot reach `initech`'s tenant;
+/// 3. an empty or over-long identifier is `MalformedRequest(field)` *before*
+///    any tenant state is consulted — the ceiling is `MAX_IDENTIFIER_BYTES`
+///    and it is pinned to the byte;
+/// 4. none of it is ever billed, `admit` never panics, and the refusal tags
+///    stay constants rather than becoming a metric series per hostile string.
+#[test]
+fn hostile_identifiers_never_traverse_the_composed_path() {
+    let mut d = two_tenant_deployment();
+    // A tenant in a *different* organization, so claim 2 is reachable at all.
+    // `add_tenant` now names the owning org and reports whether it provisioned
+    // anything: re-provisioning a live tenant used to silently zero its ledger.
+    let mut hooli = TenantState::new(1_000);
+    hooli.allow_model("claude-opus");
+    assert!(d.add_tenant("initech", "hooli", hooli), "a fresh tenant");
+    assert!(
+        !d.add_tenant("initech", "hooli", TenantState::new(1)),
+        "a live tenant is not silently replaced"
+    );
+    // alice can write; bob cannot. That asymmetry is what impersonation buys.
+    let bob = actor("memorithm", "bob", AuthStrength::Token);
+
+    // Non-vacuity: the legitimate call this test's hostile variants are built
+    // from really is admitted, so a blanket refusal cannot pass by accident.
+    let good = request("acme", "bob", "memory.recall", "r-baseline");
+    assert_eq!(
+        d.admit(Call {
+            actor: &bob,
+            request: &good,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+        }),
+        Outcome::Forwarded
+    );
+    assert_eq!(d.spent("acme"), Some(1));
+
+    // ── The named witnesses ──────────────────────────────────────────────
+    // Every probe below uses `memory.ingest`, which bob is *not* permitted:
+    // authorization is evaluated after all three identifier gates, so nothing
+    // here can be billed however the generator collides with a real id, and
+    // any of these reaching `PermissionDenied` proves the earlier gate ran.
+    let probe = |d: &mut Deployment, tenant: &str, name: &str, id: &str| -> Outcome {
+        let r = request(tenant, name, "memory.ingest", id);
+        d.admit(Call {
+            actor: &bob,
+            request: &r,
+            model: "claude-opus",
+            cost_tokens: 500,
+            variant: None,
+        })
+    };
+
+    // (1) The impersonation. Under the predecessor this was a forwarded,
+    // billed write: RBAC keyed on `request.actor`, and alice is a writer.
+    assert_eq!(
+        probe(&mut d, "acme", "alice", "r-impersonate").refusal(),
+        Some(&Refusal::ActorMismatch),
+        "a credential proving bob must not authorize a request naming alice"
+    );
+    // (2) The cross-org reach, likewise genuine authentication in the wrong org.
+    assert_eq!(
+        probe(&mut d, "hooli", "bob", "r-cross-org").refusal(),
+        Some(&Refusal::TenantNotOwnedByOrg),
+        "memorithm's principal must not reach initech's tenant"
+    );
+    // (3) The shape gate, pinned to the byte on each of the three fields.
+    let at_limit = "z".repeat(MAX_IDENTIFIER_BYTES);
+    let over_limit = "z".repeat(MAX_IDENTIFIER_BYTES + 1);
+    for (field, tenant, name, id) in [
+        ("tenant", "", "bob", "r-empty"),
+        ("actor", "acme", "", "r-empty"),
+        ("request_id", "acme", "bob", ""),
+        ("tenant", over_limit.as_str(), "bob", "r-over"),
+        ("actor", "acme", over_limit.as_str(), "r-over"),
+        ("request_id", "acme", "bob", over_limit.as_str()),
+    ] {
+        assert_eq!(
+            probe(&mut d, tenant, name, id).refusal(),
+            Some(&Refusal::MalformedRequest(field.to_string())),
+            "an empty or oversized {field} is refused for shape, by name"
+        );
+    }
+    // …and exactly at the ceiling the shape gate is satisfied, so the *next*
+    // gate decides. 128 bytes is a legal identifier, 129 is not.
+    assert_eq!(
+        probe(&mut d, at_limit.as_str(), "bob", "r-at-limit").refusal(),
+        Some(&Refusal::UnknownTenant),
+        "{MAX_IDENTIFIER_BYTES} bytes is a well-formed tenant id, merely unknown"
+    );
+    assert_eq!(
+        probe(&mut d, "acme", "bob", at_limit.as_str()).refusal(),
+        Some(&Refusal::PermissionDenied),
+        "a {MAX_IDENTIFIER_BYTES}-byte request_id reaches authorization"
+    );
+
+    // The impersonation is journaled, at zero cost, under the name that was
+    // *claimed* — an operator can see who was impersonated, and the ledger
+    // still reconciles because a refusal is never billed.
+    let impersonation = d
+        .audit_of("acme")
+        .into_iter()
+        .find(|r| r.request_id == "r-impersonate")
+        .expect("the attempt is journaled, not dropped");
+    assert_eq!(impersonation.actor, "alice", "the claimed name is recorded");
+    assert_eq!(impersonation.cost, 0, "a refusal is never billed");
+
+    // ── The sweep ────────────────────────────────────────────────────────
+    // The same generator, aimed at each identifier field in turn.
+    let mut rng = SplitMix64(SEED ^ 0x1dea_5eed);
+    let mut tags: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for i in 0..2_000 {
+        let s = generate(&mut rng);
+        for (field, r) in [
+            (
+                "tenant",
+                request(&s, "bob", "memory.ingest", &format!("t-{i}")),
+            ),
+            (
+                "actor",
+                request("acme", &s, "memory.ingest", &format!("a-{i}")),
+            ),
+            ("request_id", request("acme", "bob", "memory.ingest", &s)),
+        ] {
+            // A panic here fails the test and names the input.
+            let outcome = d.admit(Call {
+                actor: &bob,
+                request: &r,
+                model: "claude-opus",
+                cost_tokens: 500,
+                variant: None,
+            });
+            let Some(refusal) = outcome.refusal() else {
+                panic!("hostile {field} {s:?} traversed the composed path");
+            };
+            *tags
+                .entry(match refusal {
+                    Refusal::MalformedRequest(_) => "malformed_request",
+                    Refusal::ActorMismatch => "actor_mismatch",
+                    Refusal::UnknownTenant => "unknown_tenant",
+                    Refusal::PermissionDenied => "permission_denied",
+                    other => panic!("unexpected refusal for a hostile {field}: {other:?}"),
+                })
+                .or_default() += 1;
+        }
+    }
+    // Non-vacuity per gate: the sweep must actually exercise each of them,
+    // or "nothing traversed" would be a claim about a generator that stopped
+    // generating. `permission_denied` is the tail: a hostile string that is a
+    // well-formed request_id gets all the way to authorization.
+    for gate in [
+        "malformed_request",
+        "actor_mismatch",
+        "unknown_tenant",
+        "permission_denied",
+    ] {
+        assert!(
+            tags.get(gate).copied().unwrap_or(0) > 0,
+            "{gate} unexercised"
+        );
+    }
+
+    // 6 000 hostile calls at 500 tokens each against a 1 000-token budget:
+    // only the one baseline call was ever charged.
+    assert_eq!(
+        d.spent("acme"),
+        Some(1),
+        "not one hostile identifier reached the meter"
+    );
+    assert_eq!(d.spent("hooli"), Some(0));
+    assert_eq!(d.spent("nowhere"), None, "and an absent tenant says so");
+
+    // Refusal tags are constants, so 6 000 distinct hostile identifiers do not
+    // become 6 000 metric series.
+    let metrics = d.metrics();
+    assert!(
+        metrics.len() <= 12,
+        "hostile identifiers produced {} series: {metrics:?}",
+        metrics.len()
+    );
+    assert!(metrics.iter().all(|(k, _)| k.is_ascii() && k.len() < 64));
+    let by_name: BTreeMap<String, u64> = metrics.into_iter().collect();
+    let count = |k: &str| by_name.get(k).copied().unwrap_or(0);
+    assert_eq!(
+        by_name.get("gateway.forwarded"),
+        Some(&1),
+        "the baseline only"
+    );
+    assert_eq!(count("gateway.refused.tenant_not_owned"), 1);
+    assert!(count("gateway.refused.actor_mismatch") > 0);
+    assert!(count("gateway.refused.malformed_request") > 0);
 }
 
 /// Sanity, and the outage guard for the repair: the exposed catalogue still

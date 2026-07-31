@@ -2,14 +2,15 @@
 //!
 //! `ccos_enterprise_policy::TokenBudget` is the product's meter. Everything
 //! commercial rests on it: quota enforcement, per-tenant billing, and the
-//! `Refusal::BudgetExhausted` gate that `ccos_enterprise_conformance`'s module
+//! `Refusal::BudgetExhausted` gate that `ccos_enterprise_runtime`'s module
 //! docs call "charged **last**, so a call refused for any other reason costs
 //! the tenant nothing".
 //!
 //! This file attacks the meter with hand-rolled property tests (fixed-seed
 //! SplitMix64, no new dependencies, no wall-clock in any assertion) plus a
 //! hand-built table of arithmetic edges, and then re-runs the same attacks
-//! through the composed admission path.
+//! through the composed admission path — which now ships, in
+//! `ccos_enterprise_runtime`, rather than living in this suite's own harness.
 //!
 //! ## The invariants under test
 //!
@@ -22,32 +23,56 @@
 //! ## VERDICT
 //!
 //! Invariants 1–3 survive one million random charges against ten different
-//! limits, including every saturation edge. **Invariant 4 is BROKEN**, and it
-//! is reachable from a single caller-controlled number.
+//! limits, including every saturation edge. **Invariant 4 is still BROKEN in
+//! `TokenBudget` itself**, and it is still reachable from a single
+//! caller-declared number. What was repaired is everything the *composition*
+//! owned: who may spend a tenant's budget, whether a retry is billed twice,
+//! whether the journal can check the meter, and whether the ledger can be
+//! rewound behind the journal's back.
+//!
+//! ## What was repaired — every row below is now a REGRESSION GUARD
+//!
+//! | # | the defect, in the past tense | guard |
+//! |---|-------------------------------|-------|
+//! | 3 | `TenantState::budget` was `pub`, so `tenant_mut(..).budget.spent = 0` rewound the meter with nothing journaled; `add_tenant` was a bare `insert`, so re-provisioning a live tenant silently discarded its ledger. The ledger is now private and `add_tenant` returns `false` rather than clobbering. | [`the_ledger_is_private_and_a_live_tenant_is_never_reprovisioned`] |
+//! | 4 | `AuditRecord` carried no cost, so **no** amount of auditing could reconcile the meter. It now carries `cost` (always `0` for a refusal) and a monotonic `sequence`. | [`the_audit_trail_reconciles_the_ledger`] |
+//! | 5 | `request_id` was documented as an "Idempotency/correlation key" and nothing read it: a client-side retry after a timeout was admitted again and **billed** again. A decided `(tenant, request_id)` is now Forwarded without charging. | [`a_replayed_request_id_is_billed_once`] |
+//! | 7 | The authenticated identity was never bound to `request.actor`/`request.tenant`, so any token-strength principal could drain **any** tenant's budget by naming it. The request must now name the actor its credential proves ([`Refusal::ActorMismatch`]) and a tenant that actor's org owns ([`Refusal::TenantNotOwnedByOrg`]). | [`no_authenticated_actor_can_drain_another_tenants_budget`] |
+//! | 8 | `Deployment::spent` folded "no such tenant" into `0`, indistinguishable from "spent nothing". It now returns `Option<u64>`. | [`spent_distinguishes_an_unknown_tenant_from_an_empty_one`] |
+//!
+//! ## What is still BROKEN
 //!
 //! | # | defect | where |
 //! |---|--------|-------|
 //! | 1 | `limit == u64::MAX` ⇒ the ledger silently under-counts without bound: charges keep being `Allow`ed while `spent` stays pinned at `u64::MAX`. One call is enough to pin it forever. | [`unlimited_budget_undercounts_without_bound`] |
 //! | 2 | `charge(0)` is `Allow` on an exhausted budget, so `cost_tokens: 0` is admitted for ever. The cost is **caller-declared** and never reconciled, so the budget gate is opt-in for an honest client. | [`a_zero_charge_is_allowed_forever_even_when_exhausted`] |
-//! | 3 | The ledger is `pub` and unaudited: `tenant_mut(..).budget.spent = 0`, and re-registering a tenant with `add_tenant` silently zeroes it while the audit trail still shows the forwarded calls. | [`the_ledger_is_public_unaudited_state`] |
-//! | 4 | `AuditRecord` carries no cost, so **no** amount of auditing can reconcile the meter — defects 1–3 are invisible in the journal. | [`the_audit_trail_cannot_reconcile_the_ledger`] |
-//! | 5 | `request_id` is documented as an "Idempotency/correlation key" but nothing dedupes: a retried request is billed again. | [`a_replayed_request_id_is_billed_twice`] |
-//! | 6 | `TokenBudget` deserializes with no invariant check: a persisted/restored ledger may hold `spent > limit`, a state `charge` can never produce. | [`a_deserialized_ledger_has_no_invariants`] |
-//! | 7 | The authenticated identity is never bound to `request.actor`/`request.tenant`, so any token-strength principal can drain **any** tenant's budget. | [`any_authenticated_actor_can_drain_any_tenants_budget`] |
-//! | 8 | `Deployment::spent` returns `0` for an unknown tenant — indistinguishable from "spent nothing". | [`spent_of_an_unknown_tenant_is_a_silent_zero`] |
-//! | 9 | Case folding is inconsistent across the request path: the gateway folds tool names, the model allowlist does not fold model names. | [`the_allowlist_is_case_sensitive_but_the_gateway_is_not`] |
-//! | 10 | A refused charge is free and distinguishable, so the gate is a zero-cost comparison oracle: ~20 probes read any tenant's exact remaining balance (and drain it). | [`the_budget_gate_leaks_another_tenants_balance_one_free_probe_at_a_time`] |
+//! | 3b | The *unit-level* half of defect 3 survives the repair: `TokenBudget::{limit, spent}` are still `pub` in `ccos-enterprise-policy`, so the type can still be driven to `spent > limit`. The composed path no longer exposes that (the runtime's ledger is private), but any other holder of a `TokenBudget` can. | [`a_ledger_pushed_over_its_limit_denies_even_a_zero_charge`] |
+//! | 6 | `TokenBudget` deserializes with no invariant check: a persisted/restored ledger may hold `spent > limit`, a state `charge` can never produce. This is now the *only* remaining route to that state. | [`a_deserialized_ledger_has_no_invariants`] |
+//! | 9 | Case folding is inconsistent across the request path: the gateway folds tool names, the model allowlist and the governance map do not. | [`the_allowlist_is_case_sensitive_but_the_gateway_is_not`] |
+//! | 10 | A refused charge is free and distinguishable, so the gate is still a zero-cost comparison oracle: ~20 probes read a tenant's exact remaining balance (and drain it). The credential binding **narrowed the blast radius to one organization** — a stranger's probe is now refused identically whatever it costs, which is asserted here — but any actor who shares the tenant still reads the number for free. | [`the_budget_gate_leaks_the_balance_to_anyone_who_shares_the_tenant`] |
+//!
+//! ## What is announced rather than fixed
+//!
+//! The audit journal is a **bounded** in-memory buffer now: past
+//! `DEFAULT_AUDIT_CAPACITY` the oldest records are dropped and counted. That
+//! is a deliberate, announced loss and not an audit story on its own, so this
+//! file pins the half of it that is a *budget* question — the meter stays
+//! exact across records the journal has thrown away, and the drop count is
+//! what says the trail is incomplete rather than the tenant frugal. See
+//! [`the_journal_is_bounded_and_the_meter_is_not`].
 //!
 //! Everything asserted below is the product's **current, real** behaviour.
 //! Where that behaviour is a defect the assertion pins the defect and the
 //! comment names it, so a future repair fails loudly here instead of silently
-//! changing the accounting.
+//! changing the accounting. Where a defect was repaired the assertion is
+//! inverted and the scenario kept, so a regression fails just as loudly.
 
 use std::collections::BTreeSet;
 
 use ccos_enterprise_auth::AuthStrength;
 use ccos_enterprise_conformance::{
-    actor, request, two_tenant_deployment, Call, Deployment, Outcome, Refusal, TenantState,
+    actor, request, two_tenant_deployment, AuditRecord, Call, Deployment, Outcome, Refusal,
+    TenantState,
 };
 use ccos_enterprise_gateway::{classify, Disposition};
 use ccos_enterprise_policy::{ModelAllowlist, PolicyDecision, TokenBudget};
@@ -568,12 +593,16 @@ fn unlimited_budget_undercounts_without_bound() {
     // The same thing through the whole composed path: a tenant provisioned
     // "unlimited" the obvious way. Every call is Forwarded, the audit trail
     // shows 11 admitted calls, and the ledger reports one call's worth.
+    //
+    // Distinct request ids throughout, so replay suppression never fires and
+    // all eleven calls are genuinely decided: the under-count below is the
+    // ledger's, not the deduplicator's.
     let mut d = Deployment::new();
     d.add_role("writer", &["memory.write"])
         .govern_tool("memory.ingest", "memory.write");
     let mut t = TenantState::new(u64::MAX);
     t.allow_model("m");
-    d.add_tenant("unlimited", t);
+    assert!(d.add_tenant("o", "unlimited", t));
     assert!(d.assign("a", "writer"));
     let who = actor("o", "a", AuthStrength::Token);
 
@@ -594,12 +623,33 @@ fn unlimited_budget_undercounts_without_bound() {
     assert_eq!(d.audit_of("unlimited").len(), 11);
     assert_eq!(
         d.spent("unlimited"),
-        u64::MAX,
+        Some(u64::MAX),
         "the meter pinned on the third call and never moved again"
     );
+    let metered = d.spent("unlimited").expect("the tenant exists");
     assert!(
-        declared - u128::from(d.spent("unlimited")) > u128::from(u64::MAX) * 4,
+        declared - u128::from(metered) > u128::from(u64::MAX) * 4,
         "DEFECT: the deployment under-bills by more than 4 * u64::MAX tokens"
+    );
+
+    // Defect 4's repair does not fix this — it makes it DETECTABLE, which is
+    // the whole point of journaling the cost. Reconciling the trail against
+    // the meter now produces a number, and the number is wrong: eleven
+    // forwarded records each carrying `u64::MAX / 2`, against a meter that
+    // reports one `u64::MAX`. Before the repair the two sides could not even
+    // be compared, so this shortfall had no observable form at all.
+    let journaled: u128 = d
+        .audit_of("unlimited")
+        .iter()
+        .map(|r| u128::from(r.cost))
+        .sum();
+    assert_eq!(
+        journaled, declared,
+        "the journal records every token the caller declared"
+    );
+    assert!(
+        journaled > u128::from(metered) * 4,
+        "DEFECT 1, now visible: the journal says {journaled}, the meter says {metered}"
     );
 }
 
@@ -620,6 +670,12 @@ fn unlimited_budget_undercounts_without_bound() {
 /// before and after exhaustion. 100 000 such calls are run here; every one is
 /// `Forwarded`, the tenant's meter never moves, and the deployment's own
 /// counters agree that it forwarded 100 000 requests to Core.
+///
+/// Every free call carries a **distinct** `request_id`, so replay suppression
+/// never fires: each of the 100 000 is a genuinely new decision that reached
+/// the budget gate and was admitted by it. (Reusing one id would make this
+/// test pass for the wrong reason — see
+/// [`a_replayed_request_id_is_billed_once`].)
 #[test]
 fn a_zero_charge_is_allowed_forever_even_when_exhausted() {
     // Unit level: exhaust exactly, then hammer with zeros.
@@ -654,7 +710,7 @@ fn a_zero_charge_is_allowed_forever_even_when_exhausted() {
         }),
         Outcome::Forwarded
     );
-    assert_eq!(d.spent("acme"), 1_000, "the whole budget is gone");
+    assert_eq!(d.spent("acme"), Some(1_000), "the whole budget is gone");
 
     // A one-token call is now refused…
     let costly = request("acme", "alice", "memory.ingest", "costly");
@@ -673,7 +729,7 @@ fn a_zero_charge_is_allowed_forever_even_when_exhausted() {
     // …but 100 000 zero-cost calls sail straight through to Core.
     const FREE_CALLS: usize = 100_000;
     for i in 0..FREE_CALLS {
-        let req = request("acme", "alice", "memory.recall", "replay");
+        let req = request("acme", "alice", "memory.recall", &format!("free-{i}"));
         let outcome = d.admit(Call {
             actor: &alice,
             request: &req,
@@ -687,7 +743,7 @@ fn a_zero_charge_is_allowed_forever_even_when_exhausted() {
             "EXHAUSTION VECTOR: free call {i} was admitted past an exhausted budget"
         );
     }
-    assert_eq!(d.spent("acme"), 1_000, "the meter never moved");
+    assert_eq!(d.spent("acme"), Some(1_000), "the meter never moved");
     let metrics = d.metrics();
     let forwarded = metrics
         .iter()
@@ -699,22 +755,43 @@ fn a_zero_charge_is_allowed_forever_even_when_exhausted() {
         FREE_CALLS as u64 + 1,
         "the deployment's own counters admit it forwarded 100 001 calls on a 1 000-token budget"
     );
+    assert_eq!(
+        metrics
+            .iter()
+            .find(|(k, _)| k == "gateway.replayed")
+            .map(|(_, v)| *v),
+        None,
+        "not one of those admissions was a suppressed replay — every free call \
+         reached the budget gate and was admitted by it"
+    );
 }
 
-// ── 5. Defect 3: the ledger is public, unaudited, resettable ─────────────
+// ── 5. Defect 3, REPAIRED: the ledger is private and never clobbered ─────
 
-/// **DEFECT 3 (high, governance).** `TokenBudget::{limit, spent}` and
-/// `TenantState::budget` are `pub`, and `Deployment::tenant_mut` hands out
-/// `&mut TenantState` to anyone holding the deployment. The meter can
-/// therefore be rewound, or the limit raised, with no permission check, no
-/// `AdminAction`, and no audit record — while the journal still shows the
-/// forwarded calls that produced the old value.
+/// **DEFECT 3 (high, governance) — REPAIRED; this test is the guard.**
 ///
-/// `Deployment::add_tenant` is the same defect with a friendlier face: it is
-/// an unconditional `insert`, so re-registering an existing tenant (a
-/// provisioning replay, a config reload) silently discards the ledger.
+/// `TokenBudget::{limit, spent}` and `TenantState::budget` were both `pub`,
+/// and `Deployment::tenant_mut` hands out `&mut TenantState` to anyone holding
+/// the deployment. The meter could therefore be rewound, or the limit raised,
+/// with no permission check, no `AdminAction` and no audit record — while the
+/// journal still showed the forwarded calls that produced the old value. An
+/// exhausted tenant became a free one in one assignment, and the only two
+/// artefacts the product has for billing disagreed with each other with
+/// nothing to say which was right.
+///
+/// `Deployment::add_tenant` was the same defect with a friendlier face: an
+/// unconditional `insert`, so re-registering an existing tenant — a
+/// provisioning replay, a config reload, a duplicated line in a bootstrap
+/// script — silently discarded its ledger, its allowlist and its activations.
+///
+/// Both are closed. `TenantState`'s fields are private and expose only
+/// `spent()`/`limit()` reads plus builders that cannot touch the meter, so
+/// **the rewind in this test's original body no longer compiles** — which is
+/// the strongest possible form of this guard. `add_tenant` returns `false` and
+/// changes nothing when the tenant exists, so the scenario below is kept
+/// verbatim with the opposite expectation: the live ledger must survive.
 #[test]
-fn the_ledger_is_public_unaudited_state() {
+fn the_ledger_is_private_and_a_live_tenant_is_never_reprovisioned() {
     let mut d = two_tenant_deployment();
     let alice = actor("memorithm", "alice", AuthStrength::Token);
     let spend = |d: &mut Deployment, cost: u64, id: &str| {
@@ -729,61 +806,120 @@ fn the_ledger_is_public_unaudited_state() {
     };
 
     assert_eq!(spend(&mut d, 1_000, "r-1"), Outcome::Forwarded);
-    assert_eq!(d.spent("acme"), 1_000);
+    assert_eq!(d.spent("acme"), Some(1_000));
     assert_eq!(
         spend(&mut d, 1, "r-2").refusal(),
         Some(&Refusal::BudgetExhausted)
     );
-    let audit_before = d.audit().len();
+    let audit_before = d.audit().count();
 
-    // (a) Rewind the meter through the public field. No approval, no record.
-    d.tenant_mut("acme").expect("tenant").budget.spent = 0;
-    assert_eq!(d.spent("acme"), 0, "DEFECT: the ledger was rewound");
+    // (a) The meter is read-only from outside. `tenant_mut` still hands out
+    //     `&mut TenantState` — configuration is legitimately mutable — but the
+    //     ledger is not reachable through it. The two assignments this test
+    //     used to make,
+    //
+    //         d.tenant_mut("acme").unwrap().budget.spent = 0;
+    //         d.tenant_mut("acme").unwrap().budget.limit = u64::MAX;
+    //
+    //     are compile errors now: `budget` is private. What remains are the
+    //     builders, and exercising every one of them must not move the meter.
+    {
+        let t = d.tenant_mut("acme").expect("tenant");
+        assert_eq!(t.spent(), 1_000, "the ledger is readable…");
+        assert_eq!(t.limit(), 1_000, "…and so is the ceiling…");
+        t.allow_model("another-model")
+            .activate(AdvancedQPageVariant::CausalChain);
+        assert_eq!(t.spent(), 1_000, "…but configuration cannot rewind it");
+        assert_eq!(t.limit(), 1_000, "…nor widen it");
+    }
     assert_eq!(
-        d.audit().len(),
+        d.audit().count(),
         audit_before,
-        "DEFECT: and nothing was journaled about it"
+        "and no decision was journaled by reconfiguring"
     );
     assert_eq!(
-        spend(&mut d, 1_000, "r-3"),
-        Outcome::Forwarded,
-        "free again"
+        spend(&mut d, 1, "r-3").refusal(),
+        Some(&Refusal::BudgetExhausted),
+        "REGRESSION GUARD: exhausted stays exhausted — there is no way back \
+         to a free tenant that does not go through provisioning"
     );
 
-    // (b) Raise the limit through the public field: same story.
-    d.tenant_mut("acme").expect("tenant").budget.limit = u64::MAX;
-    assert_eq!(spend(&mut d, u64::MAX, "r-4"), Outcome::Forwarded);
-    assert_eq!(d.spent("acme"), u64::MAX);
-
-    // (c) Re-registering the tenant wipes the ledger entirely — and now the
-    //     audit trail and the meter contradict each other outright: four
-    //     forwarded calls totalling more than u64::MAX tokens, meter at zero.
-    let mut fresh = TenantState::new(1_000);
+    // (b) Re-provisioning a live tenant is refused outright. Same call the
+    //     original defect used to zero the ledger with; it now returns false
+    //     and changes nothing at all.
+    let mut fresh = TenantState::new(u64::MAX);
     fresh.allow_model("claude-opus");
-    d.add_tenant("acme", fresh);
+    assert!(
+        !d.add_tenant("memorithm", "acme", fresh),
+        "REGRESSION GUARD: add_tenant refuses to overwrite a live tenant"
+    );
     assert_eq!(
         d.spent("acme"),
-        0,
-        "DEFECT: add_tenant silently zeroed a live ledger"
+        Some(1_000),
+        "REGRESSION GUARD: the ledger survived re-provisioning"
     );
-    let forwarded = d
-        .audit_of("acme")
-        .iter()
-        .filter(|r| r.outcome.is_forwarded())
-        .count();
     assert_eq!(
-        forwarded, 3,
-        "…while the journal still shows every forwarded call"
+        d.tenant_mut("acme").expect("tenant").limit(),
+        1_000,
+        "…and so did the ceiling: the u64::MAX limit was not adopted"
+    );
+    assert_eq!(
+        spend(&mut d, 1, "r-4").refusal(),
+        Some(&Refusal::BudgetExhausted),
+        "…so the tenant is still exhausted, not silently unlimited"
+    );
+
+    // (c) Nor can re-provisioning transfer ownership. A second organization
+    //     claiming an existing tenant is refused, and the tenant stays where
+    //     it was — otherwise `add_tenant` would be a cross-org takeover
+    //     primitive rather than a provisioning one.
+    assert!(
+        !d.add_tenant("initech", "acme", TenantState::new(50)),
+        "REGRESSION GUARD: a foreign org cannot re-home a live tenant"
+    );
+    d.assign("mallory", "writer");
+    let mallory = actor("initech", "mallory", AuthStrength::Token);
+    let takeover = request("acme", "mallory", "memory.ingest", "r-5");
+    assert_eq!(
+        d.admit(Call {
+            actor: &mallory,
+            request: &takeover,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+        })
+        .refusal(),
+        Some(&Refusal::TenantNotOwnedByOrg),
+        "acme still belongs to memorithm"
+    );
+
+    // (d) The journal and the meter now agree, which was the whole point:
+    //     every forwarded record's cost sums to exactly what the meter says.
+    let trail = d.audit_of("acme");
+    let forwarded = trail.iter().filter(|r| r.outcome.is_forwarded()).count();
+    assert_eq!(forwarded, 1, "one forwarded call, and only one");
+    let billed: u64 = trail.iter().map(|r| r.cost).sum();
+    assert_eq!(
+        Some(billed),
+        d.spent("acme"),
+        "REGRESSION GUARD: journal and meter reconcile to the token"
     );
 }
 
-/// A ledger driven above its own limit (only reachable through the public
-/// field, or through deserialization — see [`a_deserialized_ledger_has_no_invariants`])
-/// closes completely: `charge(0)` is the one and only case where a zero
-/// charge is refused, because `spent > limit` already.
+/// A ledger driven above its own limit closes completely: `charge(0)` is the
+/// one and only case where a zero charge is refused, because `spent > limit`
+/// already.
 ///
-/// This is the fail-closed half of defect 3 and is worth keeping: a corrupted
-/// meter refuses everything rather than admitting everything.
+/// This is the fail-closed half of defect 3, and it is now the **residual** of
+/// it. The composed path can no longer produce this state — the runtime's
+/// ledger is private (see
+/// [`the_ledger_is_private_and_a_live_tenant_is_never_reprovisioned`]) — but
+/// `TokenBudget::{limit, spent}` are still `pub` in `ccos-enterprise-policy`,
+/// so any other holder of the type can, as can deserialization (see
+/// [`a_deserialized_ledger_has_no_invariants`]). Kept pinning the real
+/// behaviour: a corrupted meter refuses everything rather than admitting
+/// everything, which is the right direction to fail in, and the assignment
+/// below is the proof that the field is still assignable.
 #[test]
 fn a_ledger_pushed_over_its_limit_denies_even_a_zero_charge() {
     let mut b = TokenBudget::new(100);
@@ -840,13 +976,17 @@ fn a_deserialized_ledger_has_no_invariants() {
 // ── 7. Composed equivalence: does the deployment ledger add up? ──────────
 
 /// The end-to-end form of invariant 4, over 20 000 pseudo-random governed
-/// calls across two tenants, with every refusal cause mixed in: bad model,
+/// calls across two tenants, with **every** refusal cause mixed in: bad model,
 /// ungoverned tool, forbidden namespace, anonymous caller, unknown tenant,
-/// unactivated variant, and genuine budget exhaustion.
+/// unactivated variant, genuine budget exhaustion, and — new since the
+/// credential binding landed — a spoofed actor name, a foreign organization
+/// and a malformed identifier.
 ///
 /// This is the one that **holds**: with finite limits the deployment's meter
 /// equals the exact sum of the costs of the calls it forwarded, per tenant,
-/// with no cross-charging and no refusal ever billed.
+/// with no cross-charging and no refusal ever billed. Since `AuditRecord`
+/// gained `cost`, it also holds *against the journal*, which is asserted at
+/// the end: 20 000 decisions, and the two artefacts agree to the token.
 #[test]
 fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
     let mut d = Deployment::new();
@@ -859,36 +999,56 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
     let mut acme = TenantState::new(4_000_000);
     acme.allow_model("m")
         .activate(AdvancedQPageVariant::Hierarchical);
-    d.add_tenant("acme", acme);
+    assert!(d.add_tenant("o", "acme", acme));
     // globex activates nothing: the same variant is billable for one tenant
     // and refused for the other.
     let mut globex = TenantState::new(250_000);
     globex.allow_model("m");
-    d.add_tenant("globex", globex);
+    assert!(d.add_tenant("o", "globex", globex));
     assert!(d.assign("a", "writer"));
+    // `b` holds the same role, so the impersonation shape below is refused for
+    // the identity mismatch and not merely for want of a permission.
+    assert!(d.assign("b", "writer"));
 
     let strong = actor("o", "a", AuthStrength::Token);
     let anon = actor("o", "a", AuthStrength::Anonymous);
+    // Same actor name, same role, different organization: everything about
+    // this credential is genuine except the tenant it reaches for.
+    let foreign = actor("other-org", "a", AuthStrength::Token);
 
     let mut rng = Rng::new(SEED ^ 0xC0FF_EE00_C0FF_EE00);
     let mut expect_acme: u64 = 0;
     let mut expect_globex: u64 = 0;
     let mut forwarded = 0u64;
-    let mut refusals = [0u64; 8];
+    let mut refusals = [0u64; 11];
 
     for i in 0..20_000u64 {
         // Pick a shape: mostly-legitimate calls, salted with every refusal.
-        let shape = rng.below(10);
+        let shape = rng.below(13);
         let tenant = if rng.below(3) == 0 { "globex" } else { "acme" };
         let tool = match shape {
-            6 => "policy.set",   // governed for nobody `a` holds
+            6 => "policy.set",   // governed for a permission `a` lacks
             7 => "shell.exec",   // outside the boundary
             8 => "memory.purge", // never governed
             _ => "memory.ingest",
         };
         let model = if shape == 5 { "other" } else { "m" };
         let named_tenant = if shape == 9 { "nosuch" } else { tenant };
-        let who = if shape == 4 { &anon } else { &strong };
+        let who = match shape {
+            4 => &anon,     // → Unauthenticated
+            11 => &foreign, // → TenantNotOwnedByOrg
+            _ => &strong,
+        };
+        // shape 10 spoofs a *different* actor's name in the request body —
+        // the exact move defect 7 made free. It must now be refused.
+        let named_actor = if shape == 10 { "b" } else { "a" };
+        // shape 12 sends an empty request id: an identifier the runtime
+        // refuses before it consults anything at all.
+        let request_id = if shape == 12 {
+            String::new()
+        } else {
+            format!("r-{i}")
+        };
         let variant = match rng.below(12) {
             0 => Some(AdvancedQPageVariant::Hierarchical), // acme only
             1 => Some(AdvancedQPageVariant::CausalChain),  // nobody
@@ -903,7 +1063,7 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
 
         let before_acme = d.spent("acme");
         let before_globex = d.spent("globex");
-        let req = request(named_tenant, "a", tool, &format!("r-{i}"));
+        let req = request(named_tenant, named_actor, tool, &request_id);
         let outcome = d.admit(Call {
             actor: who,
             request: &req,
@@ -943,21 +1103,51 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
 
     assert_eq!(
         d.spent("acme"),
-        expect_acme,
+        Some(expect_acme),
         "acme's meter must equal the exact sum of its forwarded costs"
     );
     assert_eq!(
         d.spent("globex"),
-        expect_globex,
+        Some(expect_globex),
         "globex's meter must equal the exact sum of its forwarded costs"
     );
-    assert_eq!(d.audit().len(), 20_000, "every decision is journaled");
+    assert_eq!(d.audit().count(), 20_000, "every decision is journaled");
+    assert_eq!(
+        d.audit_dropped(),
+        0,
+        "20 000 records fit inside the default bound, so the count above is \
+         the whole story and not a window onto it"
+    );
     assert!(forwarded > 1_000, "forwards exercised: {forwarded}");
     // Every refusal cause was actually reached, so the "no refusal is billed"
-    // half of this test is not vacuous for any of them.
+    // half of this test is not vacuous for any of them — including the three
+    // the credential binding introduced.
     for (i, count) in refusals.iter().enumerate() {
         assert!(*count > 0, "refusal cause {i} never exercised");
     }
+
+    // The journal reconciles the meter, per tenant, over the whole run. This
+    // is defect 4's repair at scale: every refusal is journaled at cost 0, and
+    // the forwarded costs sum to exactly what each tenant was billed.
+    for (name, expected) in [("acme", expect_acme), ("globex", expect_globex)] {
+        let trail = d.audit_of(name);
+        let billed: u64 = trail.iter().map(|r| r.cost).sum();
+        assert_eq!(
+            billed, expected,
+            "REGRESSION GUARD: {name}'s journal must reconcile its meter"
+        );
+        assert!(
+            trail
+                .iter()
+                .all(|r| r.outcome.is_forwarded() || r.cost == 0),
+            "REGRESSION GUARD: a refusal is journaled at cost 0"
+        );
+    }
+    // Sequence numbers are assigned at decision time and never repeat, so a
+    // journal collected concurrently can be replayed in the order the
+    // deployment actually decided.
+    let sequences: Vec<u64> = d.audit().map(|r| r.sequence).collect();
+    assert_eq!(sequences, (0..20_000).collect::<Vec<_>>());
 }
 
 /// Index for the refusal histogram above. Kept exhaustive on purpose: a new
@@ -972,23 +1162,33 @@ fn refusal_index(r: &Refusal) -> usize {
         Refusal::ModelNotAllowed => 5,
         Refusal::VariantNotActivated => 6,
         Refusal::BudgetExhausted => 7,
+        Refusal::ActorMismatch => 8,
+        Refusal::TenantNotOwnedByOrg => 9,
+        Refusal::MalformedRequest(_) => 10,
     }
 }
 
-// ── 8. Defects 4 and 5: the journal cannot check the meter ───────────────
+// ── 8. Defects 4 and 5, REPAIRED: the journal checks the meter ───────────
 
-/// **DEFECT 4 (medium, auditability).** `AuditRecord` records
-/// `{request_id, tenant, actor, tool, outcome}` — and no cost. Two forwarded
-/// calls that differ by six orders of magnitude in price produce byte-identical
-/// records apart from the request id.
+/// **DEFECT 4 (medium, auditability) — REPAIRED; this test is the guard.**
 ///
-/// Consequence: the meter is unverifiable. Defects 1, 2, 3 and 6 all change
-/// what a tenant is billed, and **none** of them leaves a trace in the one
-/// artefact the product offers for reconciliation. `docs/COGNITIVE_AUDIT.md`'s
-/// "audit-correlated by request id" is true and insufficient: you can join a
-/// charge to a request id, but you cannot recover the charge.
+/// `AuditRecord` recorded `{request_id, tenant, actor, tool, outcome}` — and
+/// no cost. Two forwarded calls that differed by three orders of magnitude in
+/// price produced byte-identical records apart from the request id.
+///
+/// The consequence was that the meter was unverifiable: defects 1, 2, 3 and 6
+/// all change what a tenant is billed, and **none** of them left a trace in
+/// the one artefact the product offers for reconciliation.
+/// `docs/COGNITIVE_AUDIT.md`'s "audit-correlated by request id" was true and
+/// insufficient — you could join a charge to a request id, but you could not
+/// recover the charge.
+///
+/// The record now carries `cost` (always `0` for a refusal) and a monotonic
+/// `sequence`. The scenario below is unchanged — the same 1-token and
+/// 999-token calls — with the opposite expectation: the journal must tell them
+/// apart, and the trail must add up to the meter.
 #[test]
-fn the_audit_trail_cannot_reconcile_the_ledger() {
+fn the_audit_trail_reconciles_the_ledger() {
     let mut d = two_tenant_deployment();
     let alice = actor("memorithm", "alice", AuthStrength::Token);
     for (id, cost) in [("cheap", 1u64), ("dear", 999u64)] {
@@ -1004,11 +1204,13 @@ fn the_audit_trail_cannot_reconcile_the_ledger() {
             Outcome::Forwarded
         );
     }
-    assert_eq!(d.spent("acme"), 1_000);
+    assert_eq!(d.spent("acme"), Some(1_000));
 
     let trail = d.audit_of("acme");
     assert_eq!(trail.len(), 2);
     let (cheap, dear) = (trail[0], trail[1]);
+    // The fields that used to be the *whole* record still agree — same tenant,
+    // same actor, same tool, both forwarded…
     assert_eq!(
         (
             &cheap.tenant,
@@ -1022,21 +1224,65 @@ fn the_audit_trail_cannot_reconcile_the_ledger() {
             &dear.tool,
             dear.outcome.is_forwarded()
         ),
-        "DEFECT: a 1-token call and a 999-token call are indistinguishable in the journal"
     );
-    assert_ne!(cheap.request_id, dear.request_id, "only the id differs");
+    // …and that is precisely why the price has to be in the record.
+    assert_ne!(cheap.request_id, dear.request_id);
+    assert_eq!(
+        (cheap.cost, dear.cost),
+        (1, 999),
+        "REGRESSION GUARD: a 1-token call and a 999-token call are \
+         distinguishable in the journal"
+    );
+    assert!(
+        cheap.sequence < dear.sequence,
+        "REGRESSION GUARD: decision order is recoverable from the journal alone"
+    );
+    let billed: u64 = trail.iter().map(|r| r.cost).sum();
+    assert_eq!(
+        Some(billed),
+        d.spent("acme"),
+        "REGRESSION GUARD: the journal reconciles the meter exactly"
+    );
+
+    // A refusal is journaled, and journaled at zero: the reconciliation above
+    // cannot be fooled by an expensive call that never reached Core.
+    let refused = request("acme", "alice", "shell.exec", "forbidden");
+    assert!(d
+        .admit(Call {
+            actor: &alice,
+            request: &refused,
+            model: "claude-opus",
+            cost_tokens: 500,
+            variant: None,
+        })
+        .refusal()
+        .is_some());
+    let trail = d.audit_of("acme");
+    assert_eq!(trail.len(), 3, "the refusal is journaled too");
+    assert_eq!(
+        trail[2].cost, 0,
+        "REGRESSION GUARD: a refusal is journaled at cost 0, whatever it declared"
+    );
+    let billed: u64 = trail.iter().map(|r| r.cost).sum();
+    assert_eq!(Some(billed), d.spent("acme"), "…and still reconciles");
 }
 
-/// **DEFECT 5 (medium, billing integrity).** `GatewayRequest::request_id` is
-/// documented as an "Idempotency/correlation key for audit joins", but nothing
-/// on the path dedupes on it. Replaying the identical request — the ordinary
-/// consequence of a client-side retry after a timeout — is admitted again and
-/// billed again.
+/// **DEFECT 5 (medium, billing integrity) — REPAIRED; this test is the
+/// guard.**
 ///
-/// Ten replays of one request id drain ten times the budget and leave ten
-/// audit records that all claim to be the same request.
+/// `GatewayRequest::request_id` is documented as an "Idempotency/correlation
+/// key for audit joins", and nothing on the path read it. Replaying the
+/// identical request — the ordinary consequence of a client-side retry after a
+/// timeout — was admitted again and **billed** again: ten replays of one id
+/// drained ten times the budget and left ten audit records that all claimed to
+/// be the same request, so an operator could not tell a retried call from ten
+/// real ones.
+///
+/// A decided `(tenant, request_id)` is now Forwarded without being charged.
+/// The scenario is kept verbatim — the same ten replays of one id, at the same
+/// 100 tokens each — with the opposite expectation: billed once.
 #[test]
-fn a_replayed_request_id_is_billed_twice() {
+fn a_replayed_request_id_is_billed_once() {
     let mut d = two_tenant_deployment();
     let alice = actor("memorithm", "alice", AuthStrength::Token);
     let req = request("acme", "alice", "memory.ingest", "the-same-request");
@@ -1051,22 +1297,35 @@ fn a_replayed_request_id_is_billed_twice() {
                 variant: None,
             }),
             Outcome::Forwarded,
-            "replay {i} was admitted"
+            "replay {i} keeps returning the prior outcome"
         );
     }
     assert_eq!(
         d.spent("acme"),
-        1_000,
-        "DEFECT: one request id, ten charges — the whole budget"
+        Some(100),
+        "REGRESSION GUARD: one request id, one charge — not the whole budget"
     );
     let trail = d.audit_of("acme");
-    assert_eq!(trail.len(), 10);
+    assert_eq!(trail.len(), 10, "every attempt is still journaled");
     assert!(
         trail.iter().all(|r| r.request_id == "the-same-request"),
-        "…and ten journal entries that cannot be told apart"
+        "…under the id the client sent…"
     );
-    // The eleventh replay is refused only because the money ran out, not
-    // because it was recognised as a duplicate.
+    let costs: Vec<u64> = trail.iter().map(|r| r.cost).collect();
+    assert_eq!(
+        costs,
+        vec![100, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "…and the journal now says which one of the ten was the real charge"
+    );
+    let billed: u64 = costs.iter().sum();
+    assert_eq!(
+        Some(billed),
+        d.spent("acme"),
+        "journal reconciles the meter"
+    );
+
+    // The eleventh replay is Forwarded and free, not refused: the budget was
+    // never drained, so there is nothing for `BudgetExhausted` to fire on.
     assert_eq!(
         d.admit(Call {
             actor: &alice,
@@ -1074,32 +1333,87 @@ fn a_replayed_request_id_is_billed_twice() {
             model: "claude-opus",
             cost_tokens: 100,
             variant: None,
-        })
-        .refusal(),
-        Some(&Refusal::BudgetExhausted)
+        }),
+        Outcome::Forwarded
+    );
+    assert_eq!(d.spent("acme"), Some(100));
+
+    // Dedup is on the id, not on the shape: a genuinely new request with the
+    // same tenant, actor, tool and price is billed. Otherwise this guard would
+    // be satisfied by a deployment that simply stopped charging.
+    let fresh = request("acme", "alice", "memory.ingest", "a-different-request");
+    assert_eq!(
+        d.admit(Call {
+            actor: &alice,
+            request: &fresh,
+            model: "claude-opus",
+            cost_tokens: 100,
+            variant: None,
+        }),
+        Outcome::Forwarded
+    );
+    assert_eq!(
+        d.spent("acme"),
+        Some(200),
+        "a distinct id is a distinct decision, and is charged"
+    );
+
+    // Replay suppression is per tenant: the same id under another tenant is a
+    // different decision, so it cannot be used to get a free call elsewhere.
+    let bob = actor("memorithm", "bob", AuthStrength::Token);
+    let elsewhere = request("globex", "bob", "memory.recall", "the-same-request");
+    assert_eq!(
+        d.admit(Call {
+            actor: &bob,
+            request: &elsewhere,
+            model: "gpt-5",
+            cost_tokens: 50,
+            variant: None,
+        }),
+        Outcome::Forwarded
+    );
+    assert_eq!(
+        d.spent("globex"),
+        Some(50),
+        "REGRESSION GUARD: the replay key is (tenant, request_id), not request_id"
     );
 }
 
-// ── 9. Defect 7: whose budget is it? ─────────────────────────────────────
+// ── 9. Defect 7, REPAIRED: whose budget is it? ───────────────────────────
 
-/// **DEFECT 7 (critical, authorization + budget drain).**
-/// `Deployment::decide` takes identity from `call.actor` but takes the actor
-/// *name* and the tenant from the request: it checks
-/// `roles.allows(&call.request.actor, …)` and charges
-/// `call.request.tenant`'s budget. The authenticated principal is never
-/// compared with either.
+/// **DEFECT 7 (critical, authorization + budget drain) — REPAIRED; this test
+/// is the guard, and it is the most valuable assertion in this file.**
 ///
-/// The budget consequence: any principal that can authenticate to any tenant
-/// at all can drain **every** tenant's budget, by naming that tenant and any
+/// The predecessor's `decide` took identity from `call.actor` but took the
+/// actor *name* and the tenant from the request: it checked
+/// `roles.allows(&call.request.actor, …)` and charged `call.request.tenant`'s
+/// budget. The authenticated principal was never compared with either.
+///
+/// The budget consequence was total: any principal that could authenticate at
+/// all could drain **every** tenant's budget, by naming that tenant and any
 /// privileged actor name in the request body. There is no rate limit and no
-/// per-actor sub-quota, so the whole quota goes in a handful of calls.
+/// per-actor sub-quota, so the whole quota went in a handful of calls — and
+/// the journal recorded the *spoofed* name, so the real principal was
+/// unrecoverable after the fact.
+///
+/// Two gates close it, and the order matters: a request must name the actor
+/// its credential proves ([`Refusal::ActorMismatch`]) and reach a tenant its
+/// credential's organization owns ([`Refusal::TenantNotOwnedByOrg`]), both
+/// **before** any tenant state is touched. The attack below is kept exactly as
+/// it was — same stranger, same spoofed names, same tenants, same prices — and
+/// every step of it is now asserted to be refused, free, and journaled as an
+/// attempt.
 #[test]
-fn any_authenticated_actor_can_drain_any_tenants_budget() {
+fn no_authenticated_actor_can_drain_another_tenants_budget() {
     let mut d = two_tenant_deployment();
     // A nobody: authenticated, holds no role, belongs to no tenant.
     let mallory = actor("evil-corp", "mallory", AuthStrength::Token);
 
-    // Under her own name she gets nothing — RBAC works as advertised.
+    // Under her own name she gets nothing. The refusal changed shape with the
+    // repair — it is no longer PermissionDenied but TenantNotOwnedByOrg,
+    // because the org gate is evaluated *before* RBAC, deliberately: a
+    // stranger must not be able to enumerate a tenant's role configuration by
+    // the refusal it hands back.
     let honest = request("acme", "mallory", "memory.ingest", "m-1");
     assert_eq!(
         d.admit(Call {
@@ -1110,12 +1424,12 @@ fn any_authenticated_actor_can_drain_any_tenants_budget() {
             variant: None,
         })
         .refusal(),
-        Some(&Refusal::PermissionDenied)
+        Some(&Refusal::TenantNotOwnedByOrg)
     );
-    assert_eq!(d.spent("acme"), 0, "and it costs the tenant nothing");
+    assert_eq!(d.spent("acme"), Some(0), "and it costs the tenant nothing");
 
-    // Claiming to be `alice` in the request body is enough. Nothing binds the
-    // request's actor field to the authenticated identity.
+    // Claiming to be `alice` in the request body was enough. It is now the
+    // first thing checked against the credential.
     let spoofed = request("acme", "alice", "memory.ingest", "m-2");
     assert_eq!(
         d.admit(Call {
@@ -1124,19 +1438,19 @@ fn any_authenticated_actor_can_drain_any_tenants_budget() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
-        }),
-        Outcome::Forwarded,
-        "DEFECT: an unrelated principal was admitted as alice"
+        })
+        .refusal(),
+        Some(&Refusal::ActorMismatch),
+        "REGRESSION GUARD: an unrelated principal may not be admitted as alice"
     );
     assert_eq!(
         d.spent("acme"),
-        1_000,
-        "DEFECT: and drained acme's entire budget"
+        Some(0),
+        "REGRESSION GUARD: and acme's budget is untouched"
     );
 
-    // The same call drains globex too — one authenticated stranger, every
-    // tenant's quota. Note globex's allowlist is honoured, so the attacker
-    // must name a model globex allows; that is public configuration.
+    // The same call against globex — one authenticated stranger, every
+    // tenant's quota — is refused identically.
     let cross = request("globex", "bob", "memory.recall", "m-3");
     assert_eq!(
         d.admit(Call {
@@ -1145,27 +1459,106 @@ fn any_authenticated_actor_can_drain_any_tenants_budget() {
             model: "gpt-5",
             cost_tokens: 500,
             variant: None,
-        }),
-        Outcome::Forwarded
+        })
+        .refusal(),
+        Some(&Refusal::ActorMismatch)
     );
-    assert_eq!(d.spent("globex"), 500, "DEFECT: globex is drained as well");
+    assert_eq!(
+        d.spent("globex"),
+        Some(0),
+        "REGRESSION GUARD: globex is not drained either"
+    );
 
-    // And the audit trail blames alice and bob for both.
-    assert!(
-        d.audit_of("acme")
-            .iter()
-            .any(|r| r.actor == "alice" && r.outcome.is_forwarded()),
-        "the journal records the spoofed name, so the real principal is unrecoverable"
+    // Impersonation is refused *inside* the organization too. This is the
+    // sharper half: `insider` is a genuine memorithm principal whose org does
+    // own acme, so the org gate cannot help here — only the actor binding can.
+    d.assign("insider", "reader");
+    let insider = actor("memorithm", "insider", AuthStrength::Token);
+    let elevated = request("acme", "alice", "memory.ingest", "m-4");
+    assert_eq!(
+        d.admit(Call {
+            actor: &insider,
+            request: &elevated,
+            model: "claude-opus",
+            cost_tokens: 1_000,
+            variant: None,
+        })
+        .refusal(),
+        Some(&Refusal::ActorMismatch),
+        "REGRESSION GUARD: an in-org principal may not borrow alice's permissions"
     );
+    assert_eq!(d.spent("acme"), Some(0));
+
+    // …and RBAC still does its own job underneath: under her real name the
+    // insider is refused for want of the permission, not for the binding. This
+    // is the coverage the original test had before the org gate shadowed it.
+    let honest_insider = request("acme", "insider", "memory.ingest", "m-5");
+    assert_eq!(
+        d.admit(Call {
+            actor: &insider,
+            request: &honest_insider,
+            model: "claude-opus",
+            cost_tokens: 1_000,
+            variant: None,
+        })
+        .refusal(),
+        Some(&Refusal::PermissionDenied),
+        "a reader may not ingest, credential binding or not"
+    );
+    assert_eq!(d.spent("acme"), Some(0), "still nothing billed");
+
+    // Nothing was forwarded, and the journal blames nobody: every attempt is
+    // recorded under the name the caller *claimed*, with a refusal attached —
+    // so the impersonation is visible as an attempt instead of being
+    // indistinguishable from alice's own work.
+    let trail = d.audit_of("acme");
+    assert!(
+        !trail.iter().any(|r| r.outcome.is_forwarded()),
+        "REGRESSION GUARD: not one of these calls reached Core"
+    );
+    assert!(
+        trail
+            .iter()
+            .any(|r| r.actor == "alice" && r.outcome.refusal() == Some(&Refusal::ActorMismatch)),
+        "the spoofed name is journaled — as a refused attempt"
+    );
+    assert!(
+        trail.iter().all(|r| r.cost == 0),
+        "and none of it was billed"
+    );
+
+    // The legitimate holder of the name is entirely unaffected: alice, with
+    // alice's credential, still works.
+    let alice = actor("memorithm", "alice", AuthStrength::Token);
+    let genuine = request("acme", "alice", "memory.ingest", "m-6");
+    assert_eq!(
+        d.admit(Call {
+            actor: &alice,
+            request: &genuine,
+            model: "claude-opus",
+            cost_tokens: 1_000,
+            variant: None,
+        }),
+        Outcome::Forwarded,
+        "the binding refuses impersonation, not the real principal"
+    );
+    assert_eq!(d.spent("acme"), Some(1_000));
 }
 
-/// **DEFECT 8 (low, observability).** `Deployment::spent` folds "no such
-/// tenant" into `0`. A quota dashboard or invoice run that misspells a tenant
-/// reports zero usage for ever instead of failing. Same shape as defect 3:
-/// the meter is trusted, and there is no way to tell an empty meter from a
-/// missing one.
+/// **DEFECT 8 (low, observability) — REPAIRED; this test is the guard.**
+///
+/// `Deployment::spent` folded "no such tenant" into `0`. A quota dashboard or
+/// an invoice run that misspelled a tenant reported zero usage for ever
+/// instead of failing, and there was no way to tell an empty meter from a
+/// missing one — the same shape as defect 3: the meter was trusted and could
+/// not be questioned.
+///
+/// It returns `Option<u64>` now. The probes below are the original ones, with
+/// the opposite expectation: every spelling that names no tenant answers
+/// `None`, and a tenant that exists and has spent nothing answers `Some(0)`,
+/// which is a different answer.
 #[test]
-fn spent_of_an_unknown_tenant_is_a_silent_zero() {
+fn spent_distinguishes_an_unknown_tenant_from_an_empty_one() {
     let mut d = two_tenant_deployment();
     let alice = actor("memorithm", "alice", AuthStrength::Token);
     let req = request("acme", "alice", "memory.ingest", "r-1");
@@ -1179,14 +1572,24 @@ fn spent_of_an_unknown_tenant_is_a_silent_zero() {
         }),
         Outcome::Forwarded
     );
-    assert_eq!(d.spent("acme"), 42);
-    assert_eq!(d.spent("ACME"), 0, "tenant ids are case-sensitive…");
-    assert_eq!(d.spent("acme "), 0, "…and whitespace-sensitive…");
+    assert_eq!(d.spent("acme"), Some(42));
+    // Tenant ids are still exact, byte for byte — that has not changed and
+    // should not. What changed is that a near-miss now says so.
+    assert_eq!(d.spent("ACME"), None, "tenant ids are case-sensitive…");
+    assert_eq!(d.spent("acme "), None, "…and whitespace-sensitive…");
     assert_eq!(
         d.spent("no-such-tenant"),
-        0,
-        "…and a tenant that does not exist reports the same 0 as one that spent nothing"
+        None,
+        "REGRESSION GUARD: a tenant that does not exist is not reported as one \
+         that spent nothing"
     );
+    assert_eq!(
+        d.spent("globex"),
+        Some(0),
+        "REGRESSION GUARD: …and a real tenant that spent nothing says Some(0), \
+         which is a different answer"
+    );
+    assert_ne!(d.spent("globex"), d.spent("no-such-tenant"));
 }
 
 // ── 10. ModelAllowlist ───────────────────────────────────────────────────
@@ -1238,11 +1641,11 @@ fn an_empty_allowlist_denies_everything_including_the_empty_string() {
     let mut d = Deployment::new();
     d.add_role("writer", &["memory.write"])
         .govern_tool("memory.ingest", "memory.write");
-    d.add_tenant("bare", TenantState::new(1_000));
+    assert!(d.add_tenant("o", "bare", TenantState::new(1_000)));
     assert!(d.assign("a", "writer"));
     let who = actor("o", "a", AuthStrength::Token);
-    for model in ["", "claude-opus", "gpt-5"] {
-        let req = request("bare", "a", "memory.ingest", "r");
+    for (i, model) in ["", "claude-opus", "gpt-5"].into_iter().enumerate() {
+        let req = request("bare", "a", "memory.ingest", &format!("r-{i}"));
         assert_eq!(
             d.admit(Call {
                 actor: &who,
@@ -1256,7 +1659,7 @@ fn an_empty_allowlist_denies_everything_including_the_empty_string() {
             "model {model:?}"
         );
     }
-    assert_eq!(d.spent("bare"), 0, "and none of it was billed");
+    assert_eq!(d.spent("bare"), Some(0), "and none of it was billed");
 }
 
 /// A 100 000-entry allowlist: every listed name is admitted, every near-miss
@@ -1389,7 +1792,7 @@ fn the_allowlist_is_case_sensitive_but_the_gateway_is_not() {
         Some(&Refusal::ToolNotGoverned),
         "the boundary admits MEMORY.INGEST; the governance map has never heard of it"
     );
-    assert_eq!(d.spent("acme"), 0, "at least the refusal is free");
+    assert_eq!(d.spent("acme"), Some(0), "at least the refusal is free");
 
     // The sharp edge of the same disagreement. Because the boundary treats
     // `MEMORY.INGEST` and `memory.ingest` as one tool but the governance map
@@ -1427,7 +1830,11 @@ fn the_allowlist_is_case_sensitive_but_the_gateway_is_not() {
         Outcome::Forwarded,
         "FOOTGUN: the same capability, one capital letter apart, under a weaker permission"
     );
-    assert_eq!(d.spent("acme"), 10, "and it is billed like any other call");
+    assert_eq!(
+        d.spent("acme"),
+        Some(10),
+        "and it is billed like any other call"
+    );
 }
 
 /// The allowlist accepts entries the gateway would refuse outright for a tool:
@@ -1445,7 +1852,7 @@ fn the_allowlist_accepts_non_canonical_entries() {
         .govern_tool("memory.ingest", "memory.write");
     let mut t = TenantState::new(100);
     t.allow_model("").allow_model(" ").allow_model("a\nb");
-    d.add_tenant("acme", t);
+    assert!(d.add_tenant("o", "acme", t));
     assert!(d.assign("a", "writer"));
     let who = actor("o", "a", AuthStrength::Token);
 
@@ -1463,7 +1870,7 @@ fn the_allowlist_accepts_non_canonical_entries() {
             "TRUTH: {model:?} is a perfectly good model name to the allowlist"
         );
     }
-    assert_eq!(d.spent("acme"), 3, "and all three calls were billed");
+    assert_eq!(d.spent("acme"), Some(3), "and all three calls were billed");
 
     // The gateway refuses exactly these spellings for a tool name.
     for tool in ["", " ", "a\nb"] {
@@ -1530,28 +1937,40 @@ fn the_gate_is_greedy_and_order_dependent() {
 
 // ── 12. The gate is a free oracle for another tenant's balance ───────────
 
-/// **DEFECT 10 (medium, information disclosure).** `charge` is a *free*
-/// comparison oracle: a refused charge costs nothing and is distinguishable
-/// from every other refusal (`Refusal::BudgetExhausted`), and it answers
-/// exactly one question — "is `cost` greater than what this tenant has left?"
+/// **DEFECT 10 (medium, information disclosure) — STILL OPEN, but narrowed.**
+/// `charge` is a *free* comparison oracle: a refused charge costs nothing and
+/// is distinguishable from every other refusal (`Refusal::BudgetExhausted`),
+/// and it answers exactly one question — "is `cost` greater than what this
+/// tenant has left?"
 ///
-/// Combined with defect 7 (nothing binds the caller to the tenant it names),
-/// any authenticated stranger can interrogate any tenant's remaining balance.
-/// Twenty probes are enough for a million-token budget, because the search is
-/// binary, not linear — and every probe that comes back refused is free, so
-/// the *reconnaissance* half leaves no trace in the meter at all.
+/// Combined with defect 7 (nothing bound the caller to the tenant it named),
+/// this let **any authenticated stranger** interrogate **any** tenant's
+/// remaining balance. That half is repaired, and the first section below is
+/// the regression guard for it: the stranger's probe is now refused *before*
+/// the budget gate, and refused **identically whatever it costs**, so it
+/// carries no signal at all. That is the property that matters for an oracle —
+/// not merely that the probe fails, but that its failure is independent of the
+/// secret.
 ///
-/// The two phases below are deliberately separated:
-/// * **free phase** — a descending ladder of refused probes proves a lower
-///   bound on the victim's consumption while `spent` never moves;
+/// What remains is the oracle itself, for a caller who legitimately shares the
+/// tenant. The blast radius is now one organization instead of the whole
+/// deployment, but inside it the leak is unchanged, and it is worth keeping
+/// pinned: a low-trust automation that holds one governed tool can read the
+/// tenant's exact remaining balance without spending a token, and the same
+/// twenty calls that read the number also drain it.
+///
+/// The two phases are deliberately separated:
+/// * **free phase** — a descending ladder of refused probes proves a bound on
+///   the tenant's balance while `spent` never moves;
 /// * **paid phase** — running the search to completion recovers the balance
-///   *exactly*, and costs exactly the balance: the same 20 calls that read
-///   the number also drain it to zero.
+///   *exactly*, and costs exactly the balance.
 ///
 /// Rate limiting would not help: `ccos_license_server::TokenBucket` exists in
-/// this workspace, and the admission path does not use it.
+/// this workspace, and the admission path does not use it. Every probe carries
+/// a distinct `request_id`, so replay suppression is not what is being
+/// measured here.
 #[test]
-fn the_budget_gate_leaks_another_tenants_balance_one_free_probe_at_a_time() {
+fn the_budget_gate_leaks_the_balance_to_anyone_who_shares_the_tenant() {
     const LIMIT: u64 = 1_000_000;
     const SECRET_SPEND: u64 = 618_034; // unknown to the attacker
     let remaining_truth = LIMIT - SECRET_SPEND;
@@ -1561,7 +1980,7 @@ fn the_budget_gate_leaks_another_tenants_balance_one_free_probe_at_a_time() {
         .govern_tool("memory.ingest", "memory.write");
     let mut victim = TenantState::new(LIMIT);
     victim.allow_model("m");
-    d.add_tenant("victim", victim);
+    assert!(d.add_tenant("victim-corp", "victim", victim));
     assert!(d.assign("insider", "writer"));
 
     let insider = actor("victim-corp", "insider", AuthStrength::Token);
@@ -1577,15 +1996,62 @@ fn the_budget_gate_leaks_another_tenants_balance_one_free_probe_at_a_time() {
         Outcome::Forwarded
     );
 
-    // The attacker: a stranger from another org, spoofing the insider's name
-    // in the request body (defect 7).
+    // ── REGRESSION GUARD: the outside attacker gets no signal.
+    //
+    // The original attack: a stranger from another org, spoofing the insider's
+    // name in the request body. Both spellings of it are refused now, and —
+    // the part that kills the oracle — the refusal does not depend on the
+    // probe's cost. A probe for 1 token and a probe for u64::MAX come back
+    // byte-identical, so no sequence of them can bracket the balance.
     let mallory = actor("evil-corp", "mallory", AuthStrength::Token);
+    for cost in [0u64, 1, remaining_truth, remaining_truth + 1, u64::MAX] {
+        let spoofed = request("victim", "insider", "memory.ingest", &format!("s-{cost}"));
+        assert_eq!(
+            d.admit(Call {
+                actor: &mallory,
+                request: &spoofed,
+                model: "m",
+                cost_tokens: cost,
+                variant: None,
+            })
+            .refusal(),
+            Some(&Refusal::ActorMismatch),
+            "REGRESSION GUARD: the refusal must not vary with the probe's cost"
+        );
+        let honest = request("victim", "mallory", "memory.ingest", &format!("h-{cost}"));
+        assert_eq!(
+            d.admit(Call {
+                actor: &mallory,
+                request: &honest,
+                model: "m",
+                cost_tokens: cost,
+                variant: None,
+            })
+            .refusal(),
+            Some(&Refusal::TenantNotOwnedByOrg),
+            "REGRESSION GUARD: nor when the stranger probes under her own name"
+        );
+    }
+    assert_eq!(
+        d.spent("victim"),
+        Some(SECRET_SPEND),
+        "REGRESSION GUARD: ten cross-org probes moved nothing and learned nothing"
+    );
+
+    // ── The residual, still open: an actor who shares the tenant.
+    // `insider` holds exactly one governed tool and no admin capability — the
+    // shape of a low-trust automation — and that is enough.
     let mut probes = 0u32;
     let mut probe = |d: &mut Deployment, cost: u64| -> bool {
-        let req = request("victim", "insider", "memory.ingest", "probe");
         probes += 1;
+        let req = request(
+            "victim",
+            "insider",
+            "memory.ingest",
+            &format!("probe-{probes}"),
+        );
         d.admit(Call {
-            actor: &mallory,
+            actor: &insider,
             request: &req,
             model: "m",
             cost_tokens: cost,
@@ -1607,7 +2073,7 @@ fn the_budget_gate_leaks_another_tenants_balance_one_free_probe_at_a_time() {
         assert_eq!(
             d.spent("victim"),
             before,
-            "INFORMATION LEAK: the refused probe cost the attacker nothing"
+            "INFORMATION LEAK: the refused probe cost the prober nothing"
         );
         known_upper_bound = ladder;
         free_probes += 1;
@@ -1616,43 +2082,55 @@ fn the_budget_gate_leaks_another_tenants_balance_one_free_probe_at_a_time() {
     assert!(free_probes >= 3, "free probes issued: {free_probes}");
     assert_eq!(
         d.spent("victim"),
-        SECRET_SPEND,
+        Some(SECRET_SPEND),
         "the whole reconnaissance is invisible in the meter"
     );
-    // What the attacker now knows, for free and with certainty.
+    // What the prober now knows, for free and with certainty.
     assert!(
         known_upper_bound <= remaining_truth * 4 / 3 + 1,
         "the free bound is tight: balance < {known_upper_bound}"
     );
+    // …and invisible in the journal's cost column too: the refused probes are
+    // journaled, at zero, exactly like any other refusal. The repaired audit
+    // record makes the *attempts* countable, which is the only handle an
+    // operator has on this — but it does not close the leak.
+    let recon: Vec<&AuditRecord> = d.audit_of("victim");
+    assert!(
+        recon
+            .iter()
+            .filter(|r| r.request_id.starts_with("probe-"))
+            .all(|r| r.cost == 0),
+        "every reconnaissance probe is journaled at zero cost"
+    );
 
     // ── Paid phase: binary search to the exact token.
     // Invariant: the true original balance R0 lies in [lo, hi], and `lo` is
-    // exactly what the attacker has spent so far, so the next probe is always
+    // exactly what the prober has spent so far, so the next probe is always
     // affordable to compute.
     let (mut lo, mut hi) = (0u64, LIMIT);
     let mut paid = 0u64;
     while lo < hi {
         let target = lo + (hi - lo).div_ceil(2);
         let cost = target - paid;
-        let before = d.spent("victim");
+        let before = d.spent("victim").expect("the tenant exists");
         if probe(&mut d, cost) {
             lo = target;
             paid += cost;
             assert_eq!(
                 d.spent("victim"),
-                before + cost,
+                Some(before + cost),
                 "an admitted probe is billed"
             );
         } else {
             hi = target - 1;
-            assert_eq!(d.spent("victim"), before, "a refused probe is free");
+            assert_eq!(d.spent("victim"), Some(before), "a refused probe is free");
         }
         assert_eq!(lo, paid, "search invariant");
     }
 
     assert_eq!(
         lo, remaining_truth,
-        "DEFECT: the attacker recovered the victim's exact balance"
+        "DEFECT: the prober recovered the tenant's exact balance"
     );
     assert!(
         probes <= 30,
@@ -1660,7 +2138,7 @@ fn the_budget_gate_leaks_another_tenants_balance_one_free_probe_at_a_time() {
     );
     assert_eq!(
         d.spent("victim"),
-        LIMIT,
+        Some(LIMIT),
         "…and the same search drained the tenant to the last token"
     );
 }
@@ -1704,9 +2182,95 @@ fn counters_and_meter_can_be_made_to_disagree_arbitrarily() {
     assert_eq!(get("gateway.requests"), 500);
     assert_eq!(get("gateway.forwarded"), 500);
     assert_eq!(get("gateway.refused"), 0);
+    assert_eq!(get("gateway.replayed"), 0, "500 distinct decisions");
     assert_eq!(
         d.spent("acme"),
-        0,
+        Some(0),
         "500 calls reached Core and the tenant was billed nothing"
+    );
+    // The journal now agrees with the meter rather than with the counters,
+    // which is the repair working exactly as intended and *not* a fix for
+    // defect 2: 500 records, 500 zero costs, one honest total of zero. The
+    // gap an operator has to watch is between `gateway.forwarded` and the
+    // journal's row count on one side, and the cost column on the other.
+    let trail = d.audit_of("acme");
+    assert_eq!(trail.len(), 500);
+    let billed: u64 = trail.iter().map(|r| r.cost).sum();
+    assert_eq!(Some(billed), d.spent("acme"));
+}
+
+// ── 14. The audit buffer is bounded, and says what it dropped ────────────
+
+/// The predecessor's journal was an unbounded `Vec`: every decision, forwarded
+/// or refused, was retained for ever, so an unauthenticated caller could make
+/// the deployment hold 1.15 GiB across five million refused calls — and the
+/// identifiers were recorded verbatim, so each record could be made a
+/// megabyte wide.
+///
+/// The buffer is bounded now ([`Deployment::with_audit_capacity`], defaulting
+/// to `DEFAULT_AUDIT_CAPACITY`), the oldest records are dropped, and
+/// `audit_dropped()` counts them. Dropping is the honest failure mode for a
+/// bounded buffer and it is **not** an audit story on its own: a
+/// compliance-grade deployment must flush to durable storage, and a non-zero
+/// drop count is exactly the signal that it has not.
+///
+/// This is the budget file's stake in that bound: the meter must stay exact
+/// across records the journal has thrown away, so an operator can still tell
+/// that the journal is incomplete rather than that the tenant spent less.
+#[test]
+fn the_journal_is_bounded_and_the_meter_is_not() {
+    const CAP: usize = 64;
+    const CALLS: u64 = 5_000;
+
+    let mut d = Deployment::new().with_audit_capacity(CAP);
+    d.add_role("writer", &["memory.write"])
+        .govern_tool("memory.ingest", "memory.write");
+    let mut t = TenantState::new(CALLS);
+    t.allow_model("m");
+    assert!(d.add_tenant("o", "acme", t));
+    assert!(d.assign("a", "writer"));
+    let who = actor("o", "a", AuthStrength::Token);
+
+    for i in 0..CALLS {
+        let req = request("acme", "a", "memory.ingest", &format!("r-{i}"));
+        assert_eq!(
+            d.admit(Call {
+                actor: &who,
+                request: &req,
+                model: "m",
+                cost_tokens: 1,
+                variant: None,
+            }),
+            Outcome::Forwarded
+        );
+    }
+
+    assert_eq!(
+        d.audit().count(),
+        CAP,
+        "the buffer never grows past the capacity it was given"
+    );
+    assert_eq!(
+        d.audit_dropped(),
+        CALLS - CAP as u64,
+        "…and says exactly how many records it lost"
+    );
+    // The retained window is the newest, and still in decision order.
+    let sequences: Vec<u64> = d.audit().map(|r| r.sequence).collect();
+    assert_eq!(
+        sequences,
+        (CALLS - CAP as u64..CALLS).collect::<Vec<_>>(),
+        "the window is contiguous, newest-last, and its sequence numbers say \
+         where the missing records were"
+    );
+    // The meter counted every one of them, including the 4 936 the journal
+    // dropped: a truncated journal under-reports the trail, never the bill.
+    assert_eq!(d.spent("acme"), Some(CALLS));
+    let retained: u64 = d.audit().map(|r| r.cost).sum();
+    assert_eq!(retained, CAP as u64, "the window reconciles only itself…");
+    assert!(
+        Some(retained) < d.spent("acme"),
+        "…and the drop count is what says so: {} records missing",
+        d.audit_dropped()
     );
 }

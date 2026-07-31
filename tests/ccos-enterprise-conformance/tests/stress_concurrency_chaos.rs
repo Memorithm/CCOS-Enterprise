@@ -14,26 +14,32 @@
 //! * do the **standalone types** (`CounterRegistry`, `RoleBook`, `TokenBudget`)
 //!   still produce the single-threaded answer when 32 threads run the same
 //!   script on private instances?
+//! * is a **misbehaving** thread — one presenting somebody else's actor name,
+//!   another organization's credential, or an oversized identifier — stopped
+//!   by the product rather than by the good manners of the test?
 //! * and does anything **deadlock**? (Nothing here can hang: every concurrent
 //!   test is armed with a watchdog that `abort()`s the binary, which libtest
 //!   reports as a failure. Verified against a real self-deadlock.)
 //!
 //! The op sequences are fixed before a single thread starts — one seeded
 //! SplitMix64 stream per thread, shuffled deterministically, request ids
-//! assigned by position. **Only the interleaving is nondeterministic**, which
-//! is exactly the variable under test. Ten pinned probes per thread are
+//! assigned by position and globally distinct (a repeated id would be
+//! *suppressed as a replay*, which would quietly collapse the billing this
+//! file reconciles). **Only the interleaving is nondeterministic**, which is
+//! exactly the variable under test. Thirteen pinned probes per thread are
 //! constructed so that their outcome is a function of one gate and of nothing
 //! any other thread can do (`ghost` is never a tenant, `context.read` is never
 //! governed, `<t>/nobody` is never assigned, `never-allowed` is never
-//! allowlisted, `ExperimentalBridge` is never activated, `t-zero`'s limit is 0)
-//! — so all eight refusal kinds *and* forwarding are guaranteed on every run,
+//! allowlisted, `ExperimentalBridge` is never activated, `t-zero`'s limit is 0,
+//! no op ever re-provisions a tenant or moves one between organizations) — so
+//! all eleven refusal kinds *and* forwarding are guaranteed on every run,
 //! whatever the scheduler does.
 //!
-//! Measured on the default run: **135 680 operations across 32 threads**,
-//! 84 662 admissions (13 695 forwarded, 70 967 refused across all eight
-//! kinds), 51 018 state-changing operations, 7 tenants — 1.7 s in debug,
-//! 0.5 s in release. The `#[ignore]`d soak repeats it at 10x
-//! (**1 356 800 operations**, 846 086 admissions, 19 s).
+//! Measured on the default run: **137 984 operations across 32 threads**,
+//! 86 966 admissions (about 13 700 forwarded, about 73 260 refused across
+//! all eleven kinds), 51 018 state-changing operations, 7 tenants — 2.8 s in
+//! debug, 0.7 s in release. The `#[ignore]`d soak repeats it at 10x
+//! (**1 379 840 operations**, 869 126 admissions, 43 s).
 //!
 //! ## What held
 //!
@@ -47,16 +53,20 @@
 //!   overdraft, not by one token, ever; a **zero** budget refused all 768.
 //!   Two organically drained tenants landed on 8 000/8 000 exactly.
 //! * **The journal is exactly one row per admission, no duplicates, no
-//!   losses.** 84 662 admissions produced 84 662 rows carrying 84 662
-//!   *distinct* request ids.
+//!   losses.** 86 966 admissions produced 86 966 rows carrying 86 966
+//!   *distinct* request ids, numbered `0..86 966` by `AuditRecord::sequence`
+//!   with no gap and no repeat — the whole concurrent run is replayable in
+//!   the order the deployment actually decided.
 //! * **The counters agree with the journal to the unit** — `requests ==
-//!   forwarded + refused`, both equal to the journal's own tallies, the eight
+//!   forwarded + refused`, both equal to the journal's own tallies, the eleven
 //!   `gateway.refused.*` series summing to `refused` — and the series set
-//!   stays at exactly 11 names however hostile the input.
+//!   stays at exactly 14 names however hostile the input.
 //! * **Isolation holds for data.** No tenant's audit trail ever named another
 //!   tenant's actor; no tenant's cells ever held another tenant's value; the
-//!   unknown tenant was never billed. `t-race`'s tokens were won by all 32
-//!   threads (pigeonhole floor 16): a plain `Mutex` did not starve anyone.
+//!   unknown tenant was never billed, and `spent` now says `None` for it —
+//!   "no such tenant", not "a tenant that spent nothing". `t-race`'s tokens
+//!   were won by all 32 threads (pigeonhole floor 16): a plain `Mutex` did not
+//!   starve anyone.
 //! * **Concurrency does not change outcomes.** 32 threads replaying the same
 //!   5 322-op script on private `CounterRegistry` / `RoleBook` /
 //!   `TokenBudget` instances produced results byte-identical to a
@@ -66,57 +76,86 @@
 //!   replacement, and `TokenBudget`'s saturating ledger at `limit == u64::MAX`.
 //!   Every container in the product is a `BTree*`; there is no hash seed, no
 //!   clock and no interior nondeterminism to shake loose.
-//! * **No deadlock, no livelock, no panic.** 12 consecutive runs, debug and
-//!   release, all green; the watchdog never fired outside its own self-check.
+//! * **No deadlock, no livelock, no panic.** 8 consecutive runs against the
+//!   repaired path, debug and release, all green (12 against its predecessor);
+//!   the watchdog never fired outside its own self-check.
+//! * **A misbehaving thread is stopped by the product.** Three of the thirteen
+//!   pinned probes are hostile — a request naming an actor its credential does
+//!   not prove, a credential from an organization that does not own the tenant,
+//!   and an oversized actor identifier — and every one of them is refused, on
+//!   every thread, on every interleaving, for zero tokens.
 //!
-//! ## What BROKE
+//! ## What was repaired (these tests are now regression guards)
 //!
-//! 1. **Replay determinism does not survive concurrency, and the journal
-//!    cannot recover it.** `docs/ENTERPRISE_SECURITY_MODEL.md` ends with
-//!    "Enterprise ADDS gates; it never WEAKENS a Core guarantee (determinism,
-//!    replay, …)". Feed the composed path the *identical* call set from two
-//!    threads and the journal depends entirely on which reached the lock
-//!    first — different order, different outcomes, different billing — while
-//!    `AuditRecord` (`src/lib.rs:96-102`) carries **no sequence number, no
-//!    timestamp, no thread or connection id**. The `Vec`'s position is the
-//!    only ordering information that exists, and `audit_of`
-//!    (`src/lib.rs:343-345`) discards even that. Neither journal can be
-//!    replayed to reproduce the other.
-//!    → [`one_call_set_produces_two_different_journals_under_two_interleavings`]
+//! 1. **Replay determinism survives concurrency: the journal is ordered.**
+//!    `docs/ENTERPRISE_SECURITY_MODEL.md` ends with "Enterprise ADDS gates; it
+//!    never WEAKENS a Core guarantee (determinism, replay, …)". This file used
+//!    to pin the opposite: feeding the composed path the *identical* call set
+//!    from two threads produced journals whose order depended entirely on
+//!    which thread reached the lock first, while `AuditRecord` carried **no
+//!    sequence number, no timestamp, no thread or connection id** — the
+//!    `Vec`'s position was the only ordering information that existed, and
+//!    `audit_of` discarded even that, so neither journal could be replayed to
+//!    reproduce the other. `AuditRecord::sequence` is now assigned under the
+//!    same borrow that decides. The race is still real and still pinned — two
+//!    interleavings, two journals — but each journal is totally ordered and
+//!    **replays to itself, exactly**, and the storm's 86 966 concurrent
+//!    admissions carry one dense, monotonic sequence.
+//!    → [`two_interleavings_produce_two_journals_that_each_replay_exactly`]
 //!
-//! 2. **The journal is self-colliding under concurrency.** 32 threads issuing
-//!    the byte-identical call produce 32 records that compare `==` in every
-//!    field. All 32 were separately billed (`request_id` is documented as an
-//!    "Idempotency/correlation key",
-//!    `crates/ccos-enterprise-gateway/src/lib.rs:16`, and nothing reads it —
-//!    the replay half of this is pinned by `stress_endurance` and
-//!    `stress_budget_property`; what is new here is that concurrency makes the
-//!    rows *indistinguishable*, so an operator cannot even count callers).
-//!    → [`identical_concurrent_calls_produce_indistinguishable_audit_records`]
+//! 2. **The journal is no longer self-colliding, and a replay is not billed
+//!    twice.** 32 threads issuing the byte-identical call used to produce 32
+//!    records that compared `==` in every field, each separately billed,
+//!    although `request_id` is documented as an "Idempotency/correlation key"
+//!    (`crates/ccos-enterprise-gateway/src/lib.rs:16`) and nothing read it.
+//!    The 32 records now carry 32 distinct sequences, and the tenant is
+//!    charged **once**: the 31 replays are forwarded (a retry gets its prior
+//!    outcome, not a refusal) and journaled with `cost: 0`.
+//!    → [`identical_concurrent_calls_are_ordered_and_billed_exactly_once`]
 //!
-//! 3. **Governance changes race the admissions they govern, and nothing
-//!    records them.** 51 018 of the storm's 135 680 operations —
+//! 3. **The journal reconciles the ledger on its own.** `AuditRecord` recorded
+//!    the tool but not the cost, so "what was tenant X billed for?" was
+//!    unanswerable from the trail, and this file's central invariant was only
+//!    checkable because *the test* kept a side table of `request_id → cost`
+//!    that the product did not. `AuditRecord::cost` now carries what was
+//!    charged — always `0` for a refusal — and the storm reconciles every
+//!    tenant's ledger against the product's own journal. The side table is
+//!    kept only as a cross-check that the recorded cost is the cost the caller
+//!    asked for.
+//!
+//! 4. **The audit buffer is bounded, and loud about what it drops.** The
+//!    journal was an unbounded `Vec` that every refused call grew (1.1 GiB
+//!    after 5M calls, measured by `stress_endurance`) — a real
+//!    allocation-failure site under the one lock the whole deployment sits
+//!    behind. It is now a bounded buffer that drops the oldest record and
+//!    counts it, which holds exactly under 32-way contention.
+//!    → [`the_audit_buffer_is_bounded_under_contention_and_says_what_it_dropped`]
+//!
+//! ## What is still BROKEN
+//!
+//! 1. **Governance changes race the admissions they govern, and nothing
+//!    records them.** 51 018 of the storm's 137 984 operations —
 //!    `put`, `assign`, `allow_model`, `activate` — produced **zero** audit
 //!    records and **zero** counters. The staged test shows the consequence:
 //!    two admissions identical but for their request id, the first
 //!    `ModelNotAllowed` and the second `Forwarded`, with a journal of exactly
 //!    two rows and nothing at all explaining the flip.
-//!    `tenant_mut(..).allow_model(..)` (`src/lib.rs:195`, `src/lib.rs:121`)
-//!    returns `&mut Self`, needs no identity, no permission and no
+//!    `tenant_mut(..).allow_model(..)`
+//!    (`crates/ccos-enterprise-runtime/src/lib.rs`) still returns `&mut Self`,
+//!    needs no identity, no permission and no
 //!    `ccos_enterprise_admin::AdminAction` justification.
 //!    → [`a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explain_it`]
 //!
-//! 4. **There is no atomic snapshot of the product's own accounting.**
-//!    `spent` (`src/lib.rs:331`), `audit`/`audit_of` (`src/lib.rs:338`,
-//!    `:343`) and `metrics` (`src/lib.rs:348`) are three separate calls on
-//!    three separate borrows. An operator reconciling them the obvious way —
+//! 2. **There is no atomic snapshot of the product's own accounting.**
+//!    `spent`, `audit`/`audit_of` and `metrics` are four separate calls on
+//!    four separate borrows. An operator reconciling them the obvious way —
 //!    one `lock()` per read — reports a tenant as under-billed by a whole
 //!    call, deterministically, although the deployment was never once
 //!    internally inconsistent. The product ships the hazard and no API that
 //!    avoids it.
 //!    → [`ledger_and_journal_tear_when_read_in_separate_lock_acquisitions`]
 //!
-//! 5. **Zero per-tenant concurrency, and a deployment-wide blast radius.**
+//! 3. **Zero per-tenant concurrency, and a deployment-wide blast radius.**
 //!    Every mutator — `admit`, `put`, `assign`, `tenant_mut`, `add_tenant`,
 //!    `add_role`, `govern_tool` — takes `&mut self`, and `Deployment` has no
 //!    interior mutability and hands out no per-tenant handle. The only sound
@@ -126,40 +165,34 @@
 //!    product: no `Clone`, no serialization, no snapshot/restore, and nothing
 //!    that records that it happened — after `PoisonError::into_inner()` the
 //!    deployment carries on with an unchanged journal and unchanged counters.
-//!    The unbounded audit `Vec` that every refused call grows (1.1 GiB after
-//!    5M calls, measured by `stress_endurance`) is a real allocation-failure
-//!    site under exactly that lock.
+//!    (The unbounded audit `Vec` that used to make an allocation failure a
+//!    realistic trigger *under* that lock is gone — see "what was repaired" —
+//!    but the blast radius of any other panic is unchanged.)
 //!    → [`one_panic_under_the_global_lock_denies_service_to_every_tenant`],
 //!    [`composed_path_types_are_send_and_sync_but_every_mutator_is_exclusive`]
 //!
-//! 6. **Cross-tenant work amplification, paid under the shared lock.**
+//! 4. **Cross-tenant work amplification, paid under the shared lock.**
 //!    `audit_of` filters the entire journal, so a tenant that has never made a
 //!    call still pays a full scan of every other tenant's traffic — while
 //!    holding the one lock every other tenant's admissions need. Tenant A's
 //!    volume is tenant B's latency: the isolation the product proves for data
-//!    does not exist in the time domain. (`cells_of`'s scan cost is pinned by
-//!    `stress_tenancy_fuzz`; that it is paid under the global lock is the part
-//!    that only concurrency exposes.)
+//!    does not exist in the time domain. The scan is now *bounded* by the
+//!    audit capacity, which caps the worst case but does not make it a
+//!    tenant's own. (`cells_of`'s scan cost is pinned by `stress_tenancy_fuzz`;
+//!    that it is paid under the global lock is the part that only concurrency
+//!    exposes.)
 //!    → [`audit_of_a_silent_tenant_walks_the_whole_global_trail`]
-//!
-//! 7. **The journal cannot reconcile the ledger on its own.** `AuditRecord`
-//!    records the tool but not the cost, so "what was tenant X billed for?"
-//!    is unanswerable from the trail. Invariant 2 below is only checkable
-//!    because *this test* keeps a side table of `request_id → cost` that the
-//!    product does not.
 //!
 //! ## Not re-litigated here (siblings own them)
 //!
-//! Authorization keys on the request-supplied actor string rather than the
-//! authenticated identity, and `RoleBook` grants are deployment-global rather
-//! than tenant-scoped (`stress_rbac_scale`); `put`/`get`/`cells_of` are
-//! reachable with no identity and no audit record (`stress_tenancy_fuzz`);
-//! `request_id` replays are billed (`stress_endurance`,
-//! `stress_budget_property`); the audit `Vec` is unbounded in length and in
-//! per-record size (`stress_endurance`). The storm's invariants hold here
-//! *because its threads are well behaved* — each is bound to one tenant and
-//! uses tenant-qualified actor names — not because the product would stop a
-//! thread that was not.
+//! `RoleBook` grants are deployment-global rather than tenant-scoped
+//! (`stress_rbac_scale`); `put`/`get`/`cells_of` are reachable with no identity
+//! and no audit record (`stress_tenancy_fuzz`). The storm's invariants no
+//! longer hold merely *because its threads are well behaved*: three of the
+//! thirteen pinned probes per thread misbehave on purpose — a request naming
+//! an actor its credential does not prove, a credential from an organization
+//! that does not own the tenant, an oversized identifier — and the product
+//! stops each of them itself, under every interleaving, for zero tokens.
 //!
 //! Run: `cargo test -p ccos-enterprise-conformance --test stress_concurrency_chaos`
 //! (add `-- --nocapture` for the measured tables, `-- --ignored` for the soak).
@@ -172,7 +205,8 @@ use std::time::{Duration, Instant};
 
 use ccos_enterprise_auth::AuthStrength;
 use ccos_enterprise_conformance::{
-    actor, request, two_tenant_deployment, Call, Deployment, Outcome, Refusal, TenantState,
+    actor, request, two_tenant_deployment, AuditRecord, Call, Deployment, Outcome, Refusal,
+    TenantState, DEFAULT_AUDIT_CAPACITY, MAX_IDENTIFIER_BYTES,
 };
 use ccos_enterprise_observability::CounterRegistry;
 use ccos_enterprise_policy::{PolicyDecision, TokenBudget};
@@ -263,7 +297,16 @@ impl Drop for Watchdog {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const THREADS: usize = 32;
-const PINNED_KINDS: usize = 10;
+const PINNED_KINDS: usize = 13;
+
+/// The organization that owns every tenant in this file's fixtures. A
+/// credential's org must own the tenant its request names, so the fixture has
+/// to say who that is.
+const HOME_ORG: &str = "memorithm";
+/// An organization that owns nothing here — used by the pinned probe that
+/// proves a genuinely authenticated outsider cannot reach a tenant that is not
+/// theirs, however well they have guessed its actor naming scheme.
+const FOREIGN_ORG: &str = "initech";
 
 /// The storm's dimensions. Everything derived from it is fixed before a single
 /// thread starts; only the interleaving is left to the scheduler.
@@ -355,7 +398,12 @@ const CHAOS_TOOLS: &[&str] = &[
 const CHAOS_ROLES: &[&str] = &["reader", "writer", "operator", GHOST_ROLE];
 
 fn storm_deployment(cfg: &StormConfig) -> Deployment {
-    let mut d = Deployment::new();
+    // The journal is a bounded buffer now, and this file reconciles every
+    // tenant's ledger *against it* — so the storm is given a buffer that
+    // cannot drop a record it is about to be asked about. The bound itself is
+    // guarded, under the same 32-way contention, by
+    // `the_audit_buffer_is_bounded_under_contention_and_says_what_it_dropped`.
+    let mut d = Deployment::new().with_audit_capacity(cfg.threads * cfg.ops_per_thread() + 1);
     d.add_role("reader", &["memory.read"])
         .add_role("writer", &["memory.read", "memory.write"])
         .add_role("operator", &["memory.read", "memory.write", "policy.admin"])
@@ -368,7 +416,12 @@ fn storm_deployment(cfg: &StormConfig) -> Deployment {
         let mut st = TenantState::new(limit);
         st.allow_model(BASE_MODEL)
             .activate(AdvancedQPageVariant::Hierarchical);
-        d.add_tenant(name, st);
+        // Every tenant is owned by `HOME_ORG`; nothing in the storm can move
+        // one, so the org gate's input is fixed before any thread starts.
+        assert!(
+            d.add_tenant(HOME_ORG, name, st),
+            "{name} is provisioned exactly once"
+        );
         // Actors are tenant-qualified: `t-a/alice` belongs to `t-a` and to
         // nothing else. Cross-tenant contamination is then a string prefix
         // away from being visible.
@@ -388,6 +441,9 @@ fn storm_deployment(cfg: &StormConfig) -> Deployment {
 enum Kind {
     Forwarded,
     Unauthenticated,
+    ActorMismatch,
+    TenantNotOwnedByOrg,
+    MalformedRequest,
     UnknownTenant,
     OutsideBoundary,
     ToolNotGoverned,
@@ -397,10 +453,31 @@ enum Kind {
     BudgetExhausted,
 }
 
+/// Every refusal the composed path can produce. Kept exhaustive on purpose: a
+/// new gate must be classified here before the storm can claim it covers them
+/// all.
+const ALL_KINDS: &[Kind] = &[
+    Kind::Forwarded,
+    Kind::Unauthenticated,
+    Kind::ActorMismatch,
+    Kind::TenantNotOwnedByOrg,
+    Kind::MalformedRequest,
+    Kind::UnknownTenant,
+    Kind::OutsideBoundary,
+    Kind::ToolNotGoverned,
+    Kind::PermissionDenied,
+    Kind::ModelNotAllowed,
+    Kind::VariantNotActivated,
+    Kind::BudgetExhausted,
+];
+
 fn kind_of(o: &Outcome) -> Kind {
     match o {
         Outcome::Forwarded => Kind::Forwarded,
         Outcome::Refused(Refusal::Unauthenticated) => Kind::Unauthenticated,
+        Outcome::Refused(Refusal::ActorMismatch) => Kind::ActorMismatch,
+        Outcome::Refused(Refusal::TenantNotOwnedByOrg) => Kind::TenantNotOwnedByOrg,
+        Outcome::Refused(Refusal::MalformedRequest(_)) => Kind::MalformedRequest,
         Outcome::Refused(Refusal::UnknownTenant) => Kind::UnknownTenant,
         Outcome::Refused(Refusal::OutsideBoundary(_)) => Kind::OutsideBoundary,
         Outcome::Refused(Refusal::ToolNotGoverned) => Kind::ToolNotGoverned,
@@ -414,7 +491,13 @@ fn kind_of(o: &Outcome) -> Kind {
 #[derive(Debug, Clone)]
 struct AdmitOp {
     tenant: String,
+    /// The actor the **request** claims.
     actor: String,
+    /// The actor the **credential** proves, and the org it belongs to. For a
+    /// well-behaved op these are `actor` and `HOME_ORG`; the two hostile
+    /// probes are exactly the ops where they disagree with the request.
+    cred_actor: String,
+    cred_org: String,
     tool: String,
     model: String,
     cost: u64,
@@ -450,15 +533,24 @@ enum Op {
     },
 }
 
-/// The ten pinned probes. Each one is refused (or forwarded) by exactly one
-/// gate, and nothing any other thread can do reaches that gate's input:
+/// The thirteen pinned probes. Each one is refused (or forwarded) by exactly
+/// one gate, and nothing any other thread can do reaches that gate's input:
 /// `ghost` is never added as a tenant, `context.read` is never governed,
 /// `<t>/nobody` is never assigned a role, `never-allowed` is never allowlisted,
-/// `ExperimentalBridge` is never activated, `t-zero`'s limit is 0.
+/// `ExperimentalBridge` is never activated, `t-zero`'s limit is 0, every tenant
+/// belongs to `HOME_ORG` for the whole run, and no op re-provisions one.
+///
+/// The last three are hostile by construction (impersonation, cross-org,
+/// oversized identifier). They used to be *unwritable*: the credential proved
+/// one identity and the request supplied another, and the product read only
+/// the strength of the first, so a thread could act as anybody it named. They
+/// are pinned refusals now, and they cost the tenant nothing.
 fn pinned_probe(home: &str, which: usize) -> AdmitOp {
     let base = |tenant: &str, who: &str| AdmitOp {
         tenant: tenant.to_string(),
         actor: format!("{tenant}/{who}"),
+        cred_actor: format!("{tenant}/{who}"),
+        cred_org: HOME_ORG.to_string(),
         tool: "memory.recall".to_string(),
         model: BASE_MODEL.to_string(),
         cost: 1,
@@ -509,11 +601,38 @@ fn pinned_probe(home: &str, which: usize) -> AdmitOp {
             pinned: Some(Kind::ModelNotAllowed),
             ..base(home, "alice")
         },
-        _ => AdmitOp {
+        9 => AdmitOp {
             variant: Some(NEVER_ACTIVE),
             pinned: Some(Kind::VariantNotActivated),
             ..base(home, "alice")
         },
+        // Impersonation: the thread authenticates as `<t>/nobody`, who holds no
+        // role, and presents `<t>/alice`, who may write. The credential is
+        // genuine; the name on the request is not its own.
+        10 => AdmitOp {
+            cred_actor: format!("{home}/nobody"),
+            pinned: Some(Kind::ActorMismatch),
+            ..base(home, "alice")
+        },
+        // Cross-org: a genuinely authenticated caller from an organization that
+        // owns nothing here, naming this tenant and its actor exactly right.
+        11 => AdmitOp {
+            cred_org: FOREIGN_ORG.to_string(),
+            pinned: Some(Kind::TenantNotOwnedByOrg),
+            ..base(home, "alice")
+        },
+        // An identifier that no record should ever have to carry verbatim.
+        // Kept under the tenant's own prefix so the *journalled* (clamped)
+        // actor is still visibly the tenant's, which is what invariant 3 reads.
+        _ => {
+            let long = format!("{home}/{}", "z".repeat(MAX_IDENTIFIER_BYTES));
+            AdmitOp {
+                cred_actor: long.clone(),
+                actor: long,
+                pinned: Some(Kind::MalformedRequest),
+                ..base(home, "alice")
+            }
+        }
     }
 }
 
@@ -522,6 +641,12 @@ fn chaos_op(rng: &mut Rng, tid: usize, home: &str, k: usize) -> Op {
     match rng.below(10) {
         0..=5 => Op::Admit(AdmitOp {
             tenant: home.to_string(),
+            // Chaos is hostile in what it asks for, not in who it claims to
+            // be: the credential proves the actor the request names. The
+            // *pinned* probes own the impersonation cases, so their refusal
+            // stays a function of one gate.
+            cred_actor: worker.clone(),
+            cred_org: HOME_ORG.to_string(),
             actor: worker,
             tool: rng.pick(CHAOS_TOOLS).to_string(),
             model: match rng.below(6) {
@@ -591,7 +716,10 @@ fn script_for_thread(cfg: &StormConfig, tid: usize) -> Vec<Op> {
         ops.swap(i, j);
     }
     // Request ids are assigned by final position, so they are globally unique
-    // and each names exactly one (tenant, cost) pair.
+    // and each names exactly one (tenant, cost) pair. Uniqueness is not
+    // cosmetic: a repeated (tenant, request_id) is suppressed as a replay and
+    // forwarded *free*, which would silently collapse the billing this file
+    // reconciles. `run_storm` asserts it before the storm starts.
     for (pos, op) in ops.iter_mut().enumerate() {
         if let Op::Admit(a) = op {
             a.request_id = format!("t{tid:02}-{pos:06}");
@@ -609,6 +737,14 @@ fn guard(m: &Mutex<Deployment>) -> MutexGuard<'_, Deployment> {
 
 fn scope(tenant: &str, key: &str) -> TenantScope<String> {
     TenantScope::new(TenantId(tenant.to_string()), key.to_string())
+}
+
+/// `spent` for a tenant this deployment is *known* to have. `None` now means
+/// "no such tenant", which is a distinct claim and is asserted where it is the
+/// point (`d.spent("ghost")`); everywhere else it would be a bug in the test.
+fn spent(d: &Deployment, tenant: &str) -> u64 {
+    d.spent(tenant)
+        .unwrap_or_else(|| panic!("{tenant} is a tenant of this deployment"))
 }
 
 /// What one thread observed. Collected instead of asserted, so a thread never
@@ -629,7 +765,10 @@ fn run_thread(deployment: &Mutex<Deployment>, ops: &[Op], start: &Barrier) -> Th
         match op {
             Op::Admit(a) => {
                 report.admits += 1;
-                let who = actor("memorithm", &a.actor, a.strength);
+                // The credential is built from what this op *proved*, the
+                // request from what it *claims*. They agree for every op but
+                // the two hostile probes, which is the point of both.
+                let who = actor(&a.cred_org, &a.cred_actor, a.strength);
                 let req = request(&a.tenant, &a.actor, &a.tool, &a.request_id);
                 let outcome = guard(deployment).admit(Call {
                     actor: &who,
@@ -710,9 +849,10 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
         .map(|tid| script_for_thread(cfg, tid))
         .collect();
 
-    // The journal does not record what a call cost (`AuditRecord` has no cost
-    // field — see the module docs), so reconciling the ledger against the
-    // journal is only possible with this side table, which the *test* keeps.
+    // The journal records what each call cost now (`AuditRecord::cost`), so the
+    // reconciliation below runs off the product's own data. This side table is
+    // kept as the *cross-check*: what the caller asked to be charged, against
+    // what the product says it charged.
     let mut cost_of: HashMap<String, u64> = HashMap::new();
     let mut tenant_of: HashMap<String, String> = HashMap::new();
     let mut expected_admits = 0usize;
@@ -766,9 +906,16 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     // ── Invariant 1: one journal record per admission, and only per
     //    admission. The five *state-changing* op kinds journal nothing. ────
     assert_eq!(
-        d.audit().len(),
+        d.audit().count(),
         admits,
         "every admission is journaled exactly once, whatever the interleaving"
+    );
+    // The buffer is bounded, so this invariant is only meaningful while the
+    // storm fits inside it. It is sized from the config; nothing was dropped.
+    assert_eq!(
+        d.audit_dropped(),
+        0,
+        "the storm's journal is complete: nothing was dropped from the buffer"
     );
     // DEFECT (documented, not weakened): `put`, `assign`, `allow_model` and
     // `activate` all change what a later admission decides, and none of them
@@ -779,7 +926,7 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     );
     let unjournaled = total_ops - admits;
     assert_eq!(
-        d.audit().len(),
+        d.audit().count(),
         total_ops - unjournaled,
         "DEFECT: {unjournaled} of {total_ops} governed operations \
          (put/assign/allow_model/activate) left no audit record at all"
@@ -795,16 +942,18 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     let mut journal_refused = 0u64;
     let mut journaled_ids: BTreeSet<&str> = BTreeSet::new();
     let mut race_winners: BTreeSet<&str> = BTreeSet::new();
+    let mut sequences: Vec<u64> = Vec::with_capacity(admits);
     for rec in d.audit() {
         let kind = kind_of(&rec.outcome);
         seen_kinds.insert(kind);
         *kind_counts.entry(format!("{kind:?}")).or_default() += 1;
         journaled_ids.insert(rec.request_id.as_str());
+        sequences.push(rec.sequence);
         if rec.tenant == "t-race" && rec.outcome.is_forwarded() {
             // "t07-001234" → "t07": which thread won this token.
             race_winners.insert(&rec.request_id[..3]);
         }
-        let cost = *cost_of
+        let scripted = *cost_of
             .get(&rec.request_id)
             .expect("every journaled request id came from a script");
         assert_eq!(
@@ -813,22 +962,47 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
             "a record was journaled under a tenant its request never named"
         );
         if rec.outcome.is_forwarded() {
+            // Every request id is distinct, so nothing here is a replay: a
+            // forwarded call is billed exactly what its caller asked for.
+            assert_eq!(
+                rec.cost, scripted,
+                "{}: the journal must record the cost the call was charged",
+                rec.request_id
+            );
             journal_forwarded += 1;
-            *forwarded_cost.entry(rec.tenant.clone()).or_default() += cost;
+            *forwarded_cost.entry(rec.tenant.clone()).or_default() += rec.cost;
             *forwarded_count.entry(rec.tenant.clone()).or_default() += 1;
         } else {
+            // REGRESSION GUARD: the budget is charged last, so no refusal —
+            // including the three hostile probes — is ever billed, and the
+            // journal now says so in a field an operator can read.
+            assert_eq!(
+                rec.cost, 0,
+                "{}: a refusal was journaled with a non-zero cost",
+                rec.request_id
+            );
             journal_refused += 1;
         }
     }
+    // REGRESSION GUARD (was: "the journal carries no ordering information").
+    // Under 32-way contention the sequences are dense and monotonic, so the
+    // whole run can be replayed in the order the deployment actually decided.
+    assert_eq!(
+        sequences,
+        (0..admits as u64).collect::<Vec<_>>(),
+        "the journal must carry one dense, monotonic sequence over all \
+         {admits} concurrent admissions"
+    );
     for (tenant, _) in cfg.tenants() {
         assert_eq!(
             d.spent(tenant),
-            forwarded_cost.get(tenant).copied().unwrap_or(0),
-            "{tenant}: the ledger must equal the journal's forwarded costs"
+            Some(forwarded_cost.get(tenant).copied().unwrap_or(0)),
+            "{tenant}: the ledger must equal the journal's own forwarded costs"
         );
     }
-    // The tenant that does not exist was never billed and cannot be.
-    assert_eq!(d.spent("ghost"), 0);
+    // The tenant that does not exist was never billed and cannot be — and
+    // `None` says it does not exist, which a bare `0` could not.
+    assert_eq!(d.spent("ghost"), None);
     assert!(!forwarded_cost.contains_key("ghost"));
     // No record lost, none duplicated: `admits` distinct request ids, exactly
     // one journal row each, under an interleaving nobody controlled.
@@ -839,10 +1013,11 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     );
 
     // ── Invariant 3: no tenant's trail contains another tenant's actor ───
-    let tenants_in_journal: BTreeSet<&str> = d.audit().iter().map(|r| r.tenant.as_str()).collect();
+    let tenants_in_journal: BTreeSet<&str> = d.audit().map(|r| r.tenant.as_str()).collect();
     for tenant in &tenants_in_journal {
         let prefix = format!("{tenant}/");
-        for rec in d.audit_of(tenant) {
+        let trail = d.audit_of(tenant);
+        for rec in &trail {
             assert!(
                 rec.actor.starts_with(&prefix),
                 "{tenant}'s trail names {}, which belongs to another tenant",
@@ -850,6 +1025,14 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
             );
             assert_eq!(&rec.tenant, *tenant, "audit_of returned a foreign record");
         }
+        // REGRESSION GUARD: the per-tenant view used to be the one place the
+        // journal's only ordering information — a `Vec` index — was thrown
+        // away. It now carries the global sequence, so a tenant's trail can be
+        // placed back into the deployment's decision order.
+        assert!(
+            trail.windows(2).all(|w| w[0].sequence < w[1].sequence),
+            "{tenant}'s trail is not ordered by the global sequence"
+        );
     }
     assert!(
         tenants_in_journal.contains("ghost"),
@@ -891,27 +1074,49 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     assert_eq!(tag_total, m("gateway.refused"), "the tags sum to the total");
     assert_eq!(
         metrics.len(),
-        3 + 8,
+        3 + 11,
         "requests/forwarded/refused plus one series per refusal kind, and \
          nothing attacker-shaped: {:?}",
         metrics.keys().collect::<Vec<_>>()
     );
+    // Every request id in the storm is distinct, so replay suppression must
+    // never have fired: if it had, a forwarded call would have been journaled
+    // with `cost: 0` and the ledger reconciliation above would be reading a
+    // collapsed bill.
+    assert!(
+        !metrics.contains_key("gateway.replayed"),
+        "no call in the storm repeats a (tenant, request_id): {:?}",
+        metrics.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !metrics.contains_key("audit.dropped"),
+        "the journal the invariants above read is complete"
+    );
 
     // ── The mix really covered every gate ───────────────────────────────
-    for kind in [
-        Kind::Forwarded,
-        Kind::Unauthenticated,
-        Kind::UnknownTenant,
-        Kind::OutsideBoundary,
-        Kind::ToolNotGoverned,
-        Kind::PermissionDenied,
-        Kind::ModelNotAllowed,
-        Kind::VariantNotActivated,
-        Kind::BudgetExhausted,
-    ] {
+    for kind in ALL_KINDS {
         assert!(
-            seen_kinds.contains(&kind),
+            seen_kinds.contains(kind),
             "the storm never produced {kind:?}"
+        );
+    }
+    // REGRESSION GUARD: the three hostile probes. Every thread issued
+    // `probe_repeats` of each, and every single one was refused by the gate it
+    // was aimed at — none was forwarded, none reached a tenant's state, and
+    // (invariant 2, above) none was billed a token. These calls used to
+    // succeed: the deployment authenticated one identity and authorized the
+    // caller-supplied one, so a thread could act as any actor it named, in any
+    // organization, against another tenant's budget.
+    let hostile = (cfg.threads * cfg.probe_repeats) as u64;
+    for kind in [
+        Kind::ActorMismatch,
+        Kind::TenantNotOwnedByOrg,
+        Kind::MalformedRequest,
+    ] {
+        assert_eq!(
+            kind_counts.get(&format!("{kind:?}")).copied(),
+            Some(hostile),
+            "all {hostile} {kind:?} probes must be refused, on every interleaving"
         );
     }
 
@@ -922,7 +1127,7 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     );
     println!("  operations attempted   {total_ops}");
     println!("  admissions             {admits}");
-    println!("  journaled records      {}", d.audit().len());
+    println!("  journaled records      {}", d.audit().count());
     println!("  unjournaled operations {unjournaled}");
     for (kind, n) in &kind_counts {
         println!("    {kind:<20} {n:>8}");
@@ -930,7 +1135,7 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     for (tenant, limit) in cfg.tenants() {
         println!(
             "  {tenant:<8} spent {:>8} / {limit:<8} forwarded {:>8} records {:>8}",
-            d.spent(tenant),
+            spent(&d, tenant),
             forwarded_count.get(tenant).copied().unwrap_or(0),
             d.audit_of(tenant).len()
         );
@@ -940,14 +1145,14 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     // Exact fit: `threads * probe_repeats` one-token calls against a limit of
     // exactly that, from 32 threads. Every one forwards and the ledger lands
     // exactly on the limit — no lost update, no double spend.
-    assert_eq!(d.spent("t-ok"), cfg.exact_fit());
+    assert_eq!(d.spent("t-ok"), Some(cfg.exact_fit()));
     assert_eq!(forwarded_count.get("t-ok").copied(), Some(cfg.exact_fit()));
     assert!(d.audit_of("t-ok").iter().all(|r| r.outcome.is_forwarded()));
     // Contended: twice as many racers as tokens. Which racers win is a race;
     // *how many* is not, and the tenant is never overdrawn by a single token.
     assert_eq!(
         d.spent("t-race"),
-        cfg.race_limit(),
+        Some(cfg.race_limit()),
         "no overdraft, no underspend"
     );
     assert_eq!(
@@ -974,7 +1179,7 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
         .filter(|r| !r.outcome.is_forwarded())
         .all(|r| r.outcome.refusal() == Some(&Refusal::BudgetExhausted)));
     // Zero budget: every call refused, nothing spent, forever.
-    assert_eq!(d.spent("t-zero"), 0);
+    assert_eq!(d.spent("t-zero"), Some(0));
     assert!(d
         .audit_of("t-zero")
         .iter()
@@ -982,9 +1187,9 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     // And no tenant ever exceeded the limit it was created with.
     for (tenant, limit) in cfg.tenants() {
         assert!(
-            d.spent(tenant) <= limit,
+            spent(&d, tenant) <= limit,
             "{tenant} spent {} against a limit of {limit}",
-            d.spent(tenant)
+            spent(&d, tenant)
         );
     }
     // Both chaos budget regimes were really exercised: the tight tenants were
@@ -992,19 +1197,23 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     // the exhausted path and the solvent path at once.
     let limits: BTreeMap<&str, u64> = cfg.tenants().into_iter().collect();
     for t in TIGHT_TENANTS {
-        assert_eq!(d.spent(t), limits[t], "{t} was meant to be drained dry");
+        assert_eq!(
+            d.spent(t),
+            Some(limits[t]),
+            "{t} was meant to be drained dry"
+        );
     }
     for t in AMPLE_TENANTS {
         assert!(
-            d.spent(t) > 0 && d.spent(t) < limits[t],
+            spent(&d, t) > 0 && spent(&d, t) < limits[t],
             "{t} was meant to stay solvent: spent {} of {}",
-            d.spent(t),
+            spent(&d, t),
             limits[t]
         );
     }
 }
 
-/// The headline storm: 32 threads x 4 240 fixed operations = 135 680
+/// The headline storm: 32 threads x 4 312 fixed operations = 137 984
 /// interleaved operations against one `Arc<Mutex<Deployment>>`.
 #[test]
 fn chaos_storm_thirty_two_threads_holds_every_global_invariant() {
@@ -1019,13 +1228,13 @@ fn chaos_storm_thirty_two_threads_holds_every_global_invariant() {
     );
 }
 
-/// The same storm at 10x, ~1.3M interleaved operations. Too slow for the
+/// The same storm at 10x, ~1.4M interleaved operations. Too slow for the
 /// default run; behaviour must be identical, not merely similar.
 ///
 /// `cargo test -p ccos-enterprise-conformance --test stress_concurrency_chaos \
 ///  -- --ignored --nocapture`
 #[test]
-#[ignore = "~30s soak; run with --ignored (see the doc comment for the command)"]
+#[ignore = "~45s soak; run with --ignored (see the doc comment for the command)"]
 fn chaos_storm_soak_ten_times_the_traffic() {
     run_storm(
         &StormConfig {
@@ -1305,8 +1514,8 @@ fn composed_path_types_are_send_and_sync_but_every_mutator_is_exclusive() {
         chaos_ops: 1,
     });
     let shared: &Deployment = &d;
-    assert_eq!(shared.spent("t-ok"), 0);
-    assert!(shared.audit().is_empty());
+    assert_eq!(shared.spent("t-ok"), Some(0));
+    assert_eq!(shared.audit().count(), 0);
     // `admit`, `put`, `assign`, `tenant_mut`, `govern_tool`, `add_role` and
     // `add_tenant` all require `&mut Deployment`; there is no interior
     // mutability anywhere in the type, and no per-tenant handle to hand out.
@@ -1316,15 +1525,42 @@ fn composed_path_types_are_send_and_sync_but_every_mutator_is_exclusive() {
 // 3. Targeted concurrency defects
 // ═════════════════════════════════════════════════════════════════════════════
 
-fn one_tenant(limit: u64) -> Deployment {
-    let mut d = Deployment::new();
+fn one_tenant_with_audit_capacity(limit: u64, capacity: usize) -> Deployment {
+    let mut d = Deployment::new().with_audit_capacity(capacity);
     d.add_role("writer", &["memory.read", "memory.write"])
         .govern_tool("memory.recall", "memory.read");
     let mut st = TenantState::new(limit);
     st.allow_model(BASE_MODEL);
-    d.add_tenant("acme", st);
-    d.assign("alice", "writer");
+    assert!(d.add_tenant(HOME_ORG, "acme", st), "acme is new here");
+    assert!(d.assign("alice", "writer"));
     d
+}
+
+fn one_tenant(limit: u64) -> Deployment {
+    one_tenant_with_audit_capacity(limit, DEFAULT_AUDIT_CAPACITY)
+}
+
+/// One journaled decision in the form an operator reconciles from: the order
+/// it was decided in, what it was, and what it cost. Every field of it was
+/// added by the repair — before it, a journal row was `(request_id, outcome)`
+/// with no position and no price.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JournalRow {
+    sequence: u64,
+    request_id: String,
+    forwarded: bool,
+    cost: u64,
+}
+
+fn journal_of(d: &Deployment) -> Vec<JournalRow> {
+    d.audit()
+        .map(|r| JournalRow {
+            sequence: r.sequence,
+            request_id: r.request_id.clone(),
+            forwarded: r.outcome.is_forwarded(),
+            cost: r.cost,
+        })
+        .collect()
 }
 
 /// 32 threads race for a budget that fits half of them. **HELD:** exactly
@@ -1344,9 +1580,11 @@ fn budget_race_admits_exactly_the_limit_and_never_overdrafts() {
             let d = Arc::clone(&d);
             let start = Arc::clone(&start);
             s.spawn(move || {
-                let who = actor("memorithm", "alice", AuthStrength::Token);
+                let who = actor(HOME_ORG, "alice", AuthStrength::Token);
                 start.wait();
                 for i in 0..ATTEMPTS_PER_THREAD {
+                    // Distinct per attempt: a repeated id is a *replay*, which
+                    // is forwarded free and would hide a lost update.
                     let req = request("acme", "alice", "memory.recall", &format!("r-{tid}-{i}"));
                     guard(&d).admit(Call {
                         actor: &who,
@@ -1361,48 +1599,56 @@ fn budget_race_admits_exactly_the_limit_and_never_overdrafts() {
     });
 
     let d = guard(&d);
-    let forwarded = d
-        .audit()
-        .iter()
-        .filter(|r| r.outcome.is_forwarded())
-        .count() as u64;
+    let forwarded = d.audit().filter(|r| r.outcome.is_forwarded()).count() as u64;
     assert_eq!(forwarded, LIMIT, "exactly `limit` one-token calls won");
     assert_eq!(
         d.spent("acme"),
-        LIMIT,
+        Some(LIMIT),
         "the ledger is exact under contention"
     );
-    assert_eq!(d.audit().len(), THREADS * ATTEMPTS_PER_THREAD);
+    assert_eq!(d.audit().count(), THREADS * ATTEMPTS_PER_THREAD);
     assert!(
         d.audit()
-            .iter()
             .filter(|r| !r.outcome.is_forwarded())
             .all(|r| r.outcome.refusal() == Some(&Refusal::BudgetExhausted)),
         "the losers lost for the right reason"
     );
+    // The journal reconciles the ledger by itself now: sum the costs it
+    // recorded and you get the meter, with every refusal contributing 0.
+    let billed: u64 = d.audit().map(|r| r.cost).sum();
+    assert_eq!(Some(billed), d.spent("acme"));
 }
 
-/// **DEFECT (replay determinism does not survive concurrency).**
-/// `docs/ENTERPRISE_SECURITY_MODEL.md` closes with "Enterprise ADDS gates; it
-/// never WEAKENS a Core guarantee (determinism, replay, …)". Feed the composed
-/// path the *identical* set of calls — same actors, same tools, same models,
-/// same costs, same request ids — from two threads, and the journal it
-/// produces depends entirely on which thread reached the lock first: different
-/// order, different outcomes, different billing. That is defensible for a
-/// contended resource; what is not is that **no field of `AuditRecord` records
-/// the ordering**, so neither journal can be replayed to reproduce the other,
-/// and an auditor cannot tell a legitimate loss of the race from a call that
-/// was never made.
+/// **REGRESSION GUARD** (was: *replay determinism does not survive
+/// concurrency*). `docs/ENTERPRISE_SECURITY_MODEL.md` closes with "Enterprise
+/// ADDS gates; it never WEAKENS a Core guarantee (determinism, replay, …)".
+/// This test used to pin the opposite. Feeding the composed path the
+/// *identical* set of calls from two threads produced a journal whose order
+/// depended entirely on which thread reached the lock first — that part is
+/// defensible for a contended resource. What was not is that **no field of
+/// `AuditRecord` recorded the ordering**: no sequence, no timestamp, no thread
+/// or connection id. The `Vec`'s position was the only ordering information
+/// that existed and `audit_of` discarded even that, so neither journal could
+/// be replayed to reproduce the other, and an auditor could not tell a
+/// legitimate loss of the race from a call that was never made. The cost of
+/// that was the whole replay guarantee, on the one path where two customers
+/// contend for one budget.
 ///
-/// The two interleavings below are forced by a barrier, so this test is fully
+/// `AuditRecord::sequence`, assigned under the same borrow that decides, closed
+/// it. The race is unchanged and still pinned below — one call set, two
+/// interleavings, two different journals — but each journal is now totally
+/// ordered, and **replaying it in sequence order against a fresh deployment
+/// reproduces it exactly**: same order, same outcomes, same costs, same ledger.
+///
+/// The two interleavings are forced by a barrier, so this test is fully
 /// deterministic: it does not *hope* for a race, it stages both sides of one.
 #[test]
-fn one_call_set_produces_two_different_journals_under_two_interleavings() {
+fn two_interleavings_produce_two_journals_that_each_replay_exactly() {
     let _wd = Watchdog::arm("two_interleavings", 30);
 
     /// Runs `call-a` and `call-b` (one token each, one token of budget) with
-    /// the order pinned, and returns the journal as (request id, forwarded).
-    fn staged(a_goes_first: bool) -> Vec<(String, bool)> {
+    /// the order pinned, and returns the journal and the ledger it produced.
+    fn staged(a_goes_first: bool) -> (Vec<JournalRow>, Option<u64>) {
         let d = Arc::new(Mutex::new(one_tenant(1)));
         let gate = Arc::new(Barrier::new(2));
         thread::scope(|s| {
@@ -1410,7 +1656,7 @@ fn one_call_set_produces_two_different_journals_under_two_interleavings() {
                 let d = Arc::clone(&d);
                 let gate = Arc::clone(&gate);
                 s.spawn(move || {
-                    let who = actor("memorithm", "alice", AuthStrength::Token);
+                    let who = actor(HOME_ORG, "alice", AuthStrength::Token);
                     let req = request("acme", "alice", "memory.recall", id);
                     let call = || Call {
                         actor: &who,
@@ -1430,39 +1676,92 @@ fn one_call_set_produces_two_different_journals_under_two_interleavings() {
             }
         });
         let d = guard(&d);
-        d.audit()
-            .iter()
-            .map(|r| (r.request_id.clone(), r.outcome.is_forwarded()))
-            .collect()
+        (journal_of(&d), d.spent("acme"))
     }
 
-    let a_first = staged(true);
-    let b_first = staged(false);
+    /// Replay a journal against a fresh deployment, in **its own recorded
+    /// order** — the operation the missing sequence made impossible.
+    fn replay(journal: &[JournalRow]) -> (Vec<JournalRow>, Option<u64>) {
+        let mut ordered = journal.to_vec();
+        ordered.sort_by_key(|row| row.sequence);
+        let mut d = one_tenant(1);
+        let who = actor(HOME_ORG, "alice", AuthStrength::Token);
+        for row in &ordered {
+            let req = request("acme", "alice", "memory.recall", &row.request_id);
+            d.admit(Call {
+                actor: &who,
+                request: &req,
+                model: BASE_MODEL,
+                cost_tokens: 1,
+                variant: None,
+            });
+        }
+        (journal_of(&d), d.spent("acme"))
+    }
+
+    let row = |sequence, id: &str, forwarded, cost| JournalRow {
+        sequence,
+        request_id: id.to_string(),
+        forwarded,
+        cost,
+    };
+
+    let (a_first, a_spent) = staged(true);
+    let (b_first, b_spent) = staged(false);
     assert_eq!(
         a_first,
-        vec![("call-a".to_string(), true), ("call-b".to_string(), false)]
+        vec![row(0, "call-a", true, 1), row(1, "call-b", false, 0)]
     );
     assert_eq!(
         b_first,
-        vec![("call-b".to_string(), true), ("call-a".to_string(), false)]
+        vec![row(0, "call-b", true, 1), row(1, "call-a", false, 0)]
     );
+    // The race is real, and still exactly as visible as it was.
     assert_ne!(
         a_first, b_first,
-        "DEFECT: one call set, two journals — and nothing in an AuditRecord \
-         says which interleaving produced it, so neither is replayable"
+        "one call set, two interleavings, two journals — that much is inherent"
     );
+    // …but each journal now says which interleaving produced it, and replays
+    // to itself, byte for byte, on a deployment that never saw the race.
+    assert_eq!(
+        replay(&a_first),
+        (a_first.clone(), a_spent),
+        "a journal must replay to itself in its own sequence order"
+    );
+    assert_eq!(replay(&b_first), (b_first.clone(), b_spent));
+    // Replaying one journal does not reproduce the other: the ordering the
+    // sequence records is real information, not decoration.
+    assert_ne!(replay(&a_first).0, b_first);
+    // And each journal reconciles its own ledger without a side table.
+    for (journal, ledger) in [(&a_first, a_spent), (&b_first, b_spent)] {
+        assert_eq!(ledger, Some(1));
+        let billed: u64 = journal.iter().map(|r| r.cost).sum();
+        assert_eq!(Some(billed), ledger, "the journal accounts for the meter");
+        assert!(
+            journal.iter().all(|r| r.forwarded || r.cost == 0),
+            "a refusal is never billed"
+        );
+    }
 }
 
-/// **DEFECT (audit integrity).** An `AuditRecord` carries no sequence number,
-/// no timestamp, no thread or connection id — the `Vec`'s position is the only
-/// ordering information in the journal, and `audit_of` discards it (it returns
-/// `Vec<&AuditRecord>` with no indices). Under concurrency that makes the
-/// journal *self-colliding*: 32 threads issuing the byte-identical call
-/// produce 32 records that compare `==` to one another. Every one of them was
-/// separately billed, and no operator reading the trail can tell them apart,
-/// order them, or attribute one to a caller.
+/// **REGRESSION GUARD** (was: *the journal is self-colliding under
+/// concurrency*). An `AuditRecord` used to carry no sequence number, no
+/// timestamp and no thread or connection id, so 32 threads issuing the
+/// byte-identical call produced 32 records that compared `==` to one another:
+/// no operator reading the trail could tell them apart, order them, or
+/// attribute one to a caller. Worse, all 32 were separately **billed**,
+/// although `request_id` is documented as an "Idempotency/correlation key"
+/// (`crates/ccos-enterprise-gateway/src/lib.rs`) — a client's retry storm was
+/// a bill multiplier.
+///
+/// The same 32 threads, the same byte-identical call, the opposite
+/// expectation. `AuditRecord::sequence` makes the records pairwise distinct
+/// and totally ordered; replay suppression charges the request **once**. The
+/// 31 replays are still forwarded — a retry gets its prior outcome, not a
+/// refusal — and still journaled, each carrying `cost: 0`, so the trail shows
+/// that the calls happened *and* that they were free.
 #[test]
-fn identical_concurrent_calls_produce_indistinguishable_audit_records() {
+fn identical_concurrent_calls_are_ordered_and_billed_exactly_once() {
     let _wd = Watchdog::arm("identical_concurrent_calls", 30);
     let d = Arc::new(Mutex::new(one_tenant(1_000)));
     let start = Arc::new(Barrier::new(THREADS));
@@ -1471,7 +1770,7 @@ fn identical_concurrent_calls_produce_indistinguishable_audit_records() {
             let d = Arc::clone(&d);
             let start = Arc::clone(&start);
             s.spawn(move || {
-                let who = actor("memorithm", "alice", AuthStrength::Token);
+                let who = actor(HOME_ORG, "alice", AuthStrength::Token);
                 // Byte-identical, including the "idempotency/correlation key".
                 let req = request("acme", "alice", "memory.recall", "r-same");
                 start.wait();
@@ -1487,20 +1786,36 @@ fn identical_concurrent_calls_produce_indistinguishable_audit_records() {
     });
 
     let d = guard(&d);
-    assert_eq!(d.audit().len(), THREADS);
-    let first = &d.audit()[0];
+    let trail: Vec<&AuditRecord> = d.audit().collect();
+    assert_eq!(trail.len(), THREADS, "every attempt is still journaled");
+    // Distinguishable and ordered: {THREADS} distinct sequences, dense and
+    // monotonic, whichever thread reached the lock in whichever order.
+    let sequences: Vec<u64> = trail.iter().map(|r| r.sequence).collect();
+    assert_eq!(sequences, (0..THREADS as u64).collect::<Vec<_>>());
+    let first = trail[0];
     assert!(
-        d.audit().iter().all(|r| r == first),
-        "DEFECT: {THREADS} concurrent admissions produced {THREADS} records that \
-         are equal in every field — the journal has no ordering or identity key"
+        trail[1..].iter().all(|r| *r != first),
+        "no two records may be equal in every field, however identical the calls"
     );
+    // Billed once: the record that decided first carries the charge, and the
+    // {THREADS}-1 suppressed replays carry a zero the operator can read.
+    assert!(trail.iter().all(|r| r.outcome.is_forwarded()));
+    assert_eq!(first.cost, 1, "the first decision is the one that pays");
+    assert!(trail[1..].iter().all(|r| r.cost == 0), "a replay is free");
     assert_eq!(
         d.spent("acme"),
-        THREADS as u64,
-        "DEFECT: one request id, {THREADS} concurrent replays, {THREADS} charges"
+        Some(1),
+        "one request id, {THREADS} concurrent retries, exactly one charge"
     );
-    // And the per-tenant view offers no way back to the global order.
-    assert_eq!(d.audit_of("acme").len(), THREADS);
+    // And the per-tenant view carries the global order back with it.
+    let mine = d.audit_of("acme");
+    assert_eq!(mine.len(), THREADS);
+    assert!(
+        mine.windows(2).all(|w| w[0].sequence < w[1].sequence),
+        "audit_of must preserve the deployment's decision order"
+    );
+    let billed: u64 = mine.iter().map(|r| r.cost).sum();
+    assert_eq!(Some(billed), d.spent("acme"));
 }
 
 /// **DEFECT (audit completeness).** A governance change races with the
@@ -1528,7 +1843,7 @@ fn a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explai
             admin_gate.wait(); // …before the second
         });
 
-        let who = actor("memorithm", "alice", AuthStrength::Token);
+        let who = actor(HOME_ORG, "alice", AuthStrength::Token);
         let before = {
             let req = request("acme", "alice", "memory.recall", "r-before");
             guard(&d).admit(Call {
@@ -1557,12 +1872,20 @@ fn a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explai
 
     let d = guard(&d);
     assert_eq!(
-        d.audit().len(),
+        d.audit().count(),
         2,
         "DEFECT: the allowlist widened between the two calls and the journal \
          holds only the two admissions — no record of the change, its actor, \
          or its justification"
     );
+    // The two rows are ordered and priced, so the *flip* is legible — the
+    // refusal cost 0 and the forward cost 10 — but nothing between them says
+    // why the second was allowed. Ordering was the repair; provenance was not.
+    let rows = journal_of(&d);
+    assert_eq!(rows[0].sequence, 0);
+    assert_eq!(rows[1].sequence, 1);
+    assert_eq!((rows[0].forwarded, rows[0].cost), (false, 0));
+    assert_eq!((rows[1].forwarded, rows[1].cost), (true, 10));
     let metrics = d.metrics();
     let names: Vec<&String> = metrics.iter().map(|(k, _)| k).collect();
     assert!(
@@ -1571,14 +1894,19 @@ fn a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explai
     );
 }
 
-/// **DEFECT (no atomic snapshot).** `spent`, `audit`/`audit_of` and `metrics`
-/// are three separate calls on three separate borrows. The product offers no
-/// snapshot accessor, so an operator reconciling the ledger against the
-/// journal under load must invent their own lock discipline; done the obvious
-/// way — one `lock()` per read — the reconciliation reports a tenant as
-/// under-billed by a whole call, although the deployment was never once
-/// internally inconsistent. The barriers below pin the interleaving, so this
-/// is a *deterministic* demonstration of a real operator-facing hazard.
+/// **DEFECT (no atomic snapshot).** `spent`, `audit`/`audit_of`,
+/// `audit_dropped` and `metrics` are four separate calls on four separate
+/// borrows. The product offers no snapshot accessor, so an operator
+/// reconciling the ledger against the journal under load must invent their own
+/// lock discipline; done the obvious way — one `lock()` per read — the
+/// reconciliation reports a tenant as under-billed by a whole call, although
+/// the deployment was never once internally inconsistent. The barriers below
+/// pin the interleaving, so this is a *deterministic* demonstration of a real
+/// operator-facing hazard.
+///
+/// `AuditRecord::cost` made the reconciliation *possible* from the journal
+/// alone — the sum below no longer needs the test to know what a call cost —
+/// which is what makes the missing snapshot the only remaining obstacle.
 #[test]
 fn ledger_and_journal_tear_when_read_in_separate_lock_acquisitions() {
     let _wd = Watchdog::arm("ledger_journal_tear", 30);
@@ -1589,7 +1917,7 @@ fn ledger_and_journal_tear_when_read_in_separate_lock_acquisitions() {
     let traffic_gate = Arc::clone(&gate);
     thread::scope(|s| {
         s.spawn(move || {
-            let who = actor("memorithm", "alice", AuthStrength::Token);
+            let who = actor(HOME_ORG, "alice", AuthStrength::Token);
             traffic_gate.wait(); // the operator has read `spent`, lock released
             let req = request("acme", "alice", "memory.recall", "r-inflight");
             let out = guard(&traffic_d).admit(Call {
@@ -1604,15 +1932,12 @@ fn ledger_and_journal_tear_when_read_in_separate_lock_acquisitions() {
         });
 
         // The operator's naive reconciliation: two reads, two lock acquisitions.
-        let spent_snapshot = guard(&d).spent("acme");
+        let spent_snapshot = spent(&guard(&d), "acme");
         gate.wait();
         gate.wait();
-        let journal_snapshot: u64 = guard(&d)
-            .audit_of("acme")
-            .iter()
-            .filter(|r| r.outcome.is_forwarded())
-            .count() as u64
-            * 100;
+        // Read straight off the journal now — `cost` is the product's own
+        // number, not this test's guess at one.
+        let journal_snapshot: u64 = guard(&d).audit_of("acme").iter().map(|r| r.cost).sum();
 
         assert_eq!(spent_snapshot, 0);
         assert_eq!(journal_snapshot, 100);
@@ -1626,17 +1951,24 @@ fn ledger_and_journal_tear_when_read_in_separate_lock_acquisitions() {
     // Held under one guard, the two agree — the hazard is the missing API,
     // not an internal inconsistency.
     let d = guard(&d);
-    assert_eq!(d.spent("acme"), 100);
+    assert_eq!(d.spent("acme"), Some(100));
     assert_eq!(d.audit_of("acme").len(), 1);
+    let billed: u64 = d.audit_of("acme").iter().map(|r| r.cost).sum();
+    assert_eq!(Some(billed), d.spent("acme"));
 }
 
 /// **DEFECT (blast radius).** Because the only sound topology is one lock over
 /// the whole `Deployment`, a panic *anywhere* under that lock denies service
 /// to **every** tenant at once, and the product has no recovery story: no
 /// `Clone`, no serialization, no snapshot/restore, and nothing that records
-/// that it happened. The unbounded audit `Vec` that every refused call grows
-/// (measured at 1.1 GiB after 5M calls by `stress_endurance`) is a real
-/// allocation-failure site under that lock.
+/// that it happened.
+///
+/// One of the triggers is gone: the audit journal used to be an unbounded
+/// `Vec` that every refused call grew (1.1 GiB after 5M calls, measured by
+/// `stress_endurance`), which made an allocation failure *under this lock* a
+/// realistic event rather than a hypothetical one. It is a bounded buffer now.
+/// The blast radius of every other panic is unchanged, and that is what this
+/// test pins.
 ///
 /// The panic below is injected by the test; the point being pinned is what the
 /// *product* offers afterwards, which is nothing.
@@ -1645,7 +1977,7 @@ fn one_panic_under_the_global_lock_denies_service_to_every_tenant() {
     let d = Arc::new(Mutex::new(two_tenant_deployment()));
     {
         let mut g = guard(&d);
-        let who = actor("memorithm", "alice", AuthStrength::Token);
+        let who = actor(HOME_ORG, "alice", AuthStrength::Token);
         let req = request("acme", "alice", "memory.recall", "r-1");
         assert_eq!(
             g.admit(Call {
@@ -1682,8 +2014,12 @@ fn one_panic_under_the_global_lock_denies_service_to_every_tenant() {
     // Recovery exists only by deliberately ignoring the poison, and the
     // deployment then carries on with no idea it was ever suspect.
     let g = d.lock().unwrap_or_else(|p| p.into_inner());
-    assert_eq!(g.spent("acme"), 10, "the state itself survived intact");
-    assert_eq!(g.audit().len(), 1);
+    assert_eq!(
+        g.spent("acme"),
+        Some(10),
+        "the state itself survived intact"
+    );
+    assert_eq!(g.audit().count(), 1);
     assert!(
         g.metrics().iter().all(|(k, _)| k.starts_with("gateway.")),
         "DEFECT: nothing in the journal or the metrics records the incident"
@@ -1696,12 +2032,16 @@ fn one_panic_under_the_global_lock_denies_service_to_every_tenant() {
 /// holding the one lock every other tenant's admissions need. Tenant A's
 /// volume is therefore tenant B's latency: isolation that holds for data does
 /// not hold in the time domain.
+///
+/// The scan is now *bounded* by the audit capacity (`DEFAULT_AUDIT_CAPACITY`),
+/// which caps the worst case — it does not make the work a tenant's own, and
+/// the noise below sits well inside the bound.
 #[test]
 fn audit_of_a_silent_tenant_walks_the_whole_global_trail() {
     const NOISE: usize = 20_000;
     let mut d = two_tenant_deployment();
     // globex never speaks.
-    let who = actor("memorithm", "bob", AuthStrength::Token);
+    let who = actor(HOME_ORG, "bob", AuthStrength::Token);
     for i in 0..NOISE {
         let req = request("acme", "bob", "memory.ingest", &format!("r-{i}"));
         // Refused (a reader cannot ingest) — free for acme, and still a record.
@@ -1713,12 +2053,94 @@ fn audit_of_a_silent_tenant_walks_the_whole_global_trail() {
             variant: None,
         });
     }
-    assert_eq!(d.audit().len(), NOISE, "acme's refusals cost acme nothing…");
-    assert_eq!(d.spent("acme"), 0);
+    assert_eq!(
+        d.audit().count(),
+        NOISE,
+        "acme's refusals cost acme nothing…"
+    );
+    // The noise sits inside the audit bound, so the scan below really is over
+    // the whole trail and not over a truncated window of it.
+    assert!(d.audit().count() < DEFAULT_AUDIT_CAPACITY);
+    assert_eq!(d.audit_dropped(), 0);
+    assert_eq!(d.spent("acme"), Some(0));
     assert!(
         d.audit_of("globex").is_empty(),
         "…and globex has no records of its own — yet answering that question \
          required scanning all {NOISE} of acme's, under the shared lock"
     );
     assert!(d.cells_of("globex").is_empty());
+}
+
+/// **REGRESSION GUARD** (was: *the audit journal grows without bound*). The
+/// journal was a `Vec` that every call — including every refusal from an
+/// unauthenticated caller — pushed onto and nothing ever trimmed:
+/// `stress_endurance` measured 1.15 GiB retained across five million refused
+/// calls, all of it under the one lock the whole deployment sits behind, which
+/// made an allocation failure there a denial of service for every tenant.
+///
+/// The buffer is bounded now, drops the **oldest** record and counts what it
+/// dropped. This test pins that under the contention this file exists for:
+/// 640 admissions from 32 threads into a 64-record buffer keep exactly 64
+/// rows, report exactly 576 drops, and retain the *newest* window, still
+/// densely ordered by sequence — whatever order the scheduler chose.
+#[test]
+fn the_audit_buffer_is_bounded_under_contention_and_says_what_it_dropped() {
+    let _wd = Watchdog::arm("bounded_audit_buffer", 30);
+    const CAPACITY: usize = 64;
+    const PER_THREAD: usize = 20;
+    const TOTAL: usize = THREADS * PER_THREAD;
+
+    let d = Arc::new(Mutex::new(one_tenant_with_audit_capacity(
+        TOTAL as u64,
+        CAPACITY,
+    )));
+    let start = Arc::new(Barrier::new(THREADS));
+    thread::scope(|s| {
+        for tid in 0..THREADS {
+            let d = Arc::clone(&d);
+            let start = Arc::clone(&start);
+            s.spawn(move || {
+                let who = actor(HOME_ORG, "alice", AuthStrength::Token);
+                start.wait();
+                for i in 0..PER_THREAD {
+                    let req = request("acme", "alice", "memory.recall", &format!("r-{tid}-{i}"));
+                    guard(&d).admit(Call {
+                        actor: &who,
+                        request: &req,
+                        model: BASE_MODEL,
+                        cost_tokens: 1,
+                        variant: None,
+                    });
+                }
+            });
+        }
+    });
+
+    let d = guard(&d);
+    assert_eq!(
+        d.audit().count(),
+        CAPACITY,
+        "the buffer never grows past its cap, whatever the interleaving"
+    );
+    assert_eq!(
+        d.audit_dropped(),
+        (TOTAL - CAPACITY) as u64,
+        "and it says exactly how much of the journal it lost"
+    );
+    // The retained window is the newest, and still totally ordered.
+    let sequences: Vec<u64> = d.audit().map(|r| r.sequence).collect();
+    assert_eq!(
+        sequences,
+        ((TOTAL - CAPACITY) as u64..TOTAL as u64).collect::<Vec<_>>()
+    );
+    // The *ledger* is complete even though the journal is not — which is
+    // exactly why a dropped record has to be loud: a bounded buffer is a
+    // memory bound, not an audit story.
+    assert_eq!(d.spent("acme"), Some(TOTAL as u64));
+    let visible: u64 = d.audit().map(|r| r.cost).sum();
+    assert_eq!(visible, CAPACITY as u64);
+    assert!(
+        Some(visible) != d.spent("acme") && d.audit_dropped() > 0,
+        "a truncated journal cannot reconcile the meter, and says so"
+    );
 }

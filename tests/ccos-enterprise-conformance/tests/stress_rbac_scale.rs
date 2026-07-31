@@ -2,11 +2,18 @@
 //!
 //! `ccos_enterprise_rbac::RoleBook` is layer 2 of
 //! `docs/ENTERPRISE_SECURITY_MODEL.md` ("Authorization — RBAC with
-//! fail-closed unknown-role refusal") and the only thing standing between an
-//! authenticated caller and a governed tool in
-//! `ccos_enterprise_conformance::Deployment::admit`. This file attacks it at
+//! fail-closed unknown-role refusal") and the last thing standing between an
+//! authenticated caller and a governed tool in `Deployment::admit`. That path
+//! is now shipped code — `ccos_enterprise_runtime`, re-exported unchanged by
+//! `ccos_enterprise_conformance` — so every composed assertion below guards
+//! the product rather than a copy of it. This file attacks the layer at
 //! 200k–500k scale, at every name edge a hostile admin API could reach, and
-//! along the composed path.
+//! along that composed path.
+//!
+//! "Last" is now literal: a credential-binding gate (`ActorMismatch`,
+//! `TenantNotOwnedByOrg`, `MalformedRequest`) runs *before* RBAC and keys the
+//! permission check on the verified actor. It used to be "only", and the
+//! difference is finding 1 below.
 //!
 //! Everything asserted below is the product's **current, real** behaviour.
 //! Where that behaviour is a defect the assertion pins the defect and the
@@ -28,18 +35,25 @@
 //!   assignments retain 169 177 179 B and build in ~1.3 s (debug).
 //!   See [`rolebook_memory_growth_is_linear_in_role_count`].
 //!
-//! ## What BROKE
+//! ## What was BROKEN and is now REPAIRED
 //!
-//! 1. **`Deployment::admit` authorizes the actor string the *request* carries,
-//!    never the authenticated identity** (`src/lib.rs:303`). `AuthenticatedActor`
-//!    is consulted for `strength` and then discarded; `call.actor.actor` is
-//!    never compared with `call.request.actor`, and `call.actor.org` is never
-//!    compared with the tenant. A token-strength reader impersonates a writer
-//!    by typing their name — and the audit journal records the *typed* name
-//!    (`src/lib.rs:274`), so the real caller is unrecoverable. This voids
-//!    layer 1 of the security model and `docs/AGENT_IDENTITY_MODEL.md`'s
-//!    "every journaled decision/action names its agent".
-//!    → [`authorization_trusts_the_request_supplied_actor_string`]
+//! 1. **`Deployment::admit` authorized the actor string the *request* carried,
+//!    never the authenticated identity.** `AuthenticatedActor` was consulted
+//!    for `strength` and then discarded; `call.actor.actor` was never compared
+//!    with `call.request.actor`, and `call.actor.org` was never compared with
+//!    the tenant. A token-strength reader impersonated a writer by typing
+//!    their name — and the audit journal recorded the *typed* name, so the
+//!    real caller was unrecoverable. This voided layer 1 of the security model
+//!    and `docs/AGENT_IDENTITY_MODEL.md`'s "every journaled decision/action
+//!    names its agent".
+//!
+//!    `decide` now refuses `ActorMismatch` and `TenantNotOwnedByOrg`, keys the
+//!    RBAC check on the verified name, and rejects empty or over-long
+//!    identifiers as `MalformedRequest` before any lookup. The test below is
+//!    now the **guard** on that repair rather than a record of the hole.
+//!    → [`authorization_is_keyed_on_the_authenticated_identity_not_the_request`]
+//!
+//! ## What is still BROKEN
 //!
 //! 2. **`add_role` silently REPLACES a same-named role**, rewriting the grant
 //!    of every actor already holding it — downward (silent mass revocation)
@@ -81,6 +95,7 @@
 //!    has no `TenantId` anywhere, so one namespace of role names is shared by
 //!    every tenant: `alice` carries her `acme` grant into `globex`, and one
 //!    tenant's admin redefining `writer` rewrites the other tenant's writers.
+//!    No document promises otherwise — the defect is that none says so either.
 //!    → [`role_grants_are_deployment_global_not_tenant_scoped`]
 //!
 //! 6. **No de-provisioning path exists.** There is no `unassign`, `revoke`,
@@ -89,9 +104,11 @@
 //!    which hits every holder (defect 2).
 //!    → [`a_grant_can_never_be_withdrawn_from_a_single_actor`]
 //!
-//! 7. **Empty strings are valid principals and valid roles.** `""` names a
-//!    grantable role and a grantable actor; a `GatewayRequest` with
-//!    `actor: ""` is then authorized by the composed path.
+//! 7. **Empty strings are valid principals and valid roles** — in `RoleBook`.
+//!    `""` still names a grantable role and a grantable actor. The composed
+//!    path no longer *reaches* it: `MalformedRequest` refuses an empty
+//!    `actor`, `tenant` or `request_id` before any lookup. Containment one
+//!    layer up, not a fix at the source.
 //!    → [`the_empty_string_is_a_grantable_role_and_a_grantable_principal`]
 //!
 //! Run the whole file:
@@ -659,12 +676,12 @@ fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
         Some(&Refusal::PermissionDenied),
         "a reader may not set policy"
     );
-    let audit_before = d.audit().len();
+    let audit_before = d.audit().count();
 
     // One call. No justification, no actor, no target, no record.
     d.add_role("reader", &["memory.read", "policy.admin"]);
     assert_eq!(
-        d.audit().len(),
+        d.audit().count(),
         audit_before,
         "DEFECT: a mass privilege change produced zero audit records"
     );
@@ -687,7 +704,7 @@ fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
     );
     assert_eq!(
         d.spent("acme"),
-        1,
+        Some(1),
         "and the escalated call is billed as normal"
     );
 }
@@ -696,10 +713,18 @@ fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
 // 5. Adversarial names
 // ─────────────────────────────────────────────────────────────────────────
 
-/// **FINDING (robustness).** `""` is a valid role name and a valid actor
-/// name. Nothing rejects it, and the composed path authorizes a
-/// `GatewayRequest` whose `actor` field is empty once `""` holds a role —
-/// so a request that names no principal at all can reach a governed tool.
+/// **FINDING (robustness) — still true in `RoleBook`, now contained in the
+/// composed path.** `""` is a valid role name and a valid actor name; nothing
+/// in `RoleBook` rejects either, and the second half of this test used to show
+/// the consequence: a `GatewayRequest` whose `actor` field was empty reached a
+/// governed tool and was billed, once `""` held a role.
+///
+/// `decide` now rejects an empty (or over-long) `tenant`, `actor` or
+/// `request_id` with `MalformedRequest` before any lookup, so the nameless
+/// principal can no longer be *addressed* over the wire. The underlying
+/// `RoleBook` hazard is unchanged and is still asserted here: the containment
+/// is one layer up, and a future caller that reaches `RoleBook` by another
+/// route inherits the original behaviour.
 #[test]
 fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
     let _guard = serialized();
@@ -733,9 +758,9 @@ fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
         "at least it is exact"
     );
 
-    // …and the composed path honours it: an anonymous request line reaches a
-    // governed tool. `classify` never inspects `GatewayRequest::actor`, and
-    // `admit` looks the empty string straight up in the role book.
+    // …but the composed path no longer honours it. The empty actor is refused
+    // as malformed, before the role book is consulted at all — so granting the
+    // nameless principal a role changes nothing on the wire.
     let mut d = two_tenant_deployment();
     let caller = actor("memorithm", "nobody", AuthStrength::Token);
     let anon = request("acme", "", "memory.recall", "r-anon");
@@ -748,10 +773,10 @@ fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
             variant: None,
         })
         .refusal(),
-        Some(&Refusal::PermissionDenied),
-        "unassigned, the empty actor is refused"
+        Some(&Refusal::MalformedRequest("actor".into())),
+        "the empty actor is not a principal the gateway will address"
     );
-    assert!(d.assign("", "reader"));
+    assert!(d.assign("", "reader"), "the grant itself is still accepted");
     let anon = request("acme", "", "memory.recall", "r-anon-2");
     assert_eq!(
         d.admit(Call {
@@ -760,10 +785,32 @@ fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
-        }),
-        Outcome::Forwarded,
-        "DEFECT: a request naming no principal is authorized and billed"
+        })
+        .refusal(),
+        Some(&Refusal::MalformedRequest("actor".into())),
+        "granting '' a role does not make it reachable"
     );
+    assert_eq!(d.spent("acme"), Some(0), "and nothing was billed");
+
+    // The same holds for the empty *tenant* and the empty *request id*: all
+    // three identifiers are checked, and the refusal names which one failed.
+    for (field, req) in [
+        ("tenant", request("", "nobody", "memory.recall", "r-1")),
+        ("request_id", request("acme", "nobody", "memory.recall", "")),
+    ] {
+        assert_eq!(
+            d.admit(Call {
+                actor: &caller,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 1,
+                variant: None,
+            })
+            .refusal(),
+            Some(&Refusal::MalformedRequest(field.into())),
+            "the empty {field} must be refused, and named"
+        );
+    }
 }
 
 /// Role names are raw byte-for-byte keys: no trimming, no case folding, no
@@ -1124,39 +1171,41 @@ fn assigning_an_unknown_role_grants_nothing_now_or_later() {
         Some(&Refusal::PermissionDenied),
         "creating the role later must not admit the earlier attempt"
     );
-    assert_eq!(d.spent("acme"), 0, "and the refusal is free");
+    assert_eq!(d.spent("acme"), Some(0), "and the refusal is free");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // 8. Composed path: whose permissions are actually being checked?
 // ─────────────────────────────────────────────────────────────────────────
 
-/// **FINDING (critical, spec-violation).** `Deployment::admit` checks the
-/// permissions of `call.request.actor` — a caller-supplied string on the wire
-/// — and never compares it with `call.actor.actor`, the authenticated
-/// identity (`tests/ccos-enterprise-conformance/src/lib.rs:303`).
-/// `AuthenticatedActor` is consulted **only** for `strength`; its `actor` and
-/// `org` fields are never read by any gate.
+/// **FINDING (critical, spec-violation) — REPAIRED. This test is the guard.**
 ///
-/// Consequences, all demonstrated below:
+/// `Deployment::admit` used to check the permissions of `call.request.actor` —
+/// a caller-supplied string on the wire — and never compare it with
+/// `call.actor.actor`, the authenticated identity. `AuthenticatedActor` was
+/// consulted **only** for `strength`; its `actor` and `org` fields were read by
+/// no gate at all. A token-strength reader became a writer by typing the
+/// writer's name, an actor from any org acted inside any tenant, and the audit
+/// record stored the *claimed* actor, so the journal blamed the victim and the
+/// real caller was unrecoverable — contradicting `docs/AGENT_IDENTITY_MODEL.md`
+/// ("every journaled decision/action names its agent") and layer 1 of
+/// `docs/ENTERPRISE_SECURITY_MODEL.md`.
 ///
-/// * a reader impersonates a writer by putting their name in the request;
-/// * an actor authenticated in a foreign org acts inside any tenant;
-/// * the audit record stores the *claimed* actor (`src/lib.rs:274`), so the
-///   journal attributes the act to the victim and the real caller is
-///   unrecoverable — directly contradicting `docs/AGENT_IDENTITY_MODEL.md`
-///   ("every journaled decision/action names its agent") and layer 1 of
-///   `docs/ENTERPRISE_SECURITY_MODEL.md`.
+/// `decide` now (a) refuses `request.actor != actor.actor` with
+/// `ActorMismatch`, (b) refuses a tenant whose owning org is not the
+/// credential's with `TenantNotOwnedByOrg`, and (c) keys the RBAC check on
+/// `call.actor.actor` — the verified name — so even if (a) were ever relaxed
+/// the permission check could not be steered by the wire.
 ///
-/// The module docs of the composed crate state the rule for tenants — "the
-/// request's tenant — not the actor's word — selects the state" — and then
-/// take the actor entirely on the request's word.
+/// Each paragraph below is one of those, asserted as a refusal. If any of them
+/// starts returning `Forwarded` again, the impersonation is back.
 #[test]
-fn authorization_trusts_the_request_supplied_actor_string() {
+fn authorization_is_keyed_on_the_authenticated_identity_not_the_request() {
     let _guard = serialized();
     let mut d = two_tenant_deployment();
 
-    // bob is a reader. As himself, writing is refused.
+    // bob is a reader. As himself, writing is refused — on permission, which
+    // is the refusal that proves the call got as far as the RBAC gate.
     let bob = actor("memorithm", "bob", AuthStrength::Token);
     let honest = request("acme", "bob", "memory.ingest", "r-honest");
     assert_eq!(
@@ -1180,31 +1229,30 @@ fn authorization_trusts_the_request_supplied_actor_string() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
-        }),
-        Outcome::Forwarded,
-        "DEFECT: authorization used the request's actor string, not the \
-         authenticated identity — bob wrote as alice"
+        })
+        .refusal(),
+        Some(&Refusal::ActorMismatch),
+        "the request's actor string must not be believed over the credential"
     );
 
-    // And the journal blames alice.
+    // The journal blames nobody but bob, and the forged call is in it.
     let record = d
         .audit()
-        .iter()
         .find(|r| r.request_id == "r-forged")
         .expect("the forged call was journaled");
     assert_eq!(
         record.actor, "alice",
-        "DEFECT: the audit trail names the impersonated actor; the \
-         authenticated caller appears nowhere in it"
+        "the record preserves what was *claimed*, which is the evidence of the attempt"
     );
     assert!(
-        d.audit()
-            .iter()
-            .all(|r| r.actor != "bob" || r.request_id == "r-honest"),
-        "nothing anywhere ties the forged call back to bob"
+        !record.outcome.is_forwarded(),
+        "…but it is recorded as refused, so the claim is never mistaken for an act"
     );
+    assert_eq!(d.spent("acme"), Some(0), "and no impersonation is billed");
 
-    // Identity is not even required to be non-empty or to belong to the org.
+    // An actor with no org and no name cannot administer policy as root: the
+    // empty request actor is malformed, and even a well-formed one would not
+    // match the credential.
     let nobody = actor("", "", AuthStrength::Token);
     let as_root = request("acme", "root", "policy.set", "r-nobody");
     assert_eq!(
@@ -1214,27 +1262,45 @@ fn authorization_trusts_the_request_supplied_actor_string() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
-        }),
-        Outcome::Forwarded,
-        "DEFECT: an actor with no org and no name administered policy as root"
+        })
+        .refusal(),
+        Some(&Refusal::ActorMismatch),
+        "an anonymous credential cannot present itself as root"
     );
-
-    let foreign = actor("evil-corp", "mallory", AuthStrength::Token);
-    let as_alice = request("acme", "alice", "memory.ingest", "r-foreign");
+    // …and the same actor cannot reach `policy.set` under its own empty name
+    // either: the identifier itself is refused before any lookup.
+    let as_self = request("acme", "", "policy.set", "r-nobody-2");
     assert_eq!(
         d.admit(Call {
-            actor: &foreign,
-            request: &as_alice,
+            actor: &nobody,
+            request: &as_self,
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
-        }),
-        Outcome::Forwarded,
-        "DEFECT: org membership is never checked against the tenant"
+        })
+        .refusal(),
+        Some(&Refusal::MalformedRequest("actor".into())),
+        "an empty actor is not a principal"
     );
 
-    // Strength is the one thing the authenticated identity is used for, and
-    // it does hold: an anonymous caller is refused before anything else.
+    // Org membership is checked against the tenant's owner.
+    let foreign = actor("evil-corp", "mallory", AuthStrength::Token);
+    let as_mallory = request("acme", "mallory", "memory.ingest", "r-foreign");
+    assert_eq!(
+        d.admit(Call {
+            actor: &foreign,
+            request: &as_mallory,
+            model: "claude-opus",
+            cost_tokens: 10,
+            variant: None,
+        })
+        .refusal(),
+        Some(&Refusal::TenantNotOwnedByOrg),
+        "a foreign org must not reach a tenant it does not own"
+    );
+
+    // Strength still gates first: an anonymous caller is refused before the
+    // binding is even consulted, so a repair here cannot have weakened gate 1.
     let anon = actor("memorithm", "alice", AuthStrength::Anonymous);
     let req = request("acme", "alice", "memory.ingest", "r-anon");
     assert_eq!(
@@ -1247,20 +1313,40 @@ fn authorization_trusts_the_request_supplied_actor_string() {
         })
         .refusal(),
         Some(&Refusal::Unauthenticated),
-        "the only thing AuthenticatedActor is actually consulted for"
+        "identity strength is still the first thing checked"
+    );
+
+    // The whole episode cost the tenant nothing and left six records: every
+    // attempt above is journaled, and not one of them was admitted.
+    assert_eq!(d.spent("acme"), Some(0));
+    assert_eq!(d.audit_of("acme").len(), 6);
+    assert!(
+        d.audit_of("acme").iter().all(|r| !r.outcome.is_forwarded()),
+        "not one of these calls was admitted"
     );
 }
 
-/// **FINDING (spec-violation).** `RoleBook`'s API carries no `TenantId`, and
-/// `Deployment` holds exactly one book for the whole install. Role names are
-/// therefore a single global namespace: a grant made for one tenant applies
-/// in every tenant, and one tenant's administrator redefining a common role
-/// name (`reader`, `writer`, `admin`) silently rewrites the other tenant's
-/// grants — the cross-tenant blast radius of defect 2.
+/// **FINDING (undocumented design, not a spec violation).** `RoleBook`'s API
+/// carries no `TenantId`, and `Deployment` holds exactly one book for the whole
+/// install. Role names are therefore a single global namespace: a grant made
+/// for one tenant applies in every tenant, and one tenant's administrator
+/// redefining a common role name (`reader`, `writer`, `admin`) silently
+/// rewrites the other tenant's grants.
 ///
-/// `docs/TENANCY_MODEL.md` calls `TenantId` "the outermost data boundary" and
-/// `docs/ENTERPRISE_SECURITY_MODEL.md` lists authorization as a layer of the
-/// tenant-isolated stack; authorization state is the one thing not scoped.
+/// Be precise about the claim. `docs/TENANCY_MODEL.md:3` enumerates what is
+/// tenant-scoped — "memory roots, quotas, policies, backups and audit trails"
+/// — and **roles are not in that list**; `docs/ENTERPRISE_SECURITY_MODEL.md:6`
+/// names Authorization as a layer of the stack without saying it is scoped.
+/// So no document promises tenant-scoped RBAC and none is contradicted. What
+/// is wrong is that the docs are silent on the one piece of state whose
+/// sharing is cross-tenant by construction: an operator reading them cannot
+/// learn that `add_role("writer", …)` reaches every tenant they have. This
+/// test pins the behaviour so the decision is explicit — whichever way it is
+/// eventually resolved, it stops being accidental.
+///
+/// Note the binding repair does **not** narrow this: it constrains which
+/// *org* may address a tenant, and every tenant below is owned by the same
+/// org, which is precisely the case a real deployment is in.
 #[test]
 fn role_grants_are_deployment_global_not_tenant_scoped() {
     let _guard = serialized();
@@ -1286,7 +1372,12 @@ fn role_grants_are_deployment_global_not_tenant_scoped() {
     );
 
     // A brand-new tenant inherits the whole global role book on creation.
-    d.add_tenant("initech", TenantState::new(100));
+    // Provisioned under the same org, so the binding gate is satisfied and the
+    // only thing on trial below is the scope of the grant.
+    assert!(
+        d.add_tenant("memorithm", "initech", TenantState::new(100)),
+        "initech is new, so provisioning it must succeed"
+    );
     d.tenant_mut("initech")
         .expect("initech exists")
         .allow_model("claude-opus");
@@ -1344,8 +1435,16 @@ fn admission_stays_exact_with_fifty_thousand_roles_and_tools() {
     println!("[scale] deployment with {N} roles + {N} governed tools: {retained} B");
 
     let hoarder = actor("memorithm", "hoarder", AuthStrength::Token);
+    // Distinct `request_id`s, deliberately: it is the idempotency key, and a
+    // shared one would let replay suppression answer three of these four
+    // without charging them — the test would still pass while measuring less.
     for i in [0usize, 1, N / 2, N - 1] {
-        let req = request("acme", "hoarder", &format!("memory.tool{i:05}"), "r-ok");
+        let req = request(
+            "acme",
+            "hoarder",
+            &format!("memory.tool{i:05}"),
+            &format!("r-ok-{i}"),
+        );
         assert_eq!(
             d.admit(Call {
                 actor: &hoarder,
@@ -1358,6 +1457,10 @@ fn admission_stays_exact_with_fifty_thousand_roles_and_tools() {
             "granted tool {i} refused at scale"
         );
     }
+    assert!(
+        !d.metrics().iter().any(|(k, _)| k == "gateway.replayed"),
+        "each of those four was a first decision, not a replay"
+    );
 
     let denied = request("acme", "hoarder", "memory.forbidden", "r-no");
     assert_eq!(
@@ -1388,7 +1491,7 @@ fn admission_stays_exact_with_fifty_thousand_roles_and_tools() {
     );
     assert_eq!(
         d.spent("acme"),
-        4,
+        Some(4),
         "only the four granted calls were billed"
     );
 }

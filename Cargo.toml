@@ -11,6 +11,7 @@ members = [
     "crates/ccos-enterprise-governance",
     "crates/ccos-enterprise-qpages",
     "crates/ccos-enterprise-admin",
+    "crates/ccos-enterprise-runtime",
     "tools/ccos-license-server",
     "tests/ccos-enterprise-conformance",
 ]

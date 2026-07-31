@@ -28,7 +28,14 @@ pub const VENDOR_PUBLIC_KEY: [u8; 32] = [0u8; 32];
 /// Base64url (no padding) helpers — local copy, because `ccos-core`'s are
 /// crate-private. Alphabet and semantics identical to the license token
 /// format so wire formats stay compatible.
-#[cfg(feature = "license-verify")]
+///
+/// Not behind `license-verify`. The module is hand-rolled and depends on
+/// nothing, so gating it only meant that any other consumer of canonical
+/// base64url — identity tokens, for one — had to enable license verification
+/// and drag in ed25519 and `ccos-core/license` to decode four characters into
+/// three bytes. The alternative was a second implementation to keep in step
+/// with this one, and two decoders that must agree on what "canonical" means
+/// is exactly how a token acquires a second spelling.
 pub mod b64url {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 

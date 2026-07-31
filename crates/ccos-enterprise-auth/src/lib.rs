@@ -36,26 +36,67 @@
 //! holding any signed token. The escalation is refused by construction rather
 //! than by a check that could be forgotten.
 //!
+//! ## The mechanisms, and what each one actually proves
+//!
+//! Each is a feature, off by default, because a deployment that terminates
+//! mTLS at a proxy and one that federates to an identity provider are different
+//! installs and neither should carry the other's code. No default
+//! authenticator is installed anywhere: a deployment that configures none can
+//! authenticate nobody, which is the correct failure.
+//!
+//! * **`token-auth`** — [`TokenAuthenticator`], this product's own ed25519
+//!   identity tokens. Attests what the operator configured it to attest.
+//! * **`mtls-auth`** — [`mtls::MtlsAuthenticator`], identity from a peer
+//!   certificate the transport verified. The only mechanism here that attests
+//!   [`AuthStrength::Strong`], because it is the only one where the client had
+//!   to hold a private key. It does **not** verify certificates itself; read
+//!   [`mtls`] for exactly where that boundary sits.
+//! * **`oidc-auth`** — [`oidc::OidcAuthenticator`], JWTs from an identity
+//!   provider, against configured keys and never a fetched JWKS. **EdDSA only**,
+//!   not RS256, for a supply-chain reason [`oidc`] states in full.
+//!
+//! ## Revocation and replay
+//!
+//! [`Revocations`] answers what a signature cannot: whether the issuer has
+//! since changed its mind. Two granularities — one leaked token by its `jti`,
+//! or every token an actor holds through an instant. The second is the one key
+//! rotation could never serve, because rotating an issuer key revokes every
+//! actor's credentials to reach one.
+//!
+//! [`ReplayGuard`] refuses a second presentation, and is **opt-in**
+//! ([`TokenAuthenticator::single_use`]) for a reason worth reading before
+//! turning it on: an agent presenting the same token on each call is the normal
+//! shape of a bearer credential, not an attack. It is for tokens minted per
+//! operation, and it does not make a stolen token useless — it makes it useful
+//! once.
+//!
 //! ## What is still absent, and named so it is not mistaken for present
 //!
-//! * **mTLS and OIDC.** [`Authenticator`] is the seam they land on: an mTLS
-//!   terminator would attest [`AuthStrength::Strong`] from a verified peer
-//!   certificate, an OIDC verifier would attest [`AuthStrength::Token`] from a
-//!   JWKS-validated JWT. Neither exists yet, and no default authenticator is
-//!   installed anywhere — a deployment that configures none can authenticate
-//!   nobody, which is the correct failure.
-//! * **Revocation.** A token is valid until it expires; there is no
-//!   deny-list check. `ccos_enterprise_governance::vendor` has the shape of
-//!   one for licenses, and identity tokens should reuse it. Until then the
-//!   only revocation is key rotation ([`TokenAuthenticator::remove_issuer`])
-//!   and short lifetimes, which is why [`MAX_TOKEN_LIFETIME_SECS`] is a
-//!   ceiling the verifier enforces rather than advice.
-//! * **Replay.** Nothing binds a token to one use. The runtime suppresses
-//!   replayed *requests* by `request_id`, which is a different property.
+//! * **RS256 for OIDC**, which most providers sign with. [`oidc`] explains why
+//!   the gap is deliberate and refuses such tokens rather than accepting them
+//!   unverified.
+//! * **Revocation is per-process.** [`Revocations`] lives in the verifier that
+//!   holds it, so a deployment running several processes revokes in each of
+//!   them or not at all. Distributing it needs the store, and that is a
+//!   different change from this one.
+//! * **Certificate chain verification**, deliberately: see [`mtls`].
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+pub mod revocation;
+pub use revocation::{ReplayGuard, Revocations};
+
+#[cfg(feature = "mtls-auth")]
+pub mod mtls;
+#[cfg(feature = "mtls-auth")]
+pub use mtls::{MtlsAuthenticator, TransportAuthenticator, VerifiedPeer};
+
+#[cfg(feature = "oidc-auth")]
+pub mod oidc;
+#[cfg(feature = "oidc-auth")]
+pub use oidc::OidcAuthenticator;
 
 /// A verified actor identity (user, agent, or service) inside an
 /// organization. Opaque string, never an email, never a token.
@@ -150,6 +191,21 @@ impl AuthenticatedActor {
         self.strength == AuthStrength::Strong
     }
 
+    /// The one constructor the mechanisms share.
+    ///
+    /// `pub(crate)`, so a verifier module can build an identity and nothing
+    /// outside this crate can. Each caller is a mechanism that has just
+    /// finished proving something, and is naming what it proved — which is why
+    /// `strength` is a parameter here and never a field of anything a client
+    /// sends.
+    pub(crate) fn proved(org: OrgId, actor: ActorId, strength: AuthStrength) -> Self {
+        Self {
+            org,
+            actor,
+            strength,
+        }
+    }
+
     /// Assert an identity **without proving it**. Test scaffolding only.
     ///
     /// Behind a non-default feature because a public constructor is exactly
@@ -193,6 +249,20 @@ pub enum AuthError {
     LifetimeTooLong,
     /// The org or actor identifier is empty, oversized, or not canonical.
     MalformedIdentity(String),
+    /// The credential is on the deployment's deny-list, individually or
+    /// because its actor was revoked.
+    Revoked,
+    /// A single-use credential was presented a second time.
+    Replayed,
+    /// The replay guard is full, so this build cannot promise the credential
+    /// has not been used. Refused rather than admitted: a guard that gives up
+    /// under load stops working exactly when it matters.
+    ReplayCapacity,
+    /// The peer certificate the transport verified has expired.
+    PeerExpired,
+    /// The peer certificate was issued by an authority this deployment does
+    /// not trust.
+    UntrustedIssuer,
 }
 
 impl AuthError {
@@ -227,6 +297,15 @@ impl std::fmt::Display for AuthError {
                 "identity token grants itself more than {MAX_TOKEN_LIFETIME_SECS}s"
             ),
             Self::MalformedIdentity(why) => write!(f, "malformed identity: {why}"),
+            Self::Revoked => write!(f, "credential is revoked"),
+            Self::Replayed => write!(f, "single-use credential presented twice"),
+            Self::ReplayCapacity => {
+                write!(f, "replay guard is full; cannot prove this is a first use")
+            }
+            Self::PeerExpired => write!(f, "peer certificate has expired"),
+            Self::UntrustedIssuer => {
+                write!(f, "peer certificate issuer is not a trust anchor here")
+            }
         }
     }
 }
@@ -257,6 +336,15 @@ pub trait Authenticator {
 #[serde(deny_unknown_fields)]
 pub struct IdentityClaims {
     pub version: u32,
+    /// This token's identifier, unique per issuance. Required, and canonical
+    /// like every other identifier here.
+    ///
+    /// Required rather than optional because it is what makes a token
+    /// *nameable*: revoking one leaked credential, or refusing a second
+    /// presentation of a single-use one, both need something to key on. An
+    /// optional `jti` would mean an issuer could mint tokens nobody can revoke
+    /// individually, which is the property the deny-list exists to provide.
+    pub jti: String,
     /// The organization the bearer acts for.
     pub org: String,
     /// The actor the bearer acts as.
@@ -306,6 +394,8 @@ pub struct TokenAuthenticator {
     audience: String,
     attests: AuthStrength,
     leeway_secs: u64,
+    revocations: Revocations,
+    single_use: Option<ReplayGuard>,
 }
 
 #[cfg(feature = "token-auth")]
@@ -326,7 +416,32 @@ impl TokenAuthenticator {
             audience: audience.to_string(),
             attests,
             leeway_secs: 60,
+            revocations: Revocations::new(),
+            single_use: None,
         }
+    }
+
+    /// Refuse a second presentation of any token this verifier admits.
+    ///
+    /// Off by default, and that is not timidity: an agent presenting the same
+    /// token on each of its calls is the normal shape of a bearer credential,
+    /// so single-use would break ordinary traffic while buying nothing against
+    /// a thief who races the owner to the first call. Turn it on for tokens
+    /// minted per operation — an administrative action, an enrolment — where a
+    /// second presentation is always a thief or a bug.
+    pub fn single_use(mut self) -> Self {
+        self.single_use = Some(ReplayGuard::new());
+        self
+    }
+
+    /// The deny-list this verifier consults, to revoke a token or an actor.
+    pub fn revocations_mut(&mut self) -> &mut Revocations {
+        &mut self.revocations
+    }
+
+    /// The deny-list this verifier consults.
+    pub fn revocations(&self) -> &Revocations {
+        &self.revocations
     }
 
     /// Tolerance for clock skew between issuer and verifier, in seconds.
@@ -460,9 +575,36 @@ impl Authenticator for TokenAuthenticator {
             }
         }
 
+        if !is_canonical_identity(&claims.jti) {
+            return Err(AuthError::MalformedIdentity(format!(
+                "jti {:?}",
+                claims.jti
+            )));
+        }
+
+        let org = OrgId(claims.org);
+        let actor = ActorId(claims.actor);
+
+        // Revocation before replay. A revoked credential is refused whether or
+        // not it has been seen, and recording it in the replay guard first
+        // would spend a bounded resource on a credential already answered.
+        if self
+            .revocations
+            .is_revoked(Some(&claims.jti), &org, &actor, claims.issued_at)
+        {
+            return Err(AuthError::Revoked);
+        }
+
+        // Last, because it is the only check with a side effect: a token that
+        // fails anything above must not consume a replay slot, or presenting
+        // garbage would be a way to fill the guard.
+        if let Some(guard) = &self.single_use {
+            guard.witness(&claims.jti, claims.expires_at, now)?;
+        }
+
         Ok(AuthenticatedActor {
-            org: OrgId(claims.org),
-            actor: ActorId(claims.actor),
+            org,
+            actor,
             // The verifier's, never the payload's.
             strength: self.attests,
         })
@@ -486,9 +628,12 @@ pub fn issue_identity_token(
     if !is_canonical_identity(kid) {
         return Err(AuthError::MalformedIdentity(format!("key id {kid:?}")));
     }
-    if !is_canonical_identity(&claims.org) || !is_canonical_identity(&claims.actor) {
+    if !is_canonical_identity(&claims.org)
+        || !is_canonical_identity(&claims.actor)
+        || !is_canonical_identity(&claims.jti)
+    {
         return Err(AuthError::MalformedIdentity(
-            "org and actor must be canonical".into(),
+            "org, actor and jti must be canonical".into(),
         ));
     }
     if claims.expires_at <= claims.issued_at {
@@ -590,6 +735,7 @@ mod verifier_tests {
     fn claims(org: &str, actor: &str, aud: &str) -> IdentityClaims {
         IdentityClaims {
             version: IDENTITY_TOKEN_VERSION,
+            jti: "t-1".into(),
             org: org.into(),
             actor: actor.into(),
             audience: aud.into(),
@@ -867,5 +1013,102 @@ mod verifier_tests {
             TokenAuthenticator::new(AUD, AuthStrength::Token).authenticate(&good_token(), NOW),
             Err(AuthError::UnknownIssuer)
         );
+    }
+
+    #[test]
+    fn revoking_one_token_leaves_the_actors_others_alone() {
+        let mut v = verifier("issuer-a", &seed(1), AuthStrength::Token);
+        let leaked = good_token(); // jti "t-1"
+        let mut other = claims("acme", "agent-7", AUD);
+        other.jti = "t-2".into();
+        let kept = issue_identity_token(&seed(1), "issuer-a", &other).unwrap();
+
+        assert!(v.authenticate(&leaked, NOW).is_ok());
+        assert!(v.revocations_mut().revoke_token("t-1", NOW + 600, NOW));
+        assert_eq!(v.authenticate(&leaked, NOW), Err(AuthError::Revoked));
+        assert!(
+            v.authenticate(&kept, NOW).is_ok(),
+            "revoking one credential must not revoke the actor"
+        );
+    }
+
+    #[test]
+    fn revoking_an_actor_reaches_tokens_the_operator_has_never_seen() {
+        // The incident key rotation could not serve: somebody leaves, and
+        // nobody knows which tokens they hold. Rotating the issuer key would
+        // have revoked every other actor's credentials with them.
+        let mut v = verifier("issuer-a", &seed(1), AuthStrength::Token);
+        let mut theirs = claims("acme", "agent-7", AUD);
+        theirs.jti = "unknown-to-the-operator".into();
+        let token = issue_identity_token(&seed(1), "issuer-a", &theirs).unwrap();
+        let mut colleague = claims("acme", "agent-9", AUD);
+        colleague.jti = "t-9".into();
+        let unaffected = issue_identity_token(&seed(1), "issuer-a", &colleague).unwrap();
+
+        assert!(v.authenticate(&token, NOW).is_ok());
+        v.revocations_mut()
+            .revoke_actor(&OrgId("acme".into()), &ActorId("agent-7".into()), NOW);
+        assert_eq!(v.authenticate(&token, NOW), Err(AuthError::Revoked));
+        assert!(v.authenticate(&unaffected, NOW).is_ok());
+
+        assert!(v.revocations().revoked_actor_count() == 1);
+    }
+
+    #[test]
+    fn single_use_is_opt_in_and_a_reusable_token_stays_reusable() {
+        // Off by default on purpose: an agent presenting the same token on each
+        // of its calls is the normal shape of a bearer credential, not an
+        // attack.
+        let reusable = verifier("issuer-a", &seed(1), AuthStrength::Token);
+        let token = good_token();
+        assert!(reusable.authenticate(&token, NOW).is_ok());
+        assert!(reusable.authenticate(&token, NOW).is_ok());
+
+        let once = verifier("issuer-a", &seed(1), AuthStrength::Token).single_use();
+        assert!(once.authenticate(&token, NOW).is_ok());
+        assert_eq!(once.authenticate(&token, NOW), Err(AuthError::Replayed));
+    }
+
+    #[test]
+    fn a_refused_token_does_not_consume_a_replay_slot() {
+        // Otherwise presenting garbage would be a way to fill the guard, and a
+        // full guard refuses credentials that should have been admitted.
+        let once = verifier("issuer-a", &seed(1), AuthStrength::Token).single_use();
+        let mut wrong = claims("acme", "agent-7", "staging");
+        wrong.jti = "t-1".into();
+        let bad = issue_identity_token(&seed(1), "issuer-a", &wrong).unwrap();
+        assert_eq!(once.authenticate(&bad, NOW), Err(AuthError::WrongAudience));
+        // Same jti, this time on a token that verifies: the failed attempt left
+        // nothing behind.
+        assert!(once.authenticate(&good_token(), NOW).is_ok());
+    }
+
+    #[test]
+    fn revocation_is_answered_before_replay_is_recorded() {
+        // A revoked credential is refused whether or not it has been seen, and
+        // must not spend a bounded resource on the way to that answer.
+        let mut once = verifier("issuer-a", &seed(1), AuthStrength::Token).single_use();
+        once.revocations_mut().revoke_token("t-1", NOW + 600, NOW);
+        let token = good_token();
+        assert_eq!(once.authenticate(&token, NOW), Err(AuthError::Revoked));
+        assert_eq!(once.authenticate(&token, NOW), Err(AuthError::Revoked));
+    }
+
+    #[test]
+    fn a_token_must_name_itself_canonically() {
+        // `jti` is what makes a token revocable individually, so it is held to
+        // the same rule as every other identifier: a homoglyph one would be a
+        // token the deny-list cannot name.
+        for bad in ["", "T-1", "t.1", "-t1", "\u{0430}-1"] {
+            let mut c = claims("acme", "agent-7", AUD);
+            c.jti = bad.into();
+            assert!(
+                matches!(
+                    issue_identity_token(&seed(1), "issuer-a", &c),
+                    Err(AuthError::MalformedIdentity(_))
+                ),
+                "issued a token with jti {bad:?}"
+            );
+        }
     }
 }

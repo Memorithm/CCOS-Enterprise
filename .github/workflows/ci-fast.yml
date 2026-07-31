@@ -63,6 +63,13 @@ jobs:
       # build compiles and no run exercises, passing CI by being absent.
       - name: identity verifier (non-default features)
         run: |
-          cargo test -p ccos-enterprise-auth --features token-auth,test-identities
-          cargo clippy -p ccos-enterprise-auth --features token-auth,test-identities \
+          FEATS=token-auth,mtls-auth,oidc-auth,test-identities
+          cargo test -p ccos-enterprise-auth --features "$FEATS"
+          cargo clippy -p ccos-enterprise-auth --features "$FEATS" \
             --all-targets -- -D warnings
+          # Each mechanism alone, too. They are separate features because they
+          # are separate installs, and a combination that only ever builds
+          # together is a combination nobody has checked builds apart.
+          for f in token-auth mtls-auth oidc-auth; do
+            cargo check -p ccos-enterprise-auth --features "$f" --all-targets
+          done

@@ -17,6 +17,18 @@ default = []
 # it.
 token-auth = ["dep:ed25519-dalek", "dep:ccos-enterprise-governance"]
 
+# Identity from a verified peer certificate. Separate from `token-auth` because
+# a deployment that terminates mTLS at a proxy and a deployment that issues
+# bearer tokens are different installs, and neither should carry the other's
+# code.
+mtls-auth = []
+
+# OIDC/JWT verification against pre-configured JWKS keys. No network fetch: an
+# enterprise deployment that reaches out to an identity provider on every
+# verification has made that provider a dependency of every request, and an
+# air-gapped one cannot do it at all.
+oidc-auth = ["dep:ed25519-dalek", "dep:ccos-enterprise-governance"]
+
 # `AuthenticatedActor::asserted` — an identity nobody proved. Test scaffolding
 # only, and a feature flag rather than a naming convention: the whole point of
 # the private fields is that no caller can mint an identity, and a `pub fn`

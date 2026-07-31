@@ -28,17 +28,23 @@
 //! * **The claim state machine is exactly its spec, 100 000 operations
 //!   deep.** 10 000 codes x 100 machines, mixing unclaimed/claimed/revoked
 //!   with mid-stream revocation, agreed with an independent shadow model on
-//!   every single operation: one seat per code forever, revoked beats
-//!   everything including the owner, and `exp_unix` was fixed at the first
-//!   claim and never moved once — not by a re-claim 20 days later, not by
-//!   9 999 of them. See [`claim_state_machine_survives_100k_abusive_operations`].
+//!   every single operation: 8 548 seats sold, each to exactly one machine
+//!   forever; 31 180 `SeatTaken`; 28 552 `Revoked` (which beats everything,
+//!   including the seat's own owner); and across **31 720 same-machine
+//!   re-issues at strictly increasing timestamps `exp_unix` never moved by
+//!   one second**. See [`claim_state_machine_survives_100k_abusive_operations`].
 //! * **Absurd day counts saturate.** `u64::MAX` days lands on `u64::MAX`, not
-//!   in the past.
-//! * **The write is genuinely atomic and 0600.** Mode never widens, and the
-//!   100 000-entry file round-trips losslessly through NUL bytes, RTL
-//!   overrides, 4 KiB names and `u64::MAX` — and re-serializes byte-identical.
+//!   in the past — in release as well as debug.
+//! * **The write is genuinely atomic and 0600.** Mode never widens, and a
+//!   100 000-entry / 80 426 140 B file round-trips losslessly through NUL
+//!   bytes, RTL overrides, astral codepoints, 4 KiB names, absent optionals
+//!   and `u64::MAX` — then re-serializes byte-identical. Durability cost at
+//!   that scale: build 2.6 s / save+fsync 2.7 s / load+parse 0.97 s in debug;
+//!   0.22 s / 0.73 s / 0.20 s in release.
 //! * **Unknown status variants and mis-cased schema tags are refused**, not
-//!   guessed.
+//!   guessed. So are 22 other hostile files, whole.
+//! * **No stack overflow anywhere**, including a 10 000-bracket recursion
+//!   bomb, and no panic on any input this file could construct.
 //!
 //! ## What BROKE
 //!
@@ -47,9 +53,12 @@
 //!    single claim, and `Counter::handle_claim` (`lib.rs:284`) calls it
 //!    inside the request. Marginal cost is a hard **234 B/entry**, so seat
 //!    number N costs 234*N bytes of pretty-printing plus a full `fsync`: at
-//!    100 000 entries one sale writes **23.4 MB** and takes 0.6-0.9 s (debug).
-//!    Selling 100 000 seats therefore moves **~1.17 TB** through `fsync` to
-//!    record 23.4 MB of truth — 50 000x write amplification. Each save also
+//!    100 000 entries one sale writes **23.4 MB** and takes 0.6-0.9 s (debug)
+//!    or 0.14 s (release). Measured end to end through the handler: **200
+//!    sales against a 100 000-entry ledger move 4 693 589 800 B — 4.7 GB —
+//!    through `fsync` to record 200 state flips.** Selling all 100 000 seats
+//!    moves **~1.17 TB** to record 23.4 MB of truth: 50 000x write
+//!    amplification, and it is quadratic, so it gets worse. Each save also
 //!    allocates 3.1-3.8x the file: `to_string_pretty` builds it whole, then
 //!    `format!` copies it whole again just to append one newline. There is no
 //!    cap on entries — the sibling `CounterRegistry` caps itself at
@@ -64,9 +73,12 @@
 //!    for a code that is not in the vault — the cheapest thing an attacker can
 //!    send, and the only thing a brute-forcer ever sends — allocates a full
 //!    copy of every key, licensee, label and fingerprint and then throws it
-//!    away. Measured: **39.3 MB allocated and 56.5 ms of CPU per 404** at
-//!    100 000 entries versus 394 KB at 1 000 — a 99x amplification of ledger
-//!    size into the cost of a request that reads nothing and writes nothing.
+//!    away. Measured: **39 327 750 B allocated per 404** at 100 000 entries
+//!    versus 394 350 B at 1 000 — a 99x amplification of ledger size into the
+//!    cost of a request that reads nothing and writes nothing — costing
+//!    56.5 ms of CPU in debug and **36.2 ms in release**. The allocation
+//!    figures are byte-identical in both profiles, which is why this file
+//!    asserts on them rather than on time.
 //!    The global 0.5 req/s `TokenBucket` at `ccos-license-server.rs:104` is
 //!    the only thing in front of it, and it was sized for "one request per
 //!    sale", not for "each refusal costs a copy of the business".
@@ -758,20 +770,26 @@ fn claim_state_machine_survives_100k_abusive_operations() {
     // wins the seat, and the customer is then locked out with a refusal the
     // counter cannot distinguish from a legitimate second machine. Pinned
     // here so nobody mistakes single-seat for authentication.
-    let victim = 1u32; // 1 % 7 != 0, so it was seeded Unclaimed...
-    let victim_key = key(victim);
+    // A fresh vault, so this says nothing about the 100k run above.
+    let victim = 4_242u32;
     let mut fresh = Vault::new();
     fresh
         .entries
-        .insert(victim_key.clone(), unclaimed("Victim Ltd", Some(365)));
+        .insert(key(victim), unclaimed("Victim Ltd", Some(365)));
+    let thief = fp(999);
     assert!(
-        fresh.claim(&wire(victim), &fp(999), NOW).is_ok(),
-        "thief wins"
+        fresh.claim(&wire(victim), &thief, NOW).is_ok(),
+        "whoever presents the wire hash first wins the seat"
     );
     assert_eq!(
         fresh.claim(&wire(victim), &fp(1), NOW + 60),
         Err(Refusal::SeatTaken),
         "the paying customer is refused, and the counter cannot tell who is who"
+    );
+    assert_eq!(
+        fresh.entries[&key(victim)].machine.as_deref(),
+        Some(thief.as_str()),
+        "the seat is bound to the interceptor, permanently"
     );
 }
 
@@ -798,35 +816,53 @@ fn a_leaked_vault_is_not_a_keyring_10k_keys_redeem_nothing() {
     }
     let stolen = serde_json::to_string(&vault).expect("the thief has the whole file");
 
-    // Everything a leaked vault contains, presented at the entry point.
+    // Everything a leaked vault contains, presented at the entry point — code
+    // by code, so each assertion is about the entry it names. (Iterating the
+    // BTreeMap instead would pair hash-sorted positions with unrelated code
+    // indices and quietly assert nothing.)
     let mut attempts = 0u32;
-    for (i, (k, e)) in vault.clone().entries.iter().enumerate() {
-        let i = i as u32;
-        assert_ne!(*k, wire(i), "the vault must never store the wire hash");
-        assert!(is_sha256_hex(k), "keys are hashes");
+    for i in 0..CODES {
+        let k = key(i);
+        let w = wire(i);
+        assert_ne!(k, w, "code {i}: the vault must never store the wire hash");
+        assert!(vault.entries.contains_key(&k), "code {i} is in the ledger");
+        assert!(is_sha256_hex(&k) && is_sha256_hex(&w), "both are hashes");
+        let stored_machine = vault.entries[&k].machine.clone();
 
         // 1. the key itself — the whole point of the v2 schema
         assert_eq!(
-            vault.claim(k, &fp(777), NOW),
+            vault.claim(&k, &fp(777), NOW),
             Err(Refusal::UnknownCode),
-            "vault key for code {i} was redeemable"
+            "code {i}: its own vault key was redeemable"
         );
         // 2. the stored machine fingerprint, in the code-hash slot
-        if let Some(m) = &e.machine {
+        if let Some(m) = &stored_machine {
             assert_eq!(vault.claim(m, &fp(777), NOW), Err(Refusal::UnknownCode));
             attempts += 1;
         }
         // 3. the key hashed once more, in case the thief guesses the ladder
         assert_eq!(
-            vault.claim(&vault_key(k), &fp(777), NOW),
-            Err(Refusal::UnknownCode)
+            vault.claim(&vault_key(&k), &fp(777), NOW),
+            Err(Refusal::UnknownCode),
+            "code {i}: vault_key(vault_key(..)) redeemed"
         );
         // 4. the key hashed as if it were a code
         assert_eq!(
-            vault.claim(&code_hash(k), &fp(777), NOW),
-            Err(Refusal::UnknownCode)
+            vault.claim(&code_hash(&k), &fp(777), NOW),
+            Err(Refusal::UnknownCode),
+            "code {i}: code_hash(vault key) redeemed"
         );
         attempts += 3;
+    }
+
+    // ...and the refusals above are refusals, not the ledger being empty: on
+    // a throwaway copy, the wire hash of an unclaimed code still redeems.
+    let mut control = vault.clone();
+    for i in (1..CODES).step_by(2) {
+        assert!(
+            control.claim(&wire(i), &fp(777), NOW).is_ok(),
+            "code {i} should have been claimable — the §3 refusals would be vacuous"
+        );
     }
 
     // The whole replay campaign changed nothing: not one status flip.
@@ -1612,12 +1648,14 @@ fn every_sale_rewrites_and_fsyncs_the_entire_ledger() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The same measurement at the scale the finding is about. ~3 minutes.
-/// `cargo test -p ccos-enterprise-conformance --test stress_vault_scale -- \
-///  --ignored --nocapture sales_against_a_100k_ledger`
+/// The same measurement at the scale the finding is about: **4.7 GB of
+/// fsynced writes to record 200 one-bit state flips**. ~2.5 min in debug,
+/// ~27 s in release.
+/// `cargo test --release -p ccos-enterprise-conformance --test \
+///  stress_vault_scale -- --ignored --nocapture sales_against_a_100k_ledger`
 #[test]
-#[ignore = "~3 min: 200 fsyncs of a 22 MB ledger"]
-fn sales_against_a_100k_ledger_cost_a_fifth_of_a_second_each() {
+#[ignore = "~2.5 min in debug (~27 s in release): 200 fsyncs of a 23 MB ledger"]
+fn sales_against_a_100k_ledger_move_gigabytes_to_record_200_flips() {
     let dir = scratch("amplify-100k");
     const LEDGER: u32 = 100_000;
     const SALES: u32 = 200;
@@ -1637,11 +1675,19 @@ fn sales_against_a_100k_ledger_cost_a_fifth_of_a_second_each() {
     }
     let elapsed = t0.elapsed();
     let file = std::fs::metadata(&path).expect("stat").len();
+    let written = file * u64::from(SALES);
     println!(
         "[§8] {SALES} sales against a {LEDGER}-entry ledger: {elapsed:?}, {each:?} per sale, \
-         {written} B written+fsynced to record {SALES} flips",
+         {written} B ({gb:.2} GB) written+fsynced to record {SALES} one-bit flips \
+         — {amp}x amplification over the ~{useful} B that actually changed",
         each = elapsed / SALES,
-        written = file * u64::from(SALES),
+        gb = written as f64 / 1e9,
+        useful = u64::from(SALES) * 130,
+        amp = written / (u64::from(SALES) * 130),
+    );
+    assert!(
+        written > 4_000_000_000,
+        "4 GB was the finding; if this shrank, save() became incremental"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1877,7 +1923,10 @@ fn a_megabyte_licensee_is_signed_whole_and_returned_over_the_wire() {
         ratio = body.len() / request.len(),
         alloc = alloc,
     );
-    assert!(body.len() / request.len() > 300);
+    assert!(
+        body.len() / request.len() > 7_000,
+        "the asymmetry is the finding"
+    );
 
     // It is a genuine signed token, not a truncated one — the licensee
     // survives byte for byte into the signed payload.
@@ -1949,6 +1998,55 @@ fn the_pure_claim_api_validates_nothing_about_its_arguments() {
     assert_eq!(
         v.claim(&wire(3), &fp(1), u64::MAX).unwrap().1,
         Some(u64::MAX)
+    );
+}
+
+/// The vendor's only documented recovery lever ("contact the vendor to
+/// re-arm it") is flipping `status` back to `Unclaimed` by hand. It works —
+/// and, importantly, it does not leak the previous owner into the new seat.
+/// The owner comparison is a plain byte equality, so it folds no case and
+/// trims no whitespace: near-miss fingerprints are refused, which is right.
+#[test]
+fn a_re_armed_code_forgets_its_previous_owner_and_the_owner_check_is_exact() {
+    let mut v = Vault::new();
+    v.entries.insert(key(1), unclaimed("Acme", Some(365)));
+    assert!(v.claim(&wire(1), &fp(1), NOW).is_ok());
+
+    // Near misses on the owner are all SeatTaken, not re-issues.
+    let owner = fp(1);
+    for near in [
+        owner.to_uppercase(),
+        format!(" {owner}"),
+        format!("{owner} "),
+        format!("{owner}\n"),
+        owner[..63].to_string(),
+        format!("{owner}0"),
+    ] {
+        assert_eq!(
+            v.claim(&wire(1), &near, NOW + 1),
+            Err(Refusal::SeatTaken),
+            "a near-miss fingerprint was accepted as the owner"
+        );
+    }
+
+    // The vendor re-arms: status only, leaving the stale owner and expiry in
+    // place, which is what a minimal hand edit looks like.
+    v.entries.get_mut(&key(1)).expect("entry").status = Status::Unclaimed;
+    let (_, exp) = v
+        .claim(&wire(1), &fp(2), NOW + 10 * DAY)
+        .expect("re-armed and sold again");
+    let e = &v.entries[&key(1)];
+    assert_eq!(e.machine.as_deref(), Some(fp(2).as_str()), "new owner only");
+    assert_eq!(
+        exp,
+        Some(NOW + 10 * DAY + 365 * DAY),
+        "the expiry is recomputed from `days`, not inherited"
+    );
+    assert_eq!(e.claimed_unix, Some(NOW + 10 * DAY));
+    assert_eq!(
+        v.claim(&wire(1), &fp(1), NOW + 11 * DAY),
+        Err(Refusal::SeatTaken),
+        "the previous owner is now locked out, as it must be"
     );
 }
 

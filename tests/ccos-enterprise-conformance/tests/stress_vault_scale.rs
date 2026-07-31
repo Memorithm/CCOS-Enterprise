@@ -146,6 +146,50 @@
 //!    -> [`a_stale_temp_file_wedges_every_future_save`],
 //!    [`a_transient_save_failure_becomes_a_permanent_one`]
 //!
+//! ## What was BROKEN and is now REPAIRED
+//!
+//! Four of the ten. Every one was a way for a file that loaded cleanly to cost
+//! a customer their seat or hand one away, and every one is now refused —
+//! **both** at load, so a counter never starts holding a landmine, and in the
+//! claim state machine, so a vault built in memory cannot burn a seat either.
+//! The scenarios below are unchanged; the assertions are inverted.
+//!
+//! 5R. **A one-character typo silently converted an annual license into a
+//!     perpetual one.** `Entry` had no `deny_unknown_fields`, so a vault
+//!     holding `"expires_unix"` instead of `"exp_unix"` loaded without a
+//!     murmur and the next re-claim signed a token with no expiry at all.
+//!     Unknown fields are refused by name now, top-level ones included — a
+//!     dropped `"max_seats"` is a seat cap nothing enforces. The other half
+//!     took a different rule: `days` is deserialized through a named function,
+//!     which is what makes serde report a **missing** field instead of
+//!     defaulting it, because omitting a field is not an unknown field.
+//!     `null` still means perpetual; saying nothing no longer does.
+//!     -> [`a_typo_in_a_field_name_is_refused_rather_than_selling_a_perpetual_license`]
+//!
+//! 6R. **`days: 0` permanently destroyed a sold seat.** The claim succeeded,
+//!     the code flipped to `Claimed`, the single seat burned, and the counter
+//!     signed a token whose entire validity window was the claim instant —
+//!     with no recovery path but vault surgery. It is refused now, the entry
+//!     is left untouched, and the refusal is repeatable, so the vendor's fix
+//!     lands on a seat that is still there.
+//!     -> [`a_zero_day_entry_is_refused_without_burning_the_seat`]
+//!
+//! 7R. **`Claimed` + `machine: None` was an unreachable-recovery dead seat.**
+//!     It answered `SeatTaken` to every machine *including the customer's*,
+//!     forever. Both it and `machine: Some("")` are refused as
+//!     `Unserviceable` rather than `SeatTaken`, and the difference is the
+//!     repair: `SeatTaken` tells a paying customer somebody else has their
+//!     seat, which is a lie and an unactionable one.
+//!     -> [`a_claimed_entry_with_no_reachable_owner_is_refused_not_silently_dead`]
+//!
+//! 9R. **Duplicate keys collapsed silently, last one wins**, so appending one
+//!     line un-revoked a revoked code. The entry map is deserialized through a
+//!     visitor that refuses a repeated key, and keys that no `vault_key` could
+//!     ever produce — empty, non-hex, uppercase, short — are refused with it.
+//!     -> [`duplicate_keys_are_refused_rather_than_collapsed`]
+//!
+//! ## What is still BROKEN
+//!
 //! 4. **The schema gate is a self-declared string, not a proof.** A v1 file
 //!    (keyed by the wire `code_hash`) with its `schema` field hand-edited to
 //!    `v2` loads clean, and then **every paying customer gets 404 unknown
@@ -156,49 +200,18 @@
 //!    that never existed, including the empty string.
 //!    -> [`the_schema_gate_is_a_string_not_a_proof`]
 //!
-//! 5. **A one-character typo silently converts an annual license into a
-//!    perpetual one.** `Entry` has no `deny_unknown_fields`, and `exp_unix`
-//!    is `#[serde(default)]`. A vault holding `"expires_unix"` instead of
-//!    `"exp_unix"` loads without a murmur, the field lands as `None`, and the
-//!    next re-claim signs a token with **no expiry at all**. Same hole from
-//!    the other side: an entry that simply omits `days` sells a perpetual
-//!    license. `days` is the one optional field written *without*
-//!    `#[serde(default)]`, which reads like "required" — it is not, because
-//!    serde defaults every `Option<T>` regardless. Nothing anywhere checks
-//!    that a money-bearing entry is complete.
-//!    -> [`an_unknown_field_silently_upgrades_a_license_to_perpetual`]
-//!
-//! 6. **`days: 0` permanently destroys a sold seat.** Nothing validates
-//!    `days`. A zero flips the code to `Claimed`, burns the single seat, and
-//!    signs a token whose entire validity window is the claim instant. Every
-//!    later re-claim re-issues the same dead expiry, so the protocol has no
-//!    recovery path — only vault surgery.
-//!    -> [`a_zero_day_typo_burns_the_seat_and_issues_a_dead_license`]
-//!
-//! 7. **`Claimed` + `machine: None` is an unreachable-recovery dead seat.**
-//!    `machine` is `#[serde(default)]`, so any vault that omits it (a hand
-//!    edit, a partial restore, a migration that forgot a field) produces an
-//!    entry that answers `SeatTaken` to **every** machine including the
-//!    customer's, forever. `machine: Some("")` is the same trap over the
-//!    wire, since `is_sha256_hex("")` is false and no client can ever present
-//!    the empty owner.
-//!    -> [`claimed_entries_with_no_owner_are_dead_seats_forever`]
-//!
 //! 8. **One malformed byte anywhere poisons the entire ledger.** There is no
 //!    per-entry quarantine: a single `days: -1`, a stray BOM or a bad status
 //!    in entry 50 000 of 100 000 makes `load` return `InvalidData` for the
 //!    whole file, and the counter cannot serve *any* customer. Fail-closed,
-//!    but the blast radius is the whole business. Meanwhile the parser does
-//!    unbounded work on content it has already decided to ignore: 10 000
-//!    brackets nested in an unknown field are walked and discarded without
-//!    complaint, and `load` `read_to_string`s the file with no size cap.
+//!    but the blast radius is the whole business — and the validation added
+//!    for 5R/6R/7R/9R **widens** it, since more files are now bad. That is the
+//!    right trade for a ledger (a landmine that loads is worse than a counter
+//!    that refuses to start and says why) but it is a trade, and the
+//!    quarantine question it sharpens is still open. `load` also
+//!    `read_to_string`s the file with no size cap, and a depth bomb inside a
+//!    field the product *does* read is still walked.
 //!    -> [`hostile_vault_files_are_refused_whole_never_partially_trusted`]
-//!
-//! 9. **Duplicate keys collapse silently, last one wins.** A vault where the
-//!    same key appears twice loads with no error and no warning, and the
-//!    *later* entry overwrites the earlier one — so appending a duplicate
-//!    un-revokes a revoked code.
-//!    -> [`duplicate_keys_collapse_silently_and_the_last_one_wins`]
 //!
 //! 10. **4 KiB in, megabytes out.** `MAX_BODY` caps a request at 4 KiB, but a
 //!     1 MiB licensee in the vault is accepted, signed whole, and returned in
@@ -484,9 +497,15 @@ fn vault_of_100k_entries_roundtrips_losslessly_and_reports_its_durability_cost()
     let t0 = Instant::now();
     let mut vault = Vault::new();
     for i in 0..N {
+        // Every shape that can legitimately reach disk. `days: 0` used to be
+        // in this corpus; it is now a file the counter refuses to load at all,
+        // so it belongs in the test that proves the refusal
+        // ([`a_zero_day_entry_is_refused_without_burning_the_seat`]) rather
+        // than in a round-trip fixture whose whole point is that the file
+        // loads.
         let days = match i % 5 {
             0 => None,               // perpetual
-            1 => Some(0),            // dead on arrival
+            1 => Some(1),            // the smallest sane value
             2 => Some(u64::MAX),     // absurd
             3 => Some(u64::MAX / 4), // absurd, differently
             _ => Some(365),
@@ -515,14 +534,11 @@ fn vault_of_100k_entries_roundtrips_losslessly_and_reports_its_durability_cost()
                 } else {
                     None
                 },
-                // Every claimed entry gets an owner except one in nine, which
-                // is the ownerless dead seat of §7 — it must survive the round
-                // trip exactly as it is, defect and all.
-                machine: if claimed && i % 9 != 0 {
-                    Some(fp(i % 100))
-                } else {
-                    None
-                },
+                // Every claimed entry gets an owner. The ownerless dead seat
+                // of §7 used to be one in nine of this corpus; a file holding
+                // one no longer loads, so that shape moved to the test that
+                // proves the refusal.
+                machine: claimed.then(|| fp(i % 100)),
             },
         );
     }
@@ -598,8 +614,35 @@ struct Shadow {
     claimed_at: Option<u64>,
 }
 
+/// Compare an outcome against the spec's prediction, treating
+/// `Unserviceable` as a class: the counter writes an operator-facing reason
+/// into it, and the model has no business reproducing that text.
+fn same_class(
+    got: &Result<(String, Option<u64>), Refusal>,
+    want: &Result<(String, Option<u64>), Refusal>,
+) -> bool {
+    match (got, want) {
+        (Err(Refusal::Unserviceable(_)), Err(Refusal::Unserviceable(_))) => true,
+        _ => got == want,
+    }
+}
+
 impl Shadow {
+    /// Whether the counter can honour this seat at all — the spec's copy of
+    /// `Entry::validate`, restated in the model's own terms so the two are
+    /// independent. One in thirteen of the seeded codes carries `days: 0`,
+    /// which is unserviceable, and the model has to predict that before it can
+    /// hold the counter to it.
+    fn unserviceable(&self) -> bool {
+        self.days == Some(0) && self.status != Status::Revoked
+    }
+
     fn expect(&mut self, machine: u32, now: u64) -> Result<(String, Option<u64>), Refusal> {
+        if self.unserviceable() {
+            // The reason string is the counter's to write; the model only
+            // claims the *class*, which is what `same_class` above compares.
+            return Err(Refusal::Unserviceable(String::new()));
+        }
         match self.status {
             Status::Revoked => Err(Refusal::Revoked),
             Status::Claimed => {
@@ -684,6 +727,7 @@ fn claim_state_machine_survives_100k_abusive_operations() {
     let mut seat_taken = 0u32;
     let mut revoked_refusals = 0u32;
     let mut first_claims = 0u32;
+    let mut unserviceable = 0u32;
 
     let mut rng = Lcg::new(0xC0FF_EE00_1234_5678);
     let t0 = Instant::now();
@@ -716,9 +760,10 @@ fn claim_state_machine_survives_100k_abusive_operations() {
 
         let expected = shadow[i as usize].expect(m, now);
         let got = vault.claim(&wires[i as usize], &fp(m), now);
-        assert_eq!(
-            got, expected,
-            "op {op}: vault and spec disagree on code {i} / machine {m} at t={now}"
+        assert!(
+            same_class(&got, &expected),
+            "op {op}: vault and spec disagree on code {i} / machine {m} at \
+             t={now}: {got:?} vs {expected:?}"
         );
 
         match &got {
@@ -778,6 +823,27 @@ fn claim_state_machine_survives_100k_abusive_operations() {
                 assert_eq!(vault.entries[&keys[i as usize]].status, Status::Revoked);
             }
             Err(Refusal::UnknownCode) => panic!("op {op}: a seeded code went missing"),
+            // **§6, REPAIRED — and this is the assertion that proves it at
+            // scale.** A `days: 0` entry used to be claimable: the flip
+            // succeeded, the seat burned, and a token whose validity window
+            // was the claim instant was signed and handed over. It is refused
+            // now, and the refusal is *repeatable* — the entry is untouched,
+            // so the vendor can still fix it and the customer still has a
+            // seat to claim.
+            Err(Refusal::Unserviceable(_)) => {
+                unserviceable += 1;
+                let e = &vault.entries[&keys[i as usize]];
+                assert_eq!(e.days, Some(0), "op {op}: refused a serviceable entry");
+                assert_ne!(
+                    e.status,
+                    Status::Claimed,
+                    "op {op}: the refusal MOVED the entry — the seat was burnt \
+                     after all"
+                );
+                assert_eq!(e.machine, None, "op {op}: a refused claim took the seat");
+                assert_eq!(e.exp_unix, None);
+                assert_eq!(e.claimed_unix, None);
+            }
         }
     }
     let elapsed = t0.elapsed();
@@ -787,7 +853,8 @@ fn claim_state_machine_survives_100k_abusive_operations() {
     println!(
         "[§2] {OPS} claims / {CODES} codes / {MACHINES} machines in {elapsed:?}: \
          {first_claims} first claims, {reissues} same-machine re-issues, \
-         {seat_taken} SeatTaken, {revoked_refusals} Revoked, {issued} seats sold"
+         {seat_taken} SeatTaken, {revoked_refusals} Revoked, \
+         {unserviceable} Unserviceable, {issued} seats sold"
     );
     assert_eq!(issued as u32, first_claims);
     assert!(reissues > 10_000, "the re-claim path was barely exercised");
@@ -798,6 +865,13 @@ fn claim_state_machine_survives_100k_abusive_operations() {
     assert!(
         revoked_refusals > 10_000,
         "the revoked path was barely exercised"
+    );
+    // Without this the §6 assertions above are vacuous: one in thirteen of the
+    // seeded codes carries `days: 0`, so the new refusal must be reached
+    // thousands of times or the arm was never taken.
+    assert!(
+        unserviceable > 1_000,
+        "the unserviceable path was barely exercised: {unserviceable}"
     );
 
     // Final sweep: the vault agrees with the shadow on every code, and no
@@ -1214,13 +1288,18 @@ fn hostile_vault_files_are_refused_whole_never_partially_trusted() {
     let p = dir.join("bomb.json");
     std::fs::write(&p, &bomb).expect("write");
     let t0 = Instant::now();
-    let v = Vault::load(&p).expect("an ignored 5000-deep structure is parsed and discarded");
+    // The bomb was in a field nobody reads, which used to mean serde walked
+    // 10 000 brackets and discarded them without complaint. `deny_unknown_fields`
+    // refuses the field itself, so the work is not merely wasted — it is not
+    // done. Depth is still not *bounded* (a bomb inside a field the product
+    // does read would still be walked), which is why this is a measurement and
+    // not a bound.
+    let err = Vault::load(&p).expect_err("an unknown field is refused, bomb and all");
     println!(
-        "[§5] 10 000 brackets in a field nobody reads: accepted in {:?}, entry intact",
+        "[§5] 10 000 brackets in a field nobody reads: refused in {:?} — {err}",
         t0.elapsed()
     );
-    assert_eq!(v.entries.len(), 1);
-    assert_eq!(v.entries[&good_key].days, Some(1));
+    assert!(err.to_string().contains("junk"), "{err}");
 
     // A missing file is NotFound, not InvalidData — the counter never
     // conjures a vault into being.
@@ -1254,77 +1333,93 @@ fn hostile_vault_files_are_refused_whole_never_partially_trusted() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **DEFECT 9.** JSON allows duplicate object keys; `BTreeMap` deserialization
-/// takes the last one and says nothing. A backup merge, a `jq` append or a
-/// careless admin can therefore un-revoke a code by appending a duplicate.
+/// **§9, REPAIRED.** JSON allows duplicate object keys; `BTreeMap`
+/// deserialization used to take the last one and say nothing, so a backup
+/// merge, a `jq` append or a careless admin could **un-revoke a code by
+/// appending one line** — with no error, no warning, and nothing left in the
+/// file to show two entries ever existed.
+///
+/// The entry map is deserialized through a visitor that refuses a repeated
+/// key. A ledger where the same seat appears twice is not a ledger with a
+/// resolution rule; it is a ledger nobody can read.
 #[test]
-fn duplicate_keys_collapse_silently_and_the_last_one_wins() {
+fn duplicate_keys_are_refused_rather_than_collapsed() {
     let dir = scratch("dupes");
     let p = dir.join("v.json");
     let k = key(1);
 
     let revoked = r#"{"licensee":"Revoked Corp","days":365,"status":"revoked","created_unix":1}"#;
     let live = r#"{"licensee":"Reinstated","days":365,"status":"unclaimed","created_unix":1}"#;
-    std::fs::write(&p, vault_json(&format!("\"{k}\":{revoked},\"{k}\":{live}"))).expect("write");
 
-    let mut v = Vault::load(&p).expect("duplicate keys are not an error at all");
-    assert_eq!(v.entries.len(), 1, "the duplicate silently collapsed");
-    assert_eq!(
-        v.entries[&k].status,
-        Status::Unclaimed,
-        "the LAST duplicate won — appending one line un-revoked a revoked code"
-    );
-    assert_eq!(v.entries[&k].licensee, "Reinstated");
-    assert!(v.claim(&wire(1), &fp(1), NOW).is_ok(), "and it redeems");
-
-    // Reverse order: the revocation wins only because it came last. Nothing
-    // about revocation is sticky.
-    std::fs::write(&p, vault_json(&format!("\"{k}\":{live},\"{k}\":{revoked}"))).expect("write");
-    let mut v = Vault::load(&p).expect("load");
-    assert_eq!(
-        v.claim(&wire(1), &fp(1), NOW),
-        Err(Refusal::Revoked),
-        "order, not policy, decided this"
-    );
+    // Both orders are refused: the defect was that *order* decided policy.
+    for (first, second, tag) in [
+        (revoked, live, "revoked then live"),
+        (live, revoked, "live then revoked"),
+    ] {
+        std::fs::write(&p, vault_json(&format!("\"{k}\":{first},\"{k}\":{second}")))
+            .expect("write");
+        let err = Vault::load(&p).expect_err("a duplicate key must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("twice"), "{tag}: {msg}");
+        assert!(
+            msg.contains(&k),
+            "{tag}: the operator is told which key: {msg}"
+        );
+    }
 
     // Case-variant hex keys are DIFFERENT entries, and the uppercase one is
-    // dead weight: `vault_key` only ever produces lowercase.
+    // dead weight: `vault_key` only ever produces lowercase. It is now refused
+    // for that reason rather than sitting there unreachable forever.
     let upper = k.to_uppercase();
     std::fs::write(
         &p,
         vault_json(&format!("\"{k}\":{revoked},\"{upper}\":{live}")),
     )
     .expect("write");
-    let mut v = Vault::load(&p).expect("load");
-    assert_eq!(v.entries.len(), 2, "no case folding — two entries");
-    assert_eq!(
-        v.claim(&wire(1), &fp(1), NOW),
-        Err(Refusal::Revoked),
-        "the uppercase twin is unreachable, so revocation stands"
-    );
+    let err = Vault::load(&p).expect_err("an unreachable key is refused");
+    assert!(err.to_string().contains("sha256 hex"), "{err}");
 
-    // Keys are never validated: empty and non-hex keys load fine and sit
-    // there forever, unreachable by any claim.
-    std::fs::write(
-        &p,
-        vault_json(&format!(
-            "\"\":{live},\"not-a-hash\":{live},\"{}\":{live}",
-            "z".repeat(64)
-        )),
-    )
-    .expect("write");
-    let v = Vault::load(&p).expect("junk keys load");
-    assert_eq!(v.entries.len(), 3, "no key shape validation whatsoever");
-    assert!(v.entries.keys().any(|k| k.is_empty()));
+    // …and the lowercase original on its own still loads and still refuses
+    // the claim, so the repair did not swallow the revocation with the twin.
+    std::fs::write(&p, vault_json(&format!("\"{k}\":{revoked}"))).expect("write");
+    let mut v = Vault::load(&p).expect("the real entry loads");
+    assert_eq!(v.entries.len(), 1);
+    assert_eq!(v.claim(&wire(1), &fp(1), NOW), Err(Refusal::Revoked));
+
+    // Keys used never to be validated: empty and non-hex keys loaded fine and
+    // sat there forever, unreachable by any claim. Each is refused now, by
+    // name, because an unreachable entry in a ledger is an accounting error
+    // whatever it cannot be reached by.
+    for junk in ["", "not-a-hash", &"z".repeat(64), &k[..63]] {
+        std::fs::write(&p, vault_json(&format!("\"{junk}\":{live}"))).expect("write");
+        let err = Vault::load(&p)
+            .err()
+            .unwrap_or_else(|| panic!("key {junk:?} must be refused"));
+        assert!(err.to_string().contains("sha256 hex"), "{junk:?}: {err}");
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **DEFECT 5.** `Entry` does not `deny_unknown_fields`, and every optional
-/// field but `days` defaults silently. A misspelled `exp_unix` is therefore a
-/// silent, signed upgrade from an annual license to a perpetual one.
+/// **§5, REPAIRED.** A one-character typo in a field name used to silently
+/// convert an annual license into a perpetual one. `Entry` had no
+/// `deny_unknown_fields` and `exp_unix` is `#[serde(default)]`, so a vault
+/// holding `"expires_unix"` loaded without a murmur, the field landed as
+/// `None`, and the next re-claim signed a token with **no expiry at all**.
+///
+/// Two rules close it, and they are different rules:
+///
+/// * `#[serde(deny_unknown_fields)]` on `Entry` and `Vault` — a field name the
+///   product does not know is a refusal, not a shrug. That also stops an
+///   unknown *top-level* field that looks like policy (`"revoked_after"`,
+///   `"max_seats"`) from being silently dropped.
+/// * `days` is deserialized through a named function, which is what makes
+///   serde report a **missing** field instead of defaulting it. `null` still
+///   means perpetual; saying nothing at all no longer does. This is the half
+///   `deny_unknown_fields` cannot reach, because omitting a field is not an
+///   unknown field.
 #[test]
-fn an_unknown_field_silently_upgrades_a_license_to_perpetual() {
+fn a_typo_in_a_field_name_is_refused_rather_than_selling_a_perpetual_license() {
     let dir = scratch("typo");
     let p = dir.join("v.json");
     let k = key(1);
@@ -1347,23 +1442,16 @@ fn an_unknown_field_silently_upgrades_a_license_to_perpetual() {
     // ...and the same file with ONE character changed in a field name.
     let typo = correct.replace("\"exp_unix\"", "\"expires_unix\"");
     std::fs::write(&p, one_entry(&k, &typo)).expect("write");
-    let mut v = Vault::load(&p).expect("the typo is not an error — nothing rejects it");
-    assert_eq!(v.entries[&k].exp_unix, None, "the expiry vanished silently");
+    let err = Vault::load(&p).expect_err("the typo must be an error");
+    assert!(
+        err.to_string().contains("expires_unix"),
+        "the operator is told which field: {err}"
+    );
+    println!("[§5] one typo in a field name: refused by name, not sold as perpetual");
 
-    let (licensee, exp) = v.claim(&wire(1), &owner, NOW + 10).expect("re-issues");
-    assert_eq!(exp, None, "the re-issued license is now PERPETUAL");
-
-    // And it is a real, signed, verifiable perpetual token.
-    let token = sign_token_bound(&SEED, &licensee, exp, Some(&owner));
-    let payload = verified_payload(&token);
-    assert_eq!(payload.get("exp"), None, "no expiry in the signed payload");
-    println!("[§5] one typo in a field name: 365-day license -> perpetual, signed, no warning");
-
-    // The same hole, reached from the other side: `days` is the one optional
-    // field WITHOUT `#[serde(default)]`, which reads like a deliberate "this
-    // one is required". It is not — serde defaults every `Option<T>` anyway,
-    // so an entry that simply omits `days` is a perpetual license too. The
-    // attribute asymmetry buys nothing; both spellings fail open.
+    // The other side of the same hole: an entry that simply omits `days`.
+    // `deny_unknown_fields` cannot see this one — nothing unknown is present —
+    // so it takes the required-field rule.
     std::fs::write(
         &p,
         one_entry(
@@ -1372,20 +1460,34 @@ fn an_unknown_field_silently_upgrades_a_license_to_perpetual() {
         ),
     )
     .expect("write");
-    let mut v = Vault::load(&p).expect("an entry with no `days` at all loads");
-    assert_eq!(
-        v.entries[&k].days, None,
-        "missing days == perpetual, silently"
+    let err = Vault::load(&p).expect_err("an entry with no `days` must be an error");
+    assert!(
+        err.to_string().contains("days"),
+        "a vault entry that forgot to say how long the license lasts must not \
+         sell a perpetual one: {err}"
     );
+
+    // …while an explicit null still does mean perpetual, which is the point of
+    // requiring the field rather than banning the value.
+    std::fs::write(
+        &p,
+        one_entry(
+            &k,
+            r#"{"licensee":"Acme","days":null,"status":"unclaimed","created_unix":1}"#,
+        ),
+    )
+    .expect("write");
+    let mut v = Vault::load(&p).expect("an explicit null loads");
+    assert_eq!(v.entries[&k].days, None);
     assert_eq!(
         v.claim(&wire(1), &fp(1), NOW),
         Ok(("Acme".to_string(), None)),
-        "a vault entry that forgot to say how long the license lasts sells a \
-         perpetual one — there is no required-field check anywhere"
+        "a deliberately perpetual license is still sellable"
     );
 
-    // The same hole in the other direction: an unknown top-level field, and a
-    // completely foreign field on an entry, are both ignored.
+    // An unknown top-level field, including one that looks like policy, is
+    // refused too — dropping it silently is how a vault appears to carry a
+    // seat cap that nothing enforces.
     std::fs::write(
         &p,
         format!(
@@ -1394,9 +1496,10 @@ fn an_unknown_field_silently_upgrades_a_license_to_perpetual() {
         ),
     )
     .expect("write");
+    let err = Vault::load(&p).expect_err("unknown top-level fields must be refused");
     assert!(
-        Vault::load(&p).is_ok(),
-        "unknown top-level fields — including ones that look like policy — are dropped"
+        err.to_string().contains("revoked_after") || err.to_string().contains("max_seats"),
+        "{err}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1448,40 +1551,68 @@ fn absurd_day_counts_saturate_instead_of_wrapping_into_the_past() {
     assert_eq!(v.entries[&key(3)].exp_unix, None);
 }
 
-/// **DEFECT 6.** Nothing validates `days`. A zero — a plausible vendor typo,
-/// or a JSON default someone reached for — flips the code to `Claimed`, burns
-/// the one seat it will ever have, and signs a license whose validity window
-/// is a single instant. There is no protocol path back: the same machine can
-/// only ever re-issue the same dead expiry, and any other machine is
-/// `SeatTaken`.
+/// **§6, REPAIRED.** `days: 0` used to permanently destroy a sold seat:
+/// nothing validated it, so the claim succeeded, the code flipped to
+/// `Claimed`, the single seat burned, and the counter signed a token whose
+/// entire validity window was the claim instant. Every later re-claim
+/// re-issued the same dead expiry, so the protocol had no recovery path —
+/// only vault surgery.
+///
+/// The claim is refused now, and the two properties that make the refusal
+/// worth having are asserted below: the entry is **untouched**, so the seat
+/// is still there to be claimed once the vendor fixes it, and the refusal is
+/// **repeatable** rather than a one-shot.
 #[test]
-fn a_zero_day_typo_burns_the_seat_and_issues_a_dead_license() {
+fn a_zero_day_entry_is_refused_without_burning_the_seat() {
     let mut v = Vault::new();
     v.entries.insert(key(1), unclaimed("Acme Corp", Some(0)));
 
-    let (licensee, exp) = v.claim(&wire(1), &fp(1), NOW).expect("the claim SUCCEEDS");
-    assert_eq!(
-        exp,
-        Some(NOW),
-        "the license expires at the instant it is issued"
+    let refusal = v.claim(&wire(1), &fp(1), NOW).expect_err("the claim FAILS");
+    let Refusal::Unserviceable(why) = &refusal else {
+        panic!("wrong refusal: {refusal:?}");
+    };
+    assert!(
+        why.contains("days is 0"),
+        "the operator is told which line: {why}"
     );
+    assert!(why.contains("null"), "…and what to write instead: {why}");
 
-    // The seat is gone. Permanently.
-    assert_eq!(v.entries[&key(1)].status, Status::Claimed);
-    assert_eq!(v.claim(&wire(1), &fp(2), NOW + 1), Err(Refusal::SeatTaken));
-    // Even a year later, the same machine only gets the same dead expiry.
-    assert_eq!(
-        v.claim(&wire(1), &fp(1), NOW + 365 * DAY).unwrap().1,
-        Some(NOW),
-        "the re-issue path cannot repair it — it re-issues the same dead expiry"
-    );
+    // The seat is intact. That is the whole point: a refusal costs a support
+    // ticket, and the alternative cost the customer their license.
+    let e = &v.entries[&key(1)];
+    assert_eq!(e.status, Status::Unclaimed, "the seat was not burnt");
+    assert_eq!(e.machine, None);
+    assert_eq!(e.exp_unix, None);
+    assert_eq!(e.claimed_unix, None);
 
-    // And the dead license is a properly signed artifact, so it will be
-    // installed by the client before anything notices it is worthless.
-    let payload = verified_payload(&sign_token_bound(&SEED, &licensee, exp, Some(&fp(1))));
-    assert_eq!(payload["exp"].as_u64(), Some(NOW));
-    assert_eq!(payload["licensee"].as_str(), Some("Acme Corp"));
-    println!("[§6] days:0 — seat burnt, token signed, expiry == issue instant, no recovery");
+    // Repeatable, from any machine, at any time — nothing was consumed.
+    assert!(matches!(
+        v.claim(&wire(1), &fp(2), NOW + 1),
+        Err(Refusal::Unserviceable(_))
+    ));
+    assert!(matches!(
+        v.claim(&wire(1), &fp(1), NOW + 365 * DAY),
+        Err(Refusal::Unserviceable(_))
+    ));
+    assert_eq!(v.entries[&key(1)].status, Status::Unclaimed);
+
+    // And the vendor's fix works on the seat that was preserved.
+    v.entries.get_mut(&key(1)).expect("entry").days = Some(365);
+    let (licensee, exp) = v.claim(&wire(1), &fp(1), NOW).expect("now it issues");
+    assert_eq!(licensee, "Acme Corp");
+    assert_eq!(exp, Some(NOW + 365 * DAY));
+    println!("[§6] days:0 — refused, seat intact, vendor fix recovers it");
+
+    // A file holding one cannot even be loaded, so the counter never starts
+    // with a landmine in it.
+    let dir = scratch("zero-days");
+    let path = dir.join("vault.json");
+    let mut bad = Vault::new();
+    bad.entries.insert(key(3), unclaimed("Acme", Some(0)));
+    std::fs::write(&path, serde_json::to_string_pretty(&bad).expect("json")).expect("write");
+    let err = Vault::load(&path).expect_err("a vault holding a dead seat must not load");
+    assert!(err.to_string().contains("days is 0"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
 
     // days:1 is the smallest sane value, for contrast.
     let mut v = Vault::new();
@@ -1493,13 +1624,21 @@ fn a_zero_day_typo_burns_the_seat_and_issues_a_dead_license() {
 // §7  Unreachable states: dead seats the protocol cannot recover
 // ═════════════════════════════════════════════════════════════════════
 
-/// **DEFECT 7.** `machine` is `#[serde(default)]`, so `Claimed` with no owner
-/// is a state any hand edit, partial restore or half-finished migration can
-/// produce. `Vault::claim` compares `entry.machine.as_deref() == Some(machine)`,
-/// which is false for `None` against every possible machine — so the entry
-/// answers `SeatTaken` to the entire universe, forever.
+/// **§7, REPAIRED.** A `Claimed` entry with no owner used to answer
+/// `SeatTaken` to **every** machine including the customer's, forever.
+/// `machine` is `#[serde(default)]`, so a hand edit, a partial restore or a
+/// migration that dropped a field produced one silently, and there was no way
+/// back: the entry looked claimed, so nothing would ever re-issue it.
+/// `Some("")` was the same trap over the wire, since no client can present the
+/// empty owner.
+///
+/// Both are refused now — as `Unserviceable`, not `SeatTaken`, and the
+/// difference is the whole repair. `SeatTaken` tells a paying customer someone
+/// else has their seat, which is a lie and an unactionable one;
+/// `Unserviceable` is a 500 that names the entry in the operator's log and
+/// tells the customer nothing was consumed.
 #[test]
-fn claimed_entries_with_no_owner_are_dead_seats_forever() {
+fn a_claimed_entry_with_no_reachable_owner_is_refused_not_silently_dead() {
     let mut v = Vault::new();
     let mut orphan = unclaimed("Acme Corp", Some(365));
     orphan.status = Status::Claimed;
@@ -1509,21 +1648,26 @@ fn claimed_entries_with_no_owner_are_dead_seats_forever() {
     v.entries.insert(key(1), orphan);
 
     for m in 0..64u32 {
-        assert_eq!(
-            v.claim(&wire(1), &fp(m), NOW + u64::from(m)),
-            Err(Refusal::SeatTaken),
-            "machine {m} found a way in"
+        let got = v.claim(&wire(1), &fp(m), NOW + u64::from(m));
+        assert!(
+            matches!(got, Err(Refusal::Unserviceable(_))),
+            "machine {m}: {got:?} — an unreachable seat must not read as taken"
         );
     }
-    // Not even the empty string, not even the entry's own licensee.
-    assert_eq!(v.claim(&wire(1), "", NOW), Err(Refusal::SeatTaken));
-    assert_eq!(v.claim(&wire(1), "Acme Corp", NOW), Err(Refusal::SeatTaken));
-    println!("[§7] claimed + machine:None — 66 machines, 66 refusals, no owner exists");
+    // Not even the empty string, not even the entry's own licensee — and none
+    // of them is told the seat belongs to somebody else.
+    for m in ["", "Acme Corp"] {
+        assert!(matches!(
+            v.claim(&wire(1), m, NOW),
+            Err(Refusal::Unserviceable(_))
+        ));
+    }
+    println!("[§7] claimed + machine:None — refused as unserviceable, not as taken");
 
-    // `machine: Some("")` is the same trap over the wire: the pure API will
-    // re-issue to the empty owner, but `Counter::handle` requires
-    // `is_sha256_hex(machine)`, which "" is not — so no client can ever
-    // present it, and the seat is equally dead in production.
+    // `machine: Some("")` is the same trap from the other side. The pure API
+    // used to re-issue to the empty owner while `Counter::handle` rejected the
+    // wire value, so the seat was dead in production and *looked* alive in a
+    // unit test. It is now refused on both.
     let mut v = Vault::new();
     let mut empty_owner = unclaimed("Acme", Some(365));
     empty_owner.status = Status::Claimed;
@@ -1531,10 +1675,10 @@ fn claimed_entries_with_no_owner_are_dead_seats_forever() {
     empty_owner.exp_unix = Some(NOW + DAY);
     v.entries.insert(key(2), empty_owner);
     assert!(
-        v.claim(&wire(2), "", NOW).is_ok(),
-        "the pure API happily binds the empty machine"
+        matches!(v.claim(&wire(2), "", NOW), Err(Refusal::Unserviceable(_))),
+        "the pure API must not bind the empty machine either"
     );
-    assert!(!is_sha256_hex(""), "but the wire format rejects it");
+    assert!(!is_sha256_hex(""), "and the wire format still rejects it");
 
     let dir = scratch("deadseat");
     let path = dir.join("vault.json");
@@ -1543,8 +1687,43 @@ fn claimed_entries_with_no_owner_are_dead_seats_forever() {
     let (status, _) = counter.handle("POST", CLAIM_PATH, &claim_body(&wire(2), ""), NOW);
     assert_eq!(status, 400, "no client can ever reach the empty owner");
 
-    // `Vault::claim` validates NOTHING about the machine string it stores —
-    // a megabyte of it is fine, and it lands in the ledger and on disk.
+    // A file holding either shape cannot be loaded at all, so a counter never
+    // starts holding a seat it can only refuse.
+    for (tag, mut bad) in [
+        ("no-owner", {
+            let mut e = unclaimed("Acme", Some(365));
+            e.status = Status::Claimed;
+            e.claimed_unix = Some(NOW);
+            e.exp_unix = Some(NOW + DAY);
+            e
+        }),
+        ("empty-owner", {
+            let mut e = unclaimed("Acme", Some(365));
+            e.status = Status::Claimed;
+            e.claimed_unix = Some(NOW);
+            e.exp_unix = Some(NOW + DAY);
+            e.machine = Some(String::new());
+            e
+        }),
+    ] {
+        bad.licensee = format!("Acme {tag}");
+        let mut v = Vault::new();
+        v.entries.insert(key(4), bad);
+        let p = dir.join(format!("{tag}.json"));
+        std::fs::write(&p, serde_json::to_string_pretty(&v).expect("json")).expect("write");
+        let err = Vault::load(&p).expect_err("a dead seat must not load");
+        assert!(
+            err.to_string().contains("machine") || err.to_string().contains("claimed"),
+            "{tag}: {err}"
+        );
+    }
+
+    // **STILL OPEN.** `Vault::claim` validates nothing about the machine
+    // string it *stores* on a first claim — a megabyte of it is fine, lands in
+    // the ledger and is persisted whole. `Counter::handle` requires
+    // `is_sha256_hex` on the wire, so this is unreachable through the server;
+    // the pure API remains the way in, and finding 10's asymmetry is the same
+    // shape from the licensee side.
     let mut v = Vault::new();
     v.entries.insert(key(3), unclaimed("Acme", Some(365)));
     let huge = "m".repeat(1 << 20);
@@ -2331,9 +2510,27 @@ fn a_re_armed_code_forgets_its_previous_owner_and_the_owner_check_is_exact() {
         );
     }
 
-    // The vendor re-arms: status only, leaving the stale owner and expiry in
-    // place, which is what a minimal hand edit looks like.
+    // The minimal hand edit — flip the status, leave the stale owner and
+    // expiry in place — is now refused rather than sold. It produced a state
+    // the claim machine cannot reach, and a state nothing downstream reasons
+    // about correctly: an "unclaimed" seat that already names an owner.
     v.entries.get_mut(&key(1)).expect("entry").status = Status::Unclaimed;
+    let got = v.claim(&wire(1), &fp(2), NOW + 10 * DAY);
+    assert!(
+        matches!(got, Err(Refusal::Unserviceable(_))),
+        "a half re-arm must not sell the seat: {got:?}"
+    );
+
+    // The vendor's actual `rearm` clears all three fields, which is what makes
+    // the entry serviceable again — the CLI's thoroughness is load-bearing,
+    // and this is where that is asserted.
+    {
+        let e = v.entries.get_mut(&key(1)).expect("entry");
+        e.status = Status::Unclaimed;
+        e.claimed_unix = None;
+        e.exp_unix = None;
+        e.machine = None;
+    }
     let (_, exp) = v
         .claim(&wire(1), &fp(2), NOW + 10 * DAY)
         .expect("re-armed and sold again");

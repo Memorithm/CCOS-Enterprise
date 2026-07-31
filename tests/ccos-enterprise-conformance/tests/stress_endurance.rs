@@ -780,8 +780,9 @@ fn check_invariants(d: &Deployment, l: &Ledger, names: &[String], at: usize) {
     // metrics can say 4 000 calls were refused, never whose. Asserting the
     // real shape so that adding a tenant dimension trips here loudly.
     assert!(
-        m.len() <= 12,
-        "call {at}: expected at most 12 global series, got {}",
+        m.len() <= 12 + 3,
+        "call {at}: expected at most 12 global series plus the registry's \
+         three gauges, got {}",
         m.len()
     );
     for (name, _) in &m {
@@ -981,14 +982,18 @@ fn endurance_two_hundred_thousand_admissions_across_fifty_tenants() {
          the run never tested life after exhaustion"
     );
 
-    // The bounded pool stayed bounded, exactly: three aggregate series, one
-    // per refusal kind, and the drop counter — not a name more after 200 000
-    // hostile calls. `gateway.replayed` is absent because every request id in
-    // this run is distinct, which is what keeps the billing assertions honest.
+    // The bounded pool stayed bounded, exactly: the registry's three gauges,
+    // three aggregate series, one per refusal kind, and the drop counter — not
+    // a name more after 200 000 hostile calls. `gateway.replayed` is absent
+    // because every request id in this run is distinct, which is what keeps
+    // the billing assertions honest.
     let final_series: Vec<String> = a.metrics().into_iter().map(|(n, _)| n).collect();
     assert_eq!(
         final_series,
         vec![
+            "_dropped",
+            "_dropped_events",
+            "_refused",
             "audit.dropped",
             "gateway.forwarded",
             "gateway.refused",
@@ -1230,13 +1235,19 @@ fn unauthenticated_flood_is_bounded_by_the_audit_capacity() {
     assert_eq!(last.request_id, format!("r-{:08}", FLOOD_CALLS - 1));
 
     // The bounded pool right next door stayed bounded, and the trail has
-    // joined it: four series, flat, one of them counting what the trail shed.
+    // joined it: four series, flat, one of them counting what the trail shed
+    // — plus the registry's three gauges, which a million refusals never move
+    // because the composed path's series names come from a closed set.
     let m = d.metrics();
     assert_eq!(
         m.len(),
-        4,
-        "expected requests/refused/refused.unauthenticated/audit.dropped, got {m:?}"
+        4 + 3,
+        "expected requests/refused/refused.unauthenticated/audit.dropped and \
+         the three gauges, got {m:?}"
     );
+    for gauge in ["_dropped", "_dropped_events", "_refused"] {
+        assert_eq!(metric(&m, gauge), 0, "{gauge} moved under a 1M-call flood");
+    }
     assert_eq!(metric(&m, "gateway.requests"), FLOOD_CALLS as u64);
     assert_eq!(metric(&m, "gateway.refused"), FLOOD_CALLS as u64);
     assert_eq!(

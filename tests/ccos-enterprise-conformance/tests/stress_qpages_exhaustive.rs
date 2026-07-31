@@ -1044,8 +1044,11 @@ fn activation_needs_no_privilege_and_leaves_no_trace() {
          documented 'auditable tenant decision' journals nothing",
     );
     assert!(
-        d.metrics().is_empty(),
-        "activation is invisible to observability too: {:?}",
+        d.metrics()
+            .iter()
+            .all(|(k, v)| k.starts_with('_') && *v == 0),
+        "activation is invisible to observability too — the only rows are the \
+         registry's own gauges, all reading zero: {:?}",
         d.metrics()
     );
 
@@ -1137,8 +1140,9 @@ fn free_refusals_are_bounded_by_the_journal_cap_and_counted() {
     assert_eq!(counter("gateway.refused.variant_not_activated"), N as u64);
     assert_eq!(counter("audit.dropped"), (N - CAP) as u64);
     assert!(
-        metrics.len() <= 4,
-        "refusal tags stay low-cardinality (held): {metrics:?}"
+        metrics.len() <= 4 + 3,
+        "refusal tags stay low-cardinality (held), the three `_` rows being \
+         the registry's gauges: {metrics:?}"
     );
 
     // Below the cap nothing is dropped at all — the bound is the only thing

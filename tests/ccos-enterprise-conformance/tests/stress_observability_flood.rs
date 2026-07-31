@@ -1,22 +1,22 @@
-//! # Hostile stress of the metrics registry: label flood, fold boundary, blinding
+//! # Hostile stress of the metrics registry: label flood, cap boundary, blinding
 //!
 //! `ccos_enterprise_observability::CounterRegistry` is the only bounded pool
 //! in Enterprise. Its own doc comment states the contract this file attacks:
 //!
-//! > Maximum distinct series kept; beyond it, increments fold into
-//! > `"overflow"` **so a label explosion can never exhaust memory**.
+//! > Maximum distinct series kept. Beyond it an increment on an unseen name
+//! > is dropped and counted in `dropped`, **so a label explosion can never
+//! > exhaust memory**.
 //!
 //! and
 //!
 //! > A deterministic snapshot for exporters (Prometheus/OTel at the gateway)
 //! > and **for audit diffing**: name/value pairs in `BTreeMap` order,
-//! > **identical for identical histories**.
+//! > preceded by the three out-of-band gauges.
 //!
-//! Both sentences are load-bearing product claims, and both are only half
-//! true. Everything asserted below is the product's **current, real**
-//! behaviour: where that behaviour is a defect the assertion pins the defect
-//! and the comment names it, so a repair fails loudly here instead of
-//! silently changing what an operator can see.
+//! Everything asserted below is the product's **current, real** behaviour:
+//! where that behaviour is a defect the assertion pins the defect and the
+//! comment names it, so a repair fails loudly here instead of silently
+//! changing what an operator can see.
 //!
 //! Run the whole file:
 //! `cargo test -p ccos-enterprise-conformance --test stress_observability_flood`
@@ -25,112 +25,104 @@
 //! ## What held
 //!
 //! * **The cardinality cap is exact and unconditional.** 5 000 000 increments
-//!   across 1 000 000 distinct labels leave `series() == 4097` — precisely
-//!   `MAX_SERIES + 1` — with `overflow == 4 979 520`, i.e. every one of the
-//!   4 979 520 dropped increments accounted for to the unit. Measured
-//!   retained heap: ~412 KB against 100 617 888 B for the same history in an
-//!   unfolded `BTreeMap` — a 244x saving — and **exactly zero** net bytes are
-//!   allocated across the last 4 000 000 increments, so the bound does not
-//!   merely hold at the end, it stops growing entirely. The grand total is
-//!   conserved to the unit: the fold *relocates* counts, it never drops them.
+//!   across 1 000 000 distinct labels leave `series() == 4096` — precisely
+//!   `MAX_SERIES`, no fold key, no attacker-dependent ceiling — with
+//!   `dropped() == 4 979 520`, i.e. every one of the 4 979 520 dropped
+//!   increments accounted for to the unit. Measured retained heap: ~412 KB
+//!   against ~100 MB for the same history in an unfolded `BTreeMap` — a 244x
+//!   saving — and **exactly zero** net bytes are allocated across the last
+//!   4 000 000 increments, so the bound does not merely hold at the end, it
+//!   stops growing entirely. The grand total is conserved to the unit:
+//!   `total(series) + dropped_events() == every increment ever passed`.
 //!   → [`flood_five_million_increments_across_one_million_labels`]
-//! * **The fold boundary is off-by-nothing.** The 4096th distinct name is
-//!   admitted; the 4097th is the first to fold. A full registry keeps
-//!   counting series it already knows — 100 000 increments on a known name
-//!   all land, and `series()` never moves.
-//!   → [`fold_engages_exactly_at_the_four_thousand_and_ninety_seventh_series`]
-//! * **Saturation is total and deterministic**, for a normal series and for
-//!   `overflow` alike: `u64::MAX` then `+1` stays `u64::MAX` in debug and
-//!   release. No wrap, no panic.
-//! * **`export()` is strictly sorted, `len() == series()`, and byte-identical**
-//!   across repeated calls and across two registries fed the same sequence in
-//!   the same order — including with empty, NUL-bearing, RTL and astral names
-//!   in play, and including after the fold has engaged.
+//! * **The cap boundary is off-by-nothing.** The 4096th distinct name is
+//!   admitted; the 4097th is the first dropped, and dropping it adds no key.
+//!   A full registry keeps counting series it already knows — 100 000
+//!   increments on a known name all land, and `series()` never moves.
+//!   → [`the_cap_is_exact_and_a_zero_valued_drop_is_still_visible`]
+//! * **Saturation is total and deterministic**: `u64::MAX` then `+1` stays
+//!   `u64::MAX` in debug and release. No wrap, no panic.
+//! * **`export()` is strictly sorted, `len() == series() + GAUGES`, and
+//!   byte-identical** across repeated calls and across two registries fed the
+//!   same sequence in the same order — including after the cap is reached.
 //! * **The composed path is immune to label explosion.**
 //!   `Deployment::admit` folds every refusal through a `&'static str` tag, so
 //!   3 015 hostile calls carrying 1 MiB tool names, unicode tenants and
-//!   attacker-chosen actors produce exactly 11 series — all eight refusal
-//!   tags saturated — and never `overflow`.
+//!   attacker-chosen actors produce exactly 17 rows — 14 series plus the three
+//!   gauges — and never move `_dropped` or `_refused` off zero.
 //!   → [`deployment_metrics_stay_low_cardinality_under_hostile_input`]
 //!
-//! ## What BROKE
+//! ## What was BROKEN and is now REPAIRED
 //!
-//! 1. **An attacker who can name one metric `overflow` before the registry
-//!    fills BLINDS the drop counter permanently.** `inc` folds into
-//!    `entry("overflow")` without distinguishing the fold bucket from a
-//!    same-named ordinary series (`crates/ccos-enterprise-observability/src/lib.rs:25`).
-//!    Seed `inc("overflow", u64::MAX)` on a fresh registry and every
-//!    subsequent dropped series saturates against it: after 100 000 dropped
-//!    labels the drop counter still reads `u64::MAX`, exactly what it read
-//!    before the flood. Label-explosion detection — the entire point of the
-//!    fold — is dead, and the seeding call needs no privilege beyond reaching
-//!    any code path that names a metric.
-//!    → [`attacker_seeded_overflow_corrupts_the_overflow_accounting`]
+//! Each of these was pinned here as a defect. The scenario is unchanged; the
+//! assertion is inverted, and the test now guards the repair.
 //!
-//! 2. **Seeding `overflow` also silently changes the advertised cap.** With
-//!    the name pre-seeded the registry tops out at 4096 keys, not 4097, and
-//!    only 4095 attacker-visible series are ever admitted — the same code,
-//!    the same input, two different caps depending on whether an attacker
-//!    spoke first. Any monitor asserting `series() == MAX_SERIES + 1` is
-//!    asserting attacker-controlled state. This is not a contrived reach:
-//!    [`export_is_sorted_and_its_length_is_series`] tripped it by accident,
-//!    merely by listing `"overflow"` among a set of adversarial names, and had
-//!    to be corrected to the real (attacker-shifted) ceiling.
+//! 1. **The drop counter could be seeded, and at `u64::MAX` it was DEAD.**
+//!    The fold used to do `entry("overflow").or_default()`, landing on a
+//!    series an attacker could create first. It now lives out of band as a
+//!    struct field exported under `_dropped`, a name `is_valid_name` refuses,
+//!    so no caller can mint it, seed it or collide with it. Two counters, not
+//!    one: `_dropped` moves by **one per dropped call** whatever `by` was, so
+//!    it takes 2^64 calls to pin; `_dropped_events` carries the values and can
+//!    still saturate. The alarm survives the saturation of the accounting.
+//!    → [`the_drop_counters_cannot_be_seeded_or_disarmed`]
+//! 2. **The advertised cap moved depending on whether an attacker spoke
+//!    first** (4096 vs 4097 keys). There is no fold key any more: `series()`
+//!    is `MAX_SERIES` exactly, always.
+//! 3. **"A label explosion can never exhaust memory" was false** — the cap was
+//!    on cardinality, not bytes, so 4096 x 1 MiB names retained 4 GiB.
+//!    `MAX_NAME_BYTES = 128` makes the product `MAX_SERIES x MAX_NAME_BYTES`
+//!    an arithmetic fact: **524 288 B of names**, measured here at 784 256 B
+//!    retained including node overhead, with a 1 MiB name refused outright.
+//!    → [`the_cardinality_cap_is_now_a_memory_cap`]
+//! 4. **No metric-name validation whatsoever.** `inc("x 1\nccos_licence_valid
+//!    1", 1)` round-tripped verbatim — a forged series in Prometheus text
+//!    exposition the day the documented exporter is wired. Names are now
+//!    dot-separated `[a-z0-9_]` with a leading letter; every injection is
+//!    refused and counted in `_refused`. The same rule collapses the homoglyph
+//!    vector: six renderings of "e" that a human reads as one used to buy six
+//!    slots, and now buy one.
+//!    → [`adversarial_label_names_are_refused_and_counted`]
+//! 5. **`overflow == 0` did not mean "nothing was dropped".** A zero increment
+//!    on an unknown name took the fold path and *created* the bucket holding
+//!    0, so the obvious alerting rule reported health while the registry was
+//!    shedding series. `_dropped` counts calls, so a zero-valued drop moves it
+//!    by one; and it is always exported, so `_dropped == 0` is a statement
+//!    rather than an absence.
+//!    → [`the_cap_is_exact_and_a_zero_valued_drop_is_still_visible`]
 //!
-//! 3. **"A label explosion can never exhaust memory" is false: the cap is on
-//!    cardinality, not bytes.** `inc` stores `name.into()` verbatim with no
-//!    length limit, so 4096 names of 4 KiB retain a measured 17 041 152 B
-//!    behind a registry reporting 4097 series. At 1 MiB per name — accepted,
-//!    verified, stored and exported byte-for-byte — the same 4097-series
-//!    registry retains **4 294 967 296 B (4 GiB)**. The fold bounds the
-//!    series count and nothing else, and nothing can release it: there is no
-//!    removal, eviction or reset API.
-//!    → [`label_length_is_unbounded_so_the_cardinality_cap_is_not_a_memory_cap`]
+//! ## What is STILL BROKEN
 //!
-//! 4. **First writer wins, forever: a flooded registry permanently refuses
+//! 6. **First writer wins, forever: a flooded registry permanently refuses
 //!    every later legitimate series.** There is no eviction, no TTL, no
-//!    priority and no removal API. 4096 junk labels — free, since `inc(name, 0)`
-//!    creates a series — and `gateway.requests` can never be registered
-//!    again for the process lifetime: 1 000 000 subsequent increments leave
-//!    `get("gateway.requests") == 0`. The fold protects the heap by
-//!    discarding the operator's real telemetry.
+//!    priority and no removal API. 4096 junk labels — free, since
+//!    `inc(name, 0)` creates a series — and `gateway.requests` can never be
+//!    registered again for the process lifetime: 1 000 000 subsequent
+//!    increments leave `get("gateway.requests") == 0`. The bound protects the
+//!    heap by discarding the operator's real telemetry. What the repair bought
+//!    is only that the alarm now fires and cannot be switched off; whether a
+//!    metrics registry should be resettable is a design question this file
+//!    does not get to answer.
 //!    → [`a_flooded_registry_permanently_blocks_every_later_legitimate_series`]
-//!
-//! 5. **"Identical for identical histories" is order-dependent, so replicas
+//! 7. **"Identical for identical histories" is order-dependent, so replicas
 //!    diverge.** Two registries fed the *same multiset* of increments in
-//!    different orders agree on the grand total but disagree on 4096 of 4097
-//!    series names — they share exactly one key, `overflow` itself — because
-//!    which names win the 4096 slots is decided by arrival order alone. Two
-//!    replicas of the same service behind a load balancer
-//!    therefore export different metrics from the same traffic, and the
-//!    documented "audit diffing" use is unsound the moment a deployment
-//!    crosses `MAX_SERIES`.
+//!    different orders agree on the grand total and on all three gauges, and
+//!    disagree on **every one** of their 4096 series names — they now share
+//!    not one, the old fold key having been the only thing they had in common.
+//!    Which names win the 4096 slots is decided by arrival order alone, which
+//!    is inherent to a first-N cap and cannot be fixed without unbounded
+//!    memory. The `export()` doc no longer claims otherwise; it states the
+//!    limitation instead.
 //!    → [`identical_multisets_in_different_orders_produce_different_metrics`]
-//!
-//! 6. **No metric-name validation whatsoever — an exporter injection vector
-//!    is pre-loaded.** The registry accepts and re-exports verbatim names
-//!    containing `\n`, spaces, `{`, `}`, `"`, `\\` and interior NUL bytes.
-//!    `inc("x 1\nccos_licence_valid 1", 1)` round-trips intact, which is a
-//!    forged series in Prometheus text-exposition format the day the
-//!    documented exporter is wired at the gateway.
-//!    → [`adversarial_label_names_are_stored_and_exported_verbatim`]
-//!
-//! 7. **Saturation silently destroys counts and no signal survives it.** Once
-//!    any series pins at `u64::MAX` the registry's conservation property
-//!    (total exported == total incremented) fails with no error, no separate
-//!    saturation flag, and no way to distinguish "pinned" from "exactly
-//!    `u64::MAX`".
-//!    → [`counters_pin_at_u64_max_for_a_normal_series_and_for_overflow`]
-//!
-//! 8. **`overflow == 0` does not mean "nothing was dropped".** A zero
-//!    increment on an unknown name still takes the fold path, so on a
-//!    registry at exactly `MAX_SERIES` the bucket is *created holding 0*:
-//!    `series()` jumps to 4097, the series that triggered it is gone, and the
-//!    obvious alerting rule (`overflow > 0`) reports health. Combined with
-//!    (4), an attacker squats every slot with `inc(name, 0)` at literally zero
-//!    counted cost.
-//!    → [`fold_engages_exactly_at_the_four_thousand_and_ninety_seventh_series`]
-//!    and [`zero_valued_and_empty_labels_are_first_class_series`]
+//! 8. **Saturation silently destroys counts.** Once a series pins at
+//!    `u64::MAX` the conservation property fails with no error and no way to
+//!    distinguish "pinned" from "exactly `u64::MAX`". Unchanged for series;
+//!    for the drop accounting it is now survivable, see (1).
+//!    → [`counters_pin_at_u64_max_but_the_drop_alarm_keeps_counting`]
+//! 9. **Squatting is still free.** `inc(name, 0)` consumes a slot at zero
+//!    counted cost to the attacker, and `get` still cannot tell "absent" from
+//!    "present holding 0" — only `export()` can.
+//!    → [`zero_valued_increments_are_first_class_but_the_empty_name_is_not`]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
@@ -147,7 +139,7 @@ use ccos_enterprise_qpages::AdvancedQPageVariant;
 // ─────────────────────────────────────────────────────────────────────────
 // Measurement harness
 //
-// A counting allocator is the only honest answer to "does the fold actually
+// A counting allocator is the only honest answer to "does the cap actually
 // bound memory". It counts `Layout::size()`, so the numbers are
 // allocator-independent and identical in debug and release but for harness
 // noise. Every test takes `serialized()` so measurements are not polluted by
@@ -193,15 +185,27 @@ fn serialized() -> MutexGuard<'static, ()> {
 }
 
 const MAX: usize = CounterRegistry::MAX_SERIES;
+const NAME_MAX: usize = CounterRegistry::MAX_NAME_BYTES;
+const GAUGES: usize = CounterRegistry::GAUGES;
 const MIB: usize = 1024 * 1024;
 
-/// The one name the fold overloads.
-const FOLD: &str = "overflow";
+/// The three out-of-band gauge names, in the order `export()` emits them.
+const GAUGE_NAMES: [&str; GAUGES] = ["_dropped", "_dropped_events", "_refused"];
+
+/// The real series, with the gauges stripped.
+///
+/// `export()` always leads with the three gauges — they are not series, they
+/// are never absent, and no caller can create them — so every claim about
+/// *series* in this file goes through here. The gauges' presence and order are
+/// checked once, in [`export_leads_with_the_gauges_and_is_strictly_sorted`].
+fn series_rows(r: &CounterRegistry) -> Vec<(&str, u64)> {
+    r.export().into_iter().skip(GAUGES).collect()
+}
 
 /// Presence, not value. `get` returns 0 for both "absent" and "present with
 /// value 0", so every existence claim in this file goes through `export`.
 fn has_series(r: &CounterRegistry, name: &str) -> bool {
-    r.export().iter().any(|(n, _)| *n == name)
+    series_rows(r).iter().any(|(n, _)| *n == name)
 }
 
 /// Strictly increasing name order — proves sortedness *and* uniqueness in one
@@ -210,16 +214,18 @@ fn is_strictly_sorted(rows: &[(&str, u64)]) -> bool {
     rows.windows(2).all(|w| w[0].0 < w[1].0)
 }
 
-/// Grand total of every counter. Absent saturation this must equal the sum of
-/// every `by` ever passed to `inc`: the fold *relocates* counts, it does not
-/// discard them. `u128` so the invariant itself cannot overflow.
+/// Grand total of every *series* counter, gauges excluded. Absent saturation
+/// this plus `dropped_events()` must equal the sum of every `by` ever passed
+/// to `inc`: what does not fit in a slot is counted, not discarded. `u128` so
+/// the invariant itself cannot overflow.
 fn total(r: &CounterRegistry) -> u128 {
-    r.export().iter().map(|(_, v)| u128::from(*v)).sum()
+    series_rows(r).iter().map(|(_, v)| u128::from(*v)).sum()
 }
 
-/// An unambiguous byte encoding of a snapshot. 0xFE/0xFF never occur in
-/// UTF-8, so no series name can forge a record separator — comparing these
-/// byte strings is a strictly stronger claim than comparing the tuples.
+/// An unambiguous byte encoding of a snapshot, gauges included. 0xFE/0xFF
+/// never occur in UTF-8, so no series name can forge a record separator —
+/// comparing these byte strings is a strictly stronger claim than comparing
+/// the tuples.
 fn snapshot_bytes(r: &CounterRegistry) -> Vec<u8> {
     let mut out = Vec::new();
     for (name, value) in r.export() {
@@ -267,16 +273,17 @@ fn lcg(state: &mut u64) -> u64 {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// 5 000 000 increments across 1 000 000 distinct label values — the label
-/// explosion the fold exists to survive — measured against the same history
-/// replayed into an unfolded `BTreeMap`.
+/// explosion the cap exists to survive — measured against the same history
+/// replayed into an unbounded `BTreeMap`.
 ///
 /// The cap holds exactly, and the drop accounting is exact to the unit:
 /// 4096 names win slots (the first 4096 *distinct* names to arrive, i.e. the
 /// first 4096 of round 0), each collecting one increment per round, and
-/// everything else folds. Note what the fold costs the operator: the 4097th
+/// everything else is dropped. Note what that costs the operator: the 4097th
 /// name onward is not aggregated under a different key, it is **erased** —
 /// `get` on it returns 0 forever, indistinguishable from a label that was
-/// never seen.
+/// never seen. What the drop counters buy is that the *aggregate* is not lost
+/// and cannot be hidden.
 #[test]
 fn flood_five_million_increments_across_one_million_labels() {
     let _guard = serialized();
@@ -288,13 +295,13 @@ fn flood_five_million_increments_across_one_million_labels() {
     let started = Instant::now();
     let mut r = CounterRegistry::default();
     let mut buf = String::with_capacity(64);
-    // Heap high-water mark taken after a full round, long after the fold
-    // engaged (it engages at label 4096). If the fold holds, not one further
-    // byte is retained across the remaining 4 000 000 increments. Taken at a
-    // round boundary rather than early in round 0 so that libtest's own
-    // thread-spawn bookkeeping cannot land inside the measured window: every
-    // sibling test is parked on `TEST_LOCK` by then and none can complete, so
-    // this process allocates nothing but what `inc` allocates.
+    // Heap high-water mark taken after a full round, long after the cap was
+    // reached (it is reached at label 4096). If the bound holds, not one
+    // further byte is retained across the remaining 4 000 000 increments.
+    // Taken at a round boundary rather than early in round 0 so that libtest's
+    // own thread-spawn bookkeeping cannot land inside the measured window:
+    // every sibling test is parked on `TEST_LOCK` by then and none can
+    // complete, so this process allocates nothing but what `inc` allocates.
     let mut settled = 0usize;
     for round in 0..ROUNDS {
         if round == 1 {
@@ -309,7 +316,7 @@ fn flood_five_million_increments_across_one_million_labels() {
             // would still pass an end-state check.
             if i % 250_000 == 0 {
                 assert!(
-                    r.series() <= MAX + 1,
+                    r.series() <= MAX,
                     "series() exceeded the ceiling mid-flood at round {round}, label {i}"
                 );
             }
@@ -318,41 +325,48 @@ fn flood_five_million_increments_across_one_million_labels() {
     let retained = live_bytes().saturating_sub(before);
     let elapsed = started.elapsed();
 
-    // The fold holds *exactly*: zero net bytes retained across the last
-    // 4 000 000 increments and 1 000 000 distinct labels.
+    // The bound holds *exactly*: zero net bytes retained across the last
+    // 4 000 000 increments and 1 000 000 distinct labels. A dropped increment
+    // now allocates nothing at all — there is no bucket to create.
     assert_eq!(
         live_bytes(),
         settled,
-        "the registry allocated after the fold engaged — the bound leaks"
+        "the registry allocated after the cap was reached — the bound leaks"
     );
 
-    // The cap is exact, not approximate: MAX_SERIES real series plus the one
-    // key the fold creates for itself.
+    // The cap is exact, not approximate, and there is no `+ 1` for a fold key
+    // — which is what makes it independent of what an attacker named first.
     assert_eq!(
         r.series(),
-        MAX + 1,
-        "5M increments over 1M labels must leave exactly MAX_SERIES + 1 series"
+        MAX,
+        "5M increments over 1M labels must leave exactly MAX_SERIES series"
     );
-    assert!(
-        r.series() <= MAX + 1,
-        "the documented ceiling, restated as the product states it"
+    assert_eq!(
+        r.export().len(),
+        r.series() + GAUGES,
+        "export is the series plus the three gauges, always"
     );
-    assert_eq!(r.export().len(), r.series(), "export length tracks series");
 
-    // Exact drop accounting: 4096 admitted names x 5 rounds land, the rest
-    // fold. No estimate, no tolerance.
+    // Exact drop accounting: 4096 admitted names x 5 rounds land, the rest are
+    // dropped. No estimate, no tolerance.
     let admitted = MAX as u64 * ROUNDS as u64;
     let dropped = (LABELS * ROUNDS) as u64 - admitted;
     assert_eq!(dropped, 4_979_520);
     assert_eq!(
-        r.get(FOLD),
+        r.dropped(),
         dropped,
-        "every dropped increment is counted once in the fold bucket"
+        "every dropped call is counted once in _dropped"
     );
     assert_eq!(
-        total(&r),
+        r.dropped_events(),
+        dropped,
+        "and every unit it carried in _dropped_events (by == 1 here)"
+    );
+    assert_eq!(r.refused(), 0, "every name in this flood is well-formed");
+    assert_eq!(
+        total(&r) + u128::from(r.dropped_events()),
         u128::from((LABELS * ROUNDS) as u64),
-        "no increment is lost: the fold relocates counts, it does not drop them"
+        "no increment is lost: what does not fit a slot is counted"
     );
 
     // Which names won: the first MAX_SERIES distinct names, in arrival order.
@@ -363,40 +377,40 @@ fn flood_five_million_increments_across_one_million_labels() {
     assert!(!has_series(&r, "flood.tenant.acme.label.0004096.value"));
     assert!(!has_series(&r, "flood.tenant.acme.label.0999999.value"));
 
-    // Memory: bounded, and bounded *hard*. 4097 x (36-byte name + node slot).
+    // Memory: bounded, and bounded *hard*. 4096 x (36-byte name + node slot).
     assert!(
         retained < MIB,
-        "flooded registry retained {retained} B — the fold is supposed to \
+        "flooded registry retained {retained} B — the cap is supposed to \
          bound this to a few hundred KB"
     );
 
     // The counterfactual, measured rather than asserted from theory: the same
-    // 1M names with no fold at all.
-    let before_unfolded = live_bytes();
-    let mut unfolded: BTreeMap<String, u64> = BTreeMap::new();
+    // 1M names with no cap at all.
+    let before_unbounded = live_bytes();
+    let mut unbounded: BTreeMap<String, u64> = BTreeMap::new();
     let mut buf = String::with_capacity(64);
     for i in 0..LABELS {
         buf.clear();
         let _ = write!(buf, "flood.tenant.acme.label.{i:07}.value");
-        *unfolded.entry(buf.clone()).or_default() += ROUNDS as u64;
+        *unbounded.entry(buf.clone()).or_default() += ROUNDS as u64;
     }
-    let unfolded_retained = live_bytes().saturating_sub(before_unfolded);
-    assert_eq!(unfolded.len(), LABELS);
+    let unbounded_retained = live_bytes().saturating_sub(before_unbounded);
+    assert_eq!(unbounded.len(), LABELS);
     assert!(
-        unfolded_retained > 50 * retained,
-        "the fold must save at least an order of magnitude: folded {retained} B \
-         vs unfolded {unfolded_retained} B"
+        unbounded_retained > 50 * retained,
+        "the cap must save at least an order of magnitude: bounded {retained} B \
+         vs unbounded {unbounded_retained} B"
     );
-    drop(unfolded);
+    drop(unbounded);
 
     eprintln!(
-        "[flood] {}M increments / {}k labels in {elapsed:?}: series={} overflow={} \
-         retained={retained} B (unfolded equivalent {unfolded_retained} B, {:.0}x)",
+        "[flood] {}M increments / {}k labels in {elapsed:?}: series={} dropped={} \
+         retained={retained} B (unbounded equivalent {unbounded_retained} B, {:.0}x)",
         (LABELS * ROUNDS) / 1_000_000,
         LABELS / 1_000,
         r.series(),
-        r.get(FOLD),
-        unfolded_retained as f64 / retained as f64,
+        r.dropped(),
+        unbounded_retained as f64 / retained as f64,
     );
 }
 
@@ -405,84 +419,96 @@ fn flood_five_million_increments_across_one_million_labels() {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Fill to exactly 4095, 4096, 4097 and 4098 distinct names and assert where
-/// the fold engages.
+/// the cap engages — then check the corner that used to defeat the obvious
+/// alerting rule.
 ///
-/// The documented point: `MAX_SERIES` distinct names are admitted; the
-/// **4097th** distinct name is the first to fold. The registry's true key
-/// ceiling is therefore `MAX_SERIES + 1 = 4097`, because the fold bucket is
-/// itself a key — a subtlety the `MAX_SERIES` doc comment ("maximum distinct
-/// series kept") does not state, and which
-/// [`attacker_seeded_overflow_corrupts_the_overflow_accounting`] shows is not
-/// even stable.
+/// `MAX_SERIES` distinct names are admitted; the **4097th** is the first
+/// dropped, and dropping it creates no key, so `series()` is `MAX_SERIES` and
+/// stays there. The registry's key ceiling and its advertised cap are now the
+/// same number, which is what
+/// [`the_drop_counters_cannot_be_seeded_or_disarmed`] shows they were not.
+///
+/// **Repair of finding 5.** A *zero* increment on an unknown name is still a
+/// dropped series — the caller asked for a slot and did not get one — and it
+/// now moves `_dropped` by one while leaving `_dropped_events` at zero. The
+/// canonical `_dropped > 0` alert fires. Before the repair the fold bucket was
+/// created holding 0 and the same alert reported health.
 #[test]
-fn fold_engages_exactly_at_the_four_thousand_and_ninety_seventh_series() {
+fn the_cap_is_exact_and_a_zero_valued_drop_is_still_visible() {
     let _guard = serialized();
 
     let mut r = CounterRegistry::default();
 
-    // ── 4095: one short of the cap. Nothing folded, no fold key exists.
+    // ── 4095: one short of the cap. Nothing dropped.
     fill_distinct(&mut r, "k.", MAX - 1);
     assert_eq!(r.series(), 4095);
     assert_eq!(r.series(), MAX - 1);
-    assert!(!has_series(&r, FOLD), "no fold bucket before the cap");
-    assert_eq!(r.get(FOLD), 0);
+    assert_eq!(r.dropped(), 0, "nothing dropped before the cap");
 
     // ── 4096: the cap itself. The 4096th distinct name is ADMITTED — the
     //    guard is `len() >= MAX_SERIES` evaluated *before* the insert, and at
     //    that moment len() is 4095.
-    r.inc("k.the-4096th", 1);
+    r.inc("k.the_4096th", 1);
     assert_eq!(r.series(), 4096);
     assert_eq!(r.series(), MAX);
-    assert_eq!(r.get("k.the-4096th"), 1, "the 4096th name is a real series");
-    assert!(!has_series(&r, FOLD), "still nothing folded at exactly MAX");
+    assert_eq!(r.get("k.the_4096th"), 1, "the 4096th name is a real series");
+    assert_eq!(r.dropped(), 0, "still nothing dropped at exactly MAX");
     assert_eq!(total(&r), u128::from(MAX as u64));
 
-    // ── 4097: the first fold. The name is dropped; the bucket appears as the
-    //    4097th KEY, which is why the ceiling is MAX_SERIES + 1.
-    r.inc("k.the-4097th", 1);
-    assert_eq!(r.series(), 4097);
-    assert_eq!(r.series(), MAX + 1);
-    assert!(has_series(&r, FOLD), "the fold engaged at the 4097th name");
-    assert_eq!(r.get(FOLD), 1);
+    // ── 4097: the first drop. The name is erased and NO key appears — the
+    //    ceiling is MAX_SERIES, full stop.
+    r.inc("k.the_4097th", 1);
+    assert_eq!(r.series(), MAX, "the key count does not move");
+    assert_eq!(r.dropped(), 1);
+    assert_eq!(r.dropped_events(), 1);
     assert_eq!(
-        r.get("k.the-4097th"),
+        r.get("k.the_4097th"),
         0,
         "the 4097th distinct name is erased, not stored"
     );
-    assert!(!has_series(&r, "k.the-4097th"));
+    assert!(!has_series(&r, "k.the_4097th"));
 
     // ── 4098 and beyond: the key count never moves again.
-    r.inc("k.the-4098th", 7);
-    assert_eq!(r.series(), MAX + 1, "the ceiling is absolute");
-    assert_eq!(r.get(FOLD), 8);
+    r.inc("k.the_4098th", 7);
+    assert_eq!(r.series(), MAX, "the ceiling is absolute");
+    assert_eq!(r.dropped(), 2, "two calls dropped");
+    assert_eq!(r.dropped_events(), 8, "carrying 1 + 7 units between them");
 
-    // 50 000 more distinct names: still 4097 keys, and every increment is
-    // still accounted for in the bucket.
+    // 50 000 more distinct names: still 4096 keys, and every increment is
+    // still accounted for.
     fill_distinct(&mut r, "later.", 50_000);
-    assert_eq!(r.series(), MAX + 1);
-    assert_eq!(r.get(FOLD), 8 + 50_000);
+    assert_eq!(r.series(), MAX);
+    assert_eq!(r.dropped(), 2 + 50_000);
+    assert_eq!(r.dropped_events(), 8 + 50_000);
     assert_eq!(
-        total(&r),
+        total(&r) + u128::from(r.dropped_events()),
         u128::from(MAX as u64) + 1 + 7 + 50_000,
-        "conservation still holds after 50k folded names"
+        "conservation still holds after 50k dropped names"
     );
 
-    // A sharp corner an alerting rule will get wrong: on a registry at exactly
-    // MAX_SERIES, a *zero* increment on an unknown name still takes the fold
-    // path, so the bucket is CREATED holding 0. `series()` jumps to 4097 while
-    // `get("overflow")` reads 0 — the registry is saturated and losing series,
-    // and the canonical `overflow > 0` alert says everything is fine.
+    // The corner that used to defeat the alerting rule, now the other way
+    // round: on a registry at exactly MAX_SERIES, a *zero* increment on an
+    // unknown name moves `_dropped` even though it carries no events.
     let mut r = CounterRegistry::default();
     fill_distinct(&mut r, "z.", MAX);
     assert_eq!(r.series(), MAX);
-    assert!(!has_series(&r, FOLD));
-    r.inc("dropped-silently", 0);
-    assert_eq!(r.series(), MAX + 1, "the fold key exists...");
-    assert!(has_series(&r, FOLD));
-    assert_eq!(r.get(FOLD), 0, "...while reading zero");
-    assert!(
-        !has_series(&r, "dropped-silently"),
-        "and the series is gone"
+    assert_eq!(r.dropped(), 0);
+    r.inc("dropped_silently", 0);
+    assert_eq!(r.series(), MAX, "no key appears...");
+    assert_eq!(r.dropped(), 1, "...and the alarm fires anyway");
+    assert_eq!(
+        r.dropped_events(),
+        0,
+        "while the value-carrying counter correctly reads zero: nothing was \
+         counted, but a series WAS lost"
+    );
+    assert!(!has_series(&r, "dropped_silently"));
+    // `_dropped` is always exported, so "nothing was dropped" is a row an
+    // operator can read rather than an absence they have to infer.
+    assert_eq!(
+        CounterRegistry::default().export()[0],
+        ("_dropped", 0),
+        "a fresh registry states its zero rather than omitting it"
     );
 }
 
@@ -490,26 +516,23 @@ fn fold_engages_exactly_at_the_four_thousand_and_ninety_seventh_series() {
 /// label flood would take the *real* telemetry down with it.
 ///
 /// This one holds: the guard short-circuits on `contains_key`, so known
-/// series keep incrementing at full rate, and `series()` never moves. The
-/// fold bucket itself is a known series once created, so it too can be
-/// incremented directly — see
-/// [`attacker_seeded_overflow_corrupts_the_overflow_accounting`] for why that
-/// is not the harmless property it looks like.
+/// series keep incrementing at full rate, and `series()` never moves.
 #[test]
 fn a_full_registry_keeps_counting_the_series_it_already_knows() {
     let _guard = serialized();
 
     let mut r = CounterRegistry::default();
     fill_distinct(&mut r, "known.", MAX);
-    r.inc("push-it-over", 1); // creates the fold bucket
-    assert_eq!(r.series(), MAX + 1);
+    r.inc("push_it_over", 1); // dropped
+    assert_eq!(r.series(), MAX);
+    assert_eq!(r.dropped(), 1);
 
     let known_first = "known.0000000";
     let known_last = "known.0004095";
     assert_eq!(r.get(known_first), 1);
 
     // 100 000 increments on a known series, interleaved with 100 000 brand
-    // new names that all fold. The known series must absorb every one.
+    // new names that are all dropped. The known series must absorb every one.
     let mut buf = String::with_capacity(32);
     for i in 0..100_000usize {
         r.inc(known_first, 1);
@@ -525,34 +548,39 @@ fn a_full_registry_keeps_counting_the_series_it_already_knows() {
         "a full registry must keep counting a series it already knows"
     );
     assert_eq!(r.get(known_last), 200_001);
-    assert_eq!(r.get(FOLD), 1 + 100_000);
-    assert_eq!(r.series(), MAX + 1, "counting known series adds no keys");
+    assert_eq!(r.dropped(), 1 + 100_000);
+    assert_eq!(r.series(), MAX, "counting known series adds no keys");
 
     // Zero-valued increments on a known series are also fine, and — unlike on
-    // an unknown name — create nothing.
+    // an unknown name — neither create a series nor count as a drop.
     r.inc(known_first, 0);
     assert_eq!(r.get(known_first), 100_001);
-    assert_eq!(r.series(), MAX + 1);
+    assert_eq!(r.series(), MAX);
+    assert_eq!(r.dropped(), 1 + 100_000, "a known series is never a drop");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // 3. Saturation
 // ─────────────────────────────────────────────────────────────────────────
 
-/// `u64::MAX` then `+1` pins, for a normal series and for the fold bucket.
+/// `u64::MAX` then `+1` pins, for a series and for the value-carrying drop
+/// counter alike. That is the documented behaviour and it holds exactly.
 ///
-/// That is the documented behaviour and it holds exactly. The **defect** the
-/// test also pins: saturation is silent. There is no error, no saturation
-/// flag, no way to tell "pinned, counts are being destroyed" from "the true
-/// value happens to be u64::MAX", and the registry's conservation property
-/// (total exported == total incremented) fails from that moment on. For the
-/// fold bucket specifically this is fatal — see
-/// [`attacker_seeded_overflow_corrupts_the_overflow_accounting`].
+/// The **defect that remains**: saturation is silent. There is no error, no
+/// saturation flag, no way to tell "pinned, counts are being destroyed" from
+/// "the true value happens to be `u64::MAX`", and the conservation property
+/// fails from that moment on.
+///
+/// The **defect that does not**: saturating `_dropped_events` used to blind
+/// the operator completely, because it *was* the drop counter. `_dropped`
+/// counts calls, moving by exactly one however large `by` is, so an attacker
+/// cannot pin it with a single `u64::MAX` — it would take 2^64 calls. The
+/// alarm outlives the accounting.
 #[test]
-fn counters_pin_at_u64_max_for_a_normal_series_and_for_overflow() {
+fn counters_pin_at_u64_max_but_the_drop_alarm_keeps_counting() {
     let _guard = serialized();
 
-    // ── A normal series.
+    // ── A normal series: pins, and conservation breaks silently.
     let mut r = CounterRegistry::default();
     r.inc("hot", u64::MAX);
     assert_eq!(r.get("hot"), u64::MAX);
@@ -568,100 +596,121 @@ fn counters_pin_at_u64_max_for_a_normal_series_and_for_overflow() {
         "conservation BREAKS silently once a counter saturates"
     );
 
-    // ── The fold bucket, reached only through the fold path.
+    // ── The drop counters, reached only by overflowing the cap.
     let mut r = CounterRegistry::default();
     fill_distinct(&mut r, "s.", MAX);
     assert_eq!(r.series(), MAX);
-    assert!(!has_series(&r, FOLD));
+    assert_eq!(r.dropped(), 0);
 
-    r.inc("brand.new.a", u64::MAX); // folds; creates the bucket at u64::MAX
-    assert_eq!(r.series(), MAX + 1);
-    assert_eq!(r.get(FOLD), u64::MAX);
-    r.inc("brand.new.b", 1); // folds; saturates
-    assert_eq!(r.get(FOLD), u64::MAX, "the fold bucket pins too");
+    r.inc("brand.new.a", u64::MAX); // dropped, carrying u64::MAX events
+    assert_eq!(r.series(), MAX, "a drop still creates no key");
+    assert_eq!(r.dropped(), 1);
+    assert_eq!(r.dropped_events(), u64::MAX);
+    r.inc("brand.new.b", 1); // dropped; the value counter saturates
+    assert_eq!(r.dropped_events(), u64::MAX, "the event counter pins too");
+    assert_eq!(r.dropped(), 2, "but the call counter does not");
 
-    // And now the operator is blind: 100 000 further distinct labels are
-    // dropped and the drop counter does not move by a single unit.
-    let before_flood = r.get(FOLD);
+    // And now the operator is NOT blind: 100 000 further distinct labels are
+    // dropped, and although the event counter cannot move a unit, the alarm
+    // records every single one.
+    let events_before = r.dropped_events();
     fill_distinct(&mut r, "invisible.", 100_000);
     assert_eq!(
-        r.get(FOLD),
-        before_flood,
-        "100k dropped labels leave NO trace once the fold bucket saturates"
+        r.dropped_events(),
+        events_before,
+        "the pinned value counter cannot record them"
     );
-    assert_eq!(r.series(), MAX + 1);
+    assert_eq!(
+        r.dropped(),
+        2 + 100_000,
+        "100k dropped labels are still visible, one by one, in _dropped"
+    );
+    assert_eq!(r.series(), MAX);
+
+    // Pinning `_dropped` itself is not reachable: it moves by exactly one per
+    // call whatever the caller offers, so it takes 2^64 calls to saturate.
+    let mut r = CounterRegistry::default();
+    fill_distinct(&mut r, "s.", MAX);
+    let before = r.dropped();
+    r.inc("one.more", u64::MAX);
+    assert_eq!(
+        r.dropped(),
+        before + 1,
+        "a u64::MAX increment moves the alarm by one, not by u64::MAX"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // 4. export(): order, length, byte identity
 // ─────────────────────────────────────────────────────────────────────────
 
-/// `export()` is strictly sorted, its length is `series()`, and both hold
-/// with the nastiest names the type system allows in play.
+/// `export()` leads with the three gauges, is strictly sorted throughout, and
+/// its length is `series() + GAUGES`.
+///
+/// This is the one place the gauges' names and order are pinned; everything
+/// else in this file reads series through `series_rows`. The gauges sort first
+/// because `_` (0x5F) precedes every byte a valid name may start with — that
+/// is not a coincidence to be preserved by luck, so it is asserted.
 #[test]
-fn export_is_sorted_and_its_length_is_series() {
+fn export_leads_with_the_gauges_and_is_strictly_sorted() {
     let _guard = serialized();
 
     let mut r = CounterRegistry::default();
-    let nasty = [
-        "",
-        "\u{0}",
-        "a\u{0}b",
-        "\u{7f}",
-        "zzz",
-        "ZZZ",
-        FOLD,
-        "\u{5d0}\u{5d1}\u{5d2}", // Hebrew, RTL
-        "\u{e9}",                // é, NFC
-        "e\u{301}",              // é, NFD — a *different* series
-        "\u{1f600}",             // astral plane
-        "\u{200b}zero-width",    // invisible prefix
+    // Names chosen to sit either side of every interesting byte boundary that
+    // survives validation: `.` is 0x2E and `_` is 0x5F, so `a.b` sorts before
+    // `a_b`. An exporter that maps `.` to `_` before sorting would disagree
+    // with the registry about the order of its own rows.
+    for (i, name) in [
+        "zebra",
+        "a.b",
+        "a_b",
+        "a",
         "gateway.requests",
-        "gateway.requests\n",
-        " gateway.requests",
-    ];
-    for (i, name) in nasty.iter().enumerate() {
+        "gateway.requests_total",
+        "s0",
+        "s0.s0",
+    ]
+    .iter()
+    .enumerate()
+    {
         r.inc(name, i as u64 + 1);
     }
-    // Plus enough ordinary names to cross the cap while the nasty ones hold
-    // their slots.
+    // Plus enough ordinary names to reach the cap while the above hold slots.
     fill_distinct(&mut r, "pad.", MAX);
 
     let rows = r.export();
-    assert_eq!(rows.len(), r.series(), "export length == series");
+    assert_eq!(rows.len(), r.series() + GAUGES, "series plus three gauges");
+    assert_eq!(r.series(), MAX, "the cap, with no fold key added to it");
     assert!(
         is_strictly_sorted(&rows),
         "export must be strictly sorted by name"
     );
     assert_eq!(
-        rows[0].0, "",
-        "the empty name sorts first — and is a series"
+        rows[..GAUGES].iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        GAUGE_NAMES,
+        "the gauges lead, in this order"
     );
 
-    // NOTE, and this is not a contrivance: `nasty` contains the literal name
-    // `"overflow"`, so this registry caps at MAX_SERIES, not MAX_SERIES + 1.
-    // Merely *listing* the fold's key among a set of adversarial names —
-    // exactly what an unlucky product metric would do — moves the observable
-    // ceiling. See `attacker_seeded_overflow_corrupts_the_overflow_accounting`.
-    assert!(nasty.contains(&FOLD));
-    assert_eq!(
-        r.series(),
-        MAX,
-        "the fold key was already present, so it never becomes a 4097th key"
-    );
-
-    // Sorted means byte-lexicographic (BTreeMap<String>), which is codepoint
-    // order for UTF-8 — so uppercase precedes lowercase and astral names sort
-    // last. Pin it: an exporter that assumed case-insensitive or
-    // locale-collated order would be wrong.
+    // Byte-lexicographic, which is codepoint order for UTF-8. Pin the two
+    // orderings an exporter is most likely to get wrong.
     let names: Vec<&str> = rows.iter().map(|(n, _)| *n).collect();
-    let zzz = names.iter().position(|n| *n == "zzz").expect("zzz present");
-    let caps = names.iter().position(|n| *n == "ZZZ").expect("ZZZ present");
-    assert!(caps < zzz, "byte order: 'ZZZ' < 'zzz'");
+    let pos = |n: &str| names.iter().position(|x| *x == n);
+    assert!(
+        pos("a.b") < pos("a_b"),
+        "byte order: '.' (0x2E) < '_' (0x5F)"
+    );
+    assert!(
+        pos("gateway.requests") < pos("gateway.requests_total"),
+        "a prefix sorts before its extension"
+    );
+    assert!(
+        pos("_refused") < pos("a"),
+        "every gauge precedes every series name"
+    );
 }
 
 /// Byte-identical across repeated calls, and across two registries fed the
-/// same sequence in the same order — including once the fold has engaged.
+/// same sequence in the same order — including once the cap is reached.
 #[test]
 fn export_is_byte_identical_across_calls_and_across_registries() {
     let _guard = serialized();
@@ -697,8 +746,8 @@ fn export_is_byte_identical_across_calls_and_across_registries() {
     let first = snapshot_bytes(&a);
     for _ in 0..8 {
         assert_eq!(snapshot_bytes(&a), first, "export is a pure function");
-        assert_eq!(a.export().len(), a.series());
-        let _ = a.get(FOLD);
+        assert_eq!(a.export().len(), a.series() + GAUGES);
+        let _ = a.dropped();
     }
 
     // Push both past the cap with the same extra sequence and re-check.
@@ -708,32 +757,40 @@ fn export_is_byte_identical_across_calls_and_across_registries() {
         b.inc(&n, 1);
     }
     assert_eq!(a.series(), b.series());
+    assert_eq!(a.dropped(), b.dropped());
     assert_eq!(snapshot_bytes(&a), snapshot_bytes(&b));
-    assert!(a.series() <= MAX + 1);
+    assert_eq!(a.series(), MAX);
 
     // A golden digest, so "deterministic" is pinned to a value rather than to
     // a comparison between two things that could drift together. Stable in
     // debug and release, on any architecture: the input stream is a fixed-seed
     // LCG and the container is a `BTreeMap`, so there is no iteration entropy
-    // anywhere in the pipeline.
-    assert_eq!(a.series(), MAX + 1);
+    // anywhere in the pipeline. The gauges are inside the digest, so a change
+    // to the drop accounting trips this too.
     assert_eq!(
         fnv1a(&snapshot_bytes(&a)),
-        0x0c14_76e0_d7ef_5c2b,
+        0xc572_db9c_fa73_ad39,
         "the exported snapshot for this fixed history changed"
     );
 }
 
-/// **DEFECT.** The doc claims `export()` is "identical for identical
-/// histories". It is only identical for identical *orderings*: the same
-/// multiset of increments delivered in a different order produces a different
-/// snapshot, because arrival order alone decides which 4096 names win slots.
+/// **DEFECT (unfixable as designed).** The registry is deterministic for a
+/// given *order*, not for a given history: the same multiset of increments
+/// delivered in a different order produces a different snapshot, because
+/// arrival order alone decides which 4096 names win slots.
 ///
 /// Consequence in production: two replicas of the same service behind a load
 /// balancer see the same requests in different orders and export different
-/// series. The grand total agrees — the fold is conservative — but the
-/// per-series breakdown, which is the only part an operator or an audit diff
-/// actually reads, does not.
+/// series. Everything aggregate agrees — the grand total, and all three gauges
+/// — but the per-series breakdown, which is the only part an operator or an
+/// audit diff actually reads, does not.
+///
+/// This is inherent to a first-N cap and cannot be repaired without unbounded
+/// memory. The repair that *was* made is to stop claiming otherwise: the
+/// `export()` doc comment used to promise snapshots "identical for identical
+/// histories" and now states this limitation instead. The divergence also got
+/// starker — the two replicas used to share exactly one key, the fold bucket,
+/// and now share none at all.
 #[test]
 fn identical_multisets_in_different_orders_produce_different_metrics() {
     let _guard = serialized();
@@ -751,34 +808,49 @@ fn identical_multisets_in_different_orders_produce_different_metrics() {
         backward.inc(n, 3);
     }
 
-    // Identical multiset, identical increment values, identical total.
+    // Identical multiset, identical increment values, identical aggregates.
     assert_eq!(forward.series(), backward.series());
-    assert_eq!(forward.series(), MAX + 1);
+    assert_eq!(forward.series(), MAX);
     assert_eq!(
         total(&forward),
         total(&backward),
-        "the fold IS conservative: the grand total is order-independent"
+        "the aggregate IS order-independent"
     );
-    assert_eq!(total(&forward), (N as u128) * 3);
+    assert_eq!(total(&forward), (MAX as u128) * 3);
+    assert_eq!(forward.dropped(), backward.dropped());
+    assert_eq!(forward.dropped_events(), backward.dropped_events());
+    assert_eq!(forward.dropped(), (N - MAX) as u64);
+    assert_eq!(
+        total(&forward) + u128::from(forward.dropped_events()),
+        (N as u128) * 3,
+        "and conservation holds on both sides"
+    );
 
     // ...and yet the snapshots differ, catastrophically.
     assert_ne!(
         snapshot_bytes(&forward),
         snapshot_bytes(&backward),
-        "identical histories in different orders MUST have matched, per the \
-         export() doc comment — they do not"
+        "the same history in a different order produces a different snapshot"
     );
 
-    let fwd: Vec<&str> = forward.export().iter().map(|(n, _)| *n).collect();
-    let bwd: Vec<&str> = backward.export().iter().map(|(n, _)| *n).collect();
+    let fwd: Vec<&str> = series_rows(&forward).iter().map(|(n, _)| *n).collect();
+    let bwd: Vec<&str> = series_rows(&backward).iter().map(|(n, _)| *n).collect();
     let shared = fwd.iter().filter(|n| bwd.contains(n)).count();
     // Forward keeps order.0000000..0004095, backward keeps the top 4096
-    // names; the only key both hold is the fold bucket itself.
+    // names, and the sets are disjoint: 4096 + 4096 <= 12 000.
     assert_eq!(
-        shared, 1,
-        "the two replicas agree on exactly one series name: {FOLD:?}"
+        shared, 0,
+        "the two replicas agree on NOT ONE of their 4096 series names"
     );
-    assert!(fwd.contains(&FOLD) && bwd.contains(&FOLD));
+    assert_eq!(fwd.len(), MAX);
+    assert_eq!(bwd.len(), MAX);
+    // The gauges, by contrast, agree exactly — the divergence is entirely in
+    // which names survived, which is the part an operator reads.
+    assert_eq!(
+        forward.export()[..GAUGES],
+        backward.export()[..GAUGES],
+        "the aggregates agree while every series name disagrees"
+    );
     eprintln!(
         "[divergence] same multiset, reversed order: {}/{} series names differ",
         fwd.len() - shared,
@@ -791,12 +863,14 @@ fn identical_multisets_in_different_orders_produce_different_metrics() {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// `inc(name, 0)` CREATES a series, and `get` cannot tell "absent" from
-/// "present with value 0". Two consequences, both pinned here: slot squatting
-/// is free (see
-/// [`a_flooded_registry_permanently_blocks_every_later_legitimate_series`]),
-/// and the empty string is a perfectly ordinary, first-sorting metric name.
+/// "present with value 0". Both are unchanged, and both are still exploitable:
+/// slot squatting is free (see
+/// [`a_flooded_registry_permanently_blocks_every_later_legitimate_series`]).
+///
+/// What did change: the empty string is no longer a metric name. It used to be
+/// a perfectly ordinary, first-sorting series.
 #[test]
-fn zero_valued_and_empty_labels_are_first_class_series() {
+fn zero_valued_increments_are_first_class_but_the_empty_name_is_not() {
     let _guard = serialized();
 
     let mut r = CounterRegistry::default();
@@ -811,14 +885,18 @@ fn zero_valued_and_empty_labels_are_first_class_series() {
         "only export() can distinguish absent from zero"
     );
 
+    // The empty name is refused, and the refusal is counted rather than
+    // silent — an operator can see that something tried.
     r.inc("", 0);
-    assert_eq!(r.series(), 2, "the empty string is a valid metric name");
-    assert!(has_series(&r, ""));
+    assert_eq!(r.series(), 1, "the empty string is not a valid metric name");
+    assert!(!has_series(&r, ""));
+    assert_eq!(r.refused(), 1);
     r.inc("", 41);
-    assert_eq!(r.get(""), 41);
+    assert_eq!(r.get(""), 0);
+    assert_eq!(r.refused(), 2);
 
     // 4096 slots consumed with zero counted events — free from the attacker's
-    // side, permanent from the operator's.
+    // side, permanent from the operator's. STILL OPEN.
     let mut r = CounterRegistry::default();
     let mut buf = String::with_capacity(24);
     for i in 0..MAX {
@@ -828,98 +906,113 @@ fn zero_valued_and_empty_labels_are_first_class_series() {
     }
     assert_eq!(r.series(), MAX);
     assert_eq!(total(&r), 0, "4096 series holding zero events between them");
+    assert_eq!(r.dropped(), 0, "and not one of them counted as a drop");
 }
 
-/// **DEFECT.** "A label explosion can never exhaust memory" is false: the cap
-/// is on *cardinality*, not on bytes. `inc` stores `name.into()` verbatim with
-/// no length limit and no truncation, so the retained heap is
-/// `MAX_SERIES x (longest name an attacker can pass)`.
+/// **REPAIRED (finding 3).** "A label explosion can never exhaust memory" is
+/// now true, because the cap is on bytes as well as on cardinality.
 ///
-/// Measured here at 4 KiB per name (17.6 MB behind a registry reporting 4097
-/// series) and verified byte-for-byte at 1 MiB for a single name. The
-/// extrapolation the measurement licenses: **4096 x 1 MiB = 4 GiB of
-/// permanently retained heap**, in a component whose stated purpose is to make
-/// that impossible. Nothing in the API can release it — there is no removal,
-/// eviction or reset.
+/// `MAX_NAME_BYTES` bounds every name, so the retained heap is at most
+/// `MAX_SERIES x MAX_NAME_BYTES` plus `BTreeMap` node overhead — 512 KiB of
+/// names, measured below at well under 1 MiB in total. The 1 MiB name that
+/// used to be accepted, stored and exported byte-for-byte is refused and
+/// counted; the old projection of 4096 x 1 MiB = 4 GiB is now unreachable
+/// rather than merely undemonstrated.
 ///
-/// The test deliberately stops at 4 KiB: proving the vector does not require
-/// OOM-ing CI, and the arithmetic is linear and verified at both ends.
+/// There is still no removal, eviction or reset API, so the bound is a
+/// high-water mark that is never released — but it is now a bound.
 #[test]
-fn label_length_is_unbounded_so_the_cardinality_cap_is_not_a_memory_cap() {
+fn the_cardinality_cap_is_now_a_memory_cap() {
     let _guard = serialized();
 
-    // ── A single 1 MiB name: accepted, stored, counted, exported verbatim.
-    let huge = "M".repeat(MIB);
+    // ── A single 1 MiB name: refused, and nothing retained.
+    let huge = "m".repeat(MIB);
     let before_one = live_bytes();
     let mut r = CounterRegistry::default();
     r.inc(&huge, 7);
     let one_retained = live_bytes().saturating_sub(before_one);
-    assert_eq!(r.series(), 1);
-    assert_eq!(r.get(&huge), 7, "a 1 MiB metric name is a valid series");
-    let rows = r.export();
-    assert_eq!(rows[0].0.len(), MIB, "stored verbatim — no truncation");
-    assert_eq!(rows[0].0, huge);
+    assert_eq!(r.series(), 0, "a 1 MiB metric name is not a series");
+    assert_eq!(r.get(&huge), 0);
+    assert_eq!(r.refused(), 1, "and the attempt is counted");
     assert!(
-        one_retained >= MIB,
-        "one 1 MiB label retained {one_retained} B"
+        one_retained < 1024,
+        "a refused 1 MiB name retained {one_retained} B — it was stored"
     );
+    // The boundary is exact: MAX_NAME_BYTES is admitted, one byte more is not.
+    let at_limit = "m".repeat(NAME_MAX);
+    r.inc(&at_limit, 1);
+    assert_eq!(r.get(&at_limit), 1, "exactly MAX_NAME_BYTES is admitted");
+    r.inc(&format!("{at_limit}m"), 1);
+    assert_eq!(r.series(), 1, "one byte over is not");
+    assert_eq!(r.refused(), 2);
     drop(r);
 
-    // ── The cap does not bound this. 4096 names of 4 KiB, all admitted.
-    const NAME_BYTES: usize = 4096;
+    // ── The worst case the API allows: MAX_SERIES names, each MAX_NAME_BYTES
+    //    long. This is the product `MAX_SERIES x MAX_NAME_BYTES`, measured.
     let before = live_bytes();
     let mut r = CounterRegistry::default();
-    let mut buf = String::with_capacity(NAME_BYTES + 16);
+    let mut buf = String::with_capacity(NAME_MAX + 16);
     for i in 0..MAX {
         buf.clear();
-        let _ = write!(buf, "{i:07}.");
-        while buf.len() < NAME_BYTES {
-            buf.push('P');
+        let _ = write!(buf, "p{i:07}.");
+        while buf.len() < NAME_MAX {
+            buf.push('p');
         }
+        assert_eq!(buf.len(), NAME_MAX);
         r.inc(&buf, 1);
     }
     let retained = live_bytes().saturating_sub(before);
 
-    assert_eq!(r.series(), MAX, "the registry reports a modest 4096 series");
+    assert_eq!(r.series(), MAX, "every one of them fits");
     assert!(
-        retained >= MAX * NAME_BYTES,
-        "4096 x 4 KiB names retained {retained} B — the fold does not bound bytes"
-    );
-    // One more distinct name folds, so the *reported* cardinality is capped
-    // while the *bytes* already stored stay put forever.
-    r.inc(&"Q".repeat(NAME_BYTES), 1);
-    assert_eq!(r.series(), MAX + 1);
-    assert!(
-        live_bytes().saturating_sub(before) >= MAX * NAME_BYTES,
-        "nothing is ever released: there is no removal or eviction API"
+        retained < 2 * MAX * NAME_MAX,
+        "the worst case retained {retained} B; the bound is \
+         {MAX} x {NAME_MAX} = {} B of names plus node overhead",
+        MAX * NAME_MAX
     );
 
-    let projected_1mib = MAX as u64 * MIB as u64;
-    assert!(
-        projected_1mib > 4_000_000_000,
-        "projection: {MAX} series x 1 MiB names = {projected_1mib} B retained \
-         behind a registry that still reports {} series",
-        MAX + 1
+    // Nothing an attacker does from here can grow it: 50 000 more names, all
+    // at the length limit, retain not one further byte.
+    let settled = live_bytes();
+    for i in 0..50_000usize {
+        buf.clear();
+        let _ = write!(buf, "q{i:07}.");
+        while buf.len() < NAME_MAX {
+            buf.push('q');
+        }
+        r.inc(&buf, 1);
+    }
+    assert_eq!(
+        live_bytes(),
+        settled,
+        "a full registry allocates nothing at all for a dropped name"
     );
+    assert_eq!(r.series(), MAX);
+    assert_eq!(r.dropped(), 50_000);
+
     eprintln!(
-        "[bytes] {MAX} x {NAME_BYTES} B names => {retained} B retained at \
-         series()={}; same registry at 1 MiB names => {projected_1mib} B (~4 GiB)",
-        r.series()
+        "[bytes] worst case {MAX} x {NAME_MAX} B names => {retained} B retained \
+         at series()={}; the pre-repair equivalent at 1 MiB names was {} B (~4 GiB)",
+        r.series(),
+        MAX as u64 * MIB as u64
     );
 }
 
-/// No metric-name validation of any kind. Every byte sequence that is valid
-/// UTF-8 is a valid series name, and `export()` hands it back unchanged.
+/// **REPAIRED (finding 4).** Metric names are validated, so the exporter
+/// injection vector is closed at the registry rather than left for whoever
+/// wires Prometheus.
 ///
-/// **DEFECT (latent).** The module docs promise "exporters (Prometheus/OTel)
-/// are wired at the gateway in later milestones". Prometheus text exposition
-/// is newline- and space-delimited, so a name carrying `\n` or a space is a
-/// forged series the moment that exporter exists. The registry is the natural
-/// place to reject non-canonical names — the sibling
-/// `ccos_enterprise_gateway::classify` already rejects tool names with
-/// whitespace or control bytes for exactly this reason — and it does not.
+/// Prometheus text exposition is newline- and space-delimited, so a name
+/// carrying `\n` or a space is a forged series the moment that exporter
+/// exists. `inc("x 1\nccos_licence_valid 1", 1)` used to round-trip intact.
+/// Every injection below is now refused and counted in `_refused`, which is
+/// the signal an operator needs: a registry that silently discards hostile
+/// names tells nobody that something is probing it.
+///
+/// The same rule closes the homoglyph vector as a side effect: six renderings
+/// of "e" that a human reads as one used to buy six slots.
 #[test]
-fn adversarial_label_names_are_stored_and_exported_verbatim() {
+fn adversarial_label_names_are_refused_and_counted() {
     let _guard = serialized();
 
     let injections = [
@@ -932,39 +1025,67 @@ fn adversarial_label_names_are_stored_and_exported_verbatim() {
         "\u{feff}bom",
         "\u{202e}rtl-override",
         "\u{7}bell",
+        "",
+        "_dropped",
+        "_dropped_events",
+        "_refused",
+        "0leading",
+        "Upper.case",
+        "trailing.",
+        ".leading",
+        "double..dot",
+        "dashed-name",
+        "\u{1f600}",
     ];
 
     let mut r = CounterRegistry::default();
     for (i, name) in injections.iter().enumerate() {
         r.inc(name, i as u64 + 1);
     }
+    assert_eq!(r.series(), 0, "not one hostile name became a series");
     assert_eq!(
-        r.series(),
-        injections.len(),
-        "every hostile name was accepted as a distinct series"
+        r.refused(),
+        injections.len() as u64,
+        "every hostile name was refused, and every refusal counted"
     );
-
-    let rows = r.export();
-    for (i, name) in injections.iter().enumerate() {
-        assert_eq!(r.get(name), i as u64 + 1);
-        assert!(
-            rows.iter().any(|(n, v)| n == name && *v == i as u64 + 1),
-            "exported verbatim: {name:?}"
-        );
+    for name in &injections {
+        assert!(!has_series(&r, name), "{name:?} is exported as a series");
+        // `get` on a gauge name reads the gauge rather than a series, by
+        // design — `get` and `export` must never disagree about a name. So a
+        // caller who names `_refused` does get a number back; what they do
+        // NOT get is any influence over it (it counts their own refusal, by
+        // one, and nothing they passed).
+        if GAUGE_NAMES.contains(name) {
+            assert_eq!(
+                r.get(name),
+                r.export().iter().find(|(n, _)| n == name).unwrap().1
+            );
+        } else {
+            assert_eq!(r.get(name), 0, "{name:?} is readable");
+        }
     }
-    // The injection payload survives byte-for-byte, newline included.
-    let injected = rows
-        .iter()
-        .find(|(n, _)| n.contains('\n'))
-        .expect("newline-bearing name survived export");
-    assert!(injected.0.contains("\nccos_licence_valid 1"));
+    // The export carries the gauges and nothing else — in particular, not one
+    // byte of the injection payload.
+    let rows = r.export();
+    assert_eq!(rows.len(), GAUGES);
     assert!(is_strictly_sorted(&rows));
+    assert!(
+        !rows
+            .iter()
+            .any(|(n, _)| n.contains('\n') || n.contains(' ')),
+        "a name that would forge a Prometheus series survived export"
+    );
+    assert_eq!(rows[2], ("_refused", injections.len() as u64));
+    // The drop counters are untouched: a malformed name is refused, not
+    // dropped, and the two are counted separately so an operator can tell
+    // "something is probing me" from "I am out of slots".
+    assert_eq!(r.dropped(), 0);
+    assert_eq!(r.dropped_events(), 0);
 
-    // Unicode near-duplicates are distinct series, so a single visual label
-    // multiplies cardinality: 6 renderings of "e" that a human reads as one.
+    // Unicode near-duplicates: one visual label, one slot, five refusals.
     let mut r = CounterRegistry::default();
     for name in [
-        "e",        // LATIN SMALL LETTER E
+        "e",        // LATIN SMALL LETTER E — the only admissible one
         "\u{e9}",   // é NFC
         "e\u{301}", // é NFD
         "\u{435}",  // Cyrillic е (homoglyph)
@@ -975,124 +1096,161 @@ fn adversarial_label_names_are_stored_and_exported_verbatim() {
     }
     assert_eq!(
         r.series(),
-        6,
-        "no normalization and no homoglyph folding: one visual label, six slots"
+        1,
+        "only the ASCII rendering is a metric name now"
     );
+    assert_eq!(r.refused(), 5, "the other five are refused, and counted");
+    assert!(has_series(&r, "e"));
+
+    // Everything the product itself registers is still admissible — the rule
+    // is narrow, but not narrower than the caller it exists for.
+    let mut r = CounterRegistry::default();
+    for name in [
+        "gateway.requests",
+        "gateway.forwarded",
+        "gateway.refused",
+        "gateway.refused.variant_not_activated",
+        "gateway.replayed",
+        "audit.dropped",
+        "mcp.requests",
+    ] {
+        r.inc(name, 1);
+        assert!(
+            has_series(&r, name),
+            "{name} was refused by its own product"
+        );
+    }
+    assert_eq!(r.refused(), 0);
 }
 
-/// **THE ANSWER TO THE QUESTION.** Yes — an attacker who names a metric
-/// `overflow` before the registry fills corrupts the overflow accounting, and
-/// the worst case is total blindness.
+/// **REPAIRED (findings 1 and 2).** The drop accounting is out of band, so it
+/// cannot be seeded, cannot be disarmed, and does not move the advertised cap.
 ///
-/// `inc` has no notion of a reserved key
-/// (`crates/ccos-enterprise-observability/src/lib.rs:25`): the fold does
-/// `entry("overflow").or_default()`, which happily lands on a series an
-/// attacker created earlier. Three distinct consequences, all pinned below:
+/// The old fold did `entry("overflow").or_default()`, which happily landed on
+/// a series an attacker had created earlier. Three consequences followed, and
+/// all three are gone:
 ///
-/// * **(a) the advertised cap changes.** With `overflow` pre-seeded the
-///   registry tops out at 4096 keys, not 4097, and admits only 4095
-///   attacker-visible series. Same code, same input, different cap.
-/// * **(b) the drop counter is no longer a drop counter.** It reads
-///   `seed + drops`, and nothing records the seed, so the number an operator
-///   pages on is attacker-offset by an unknown amount.
-/// * **(c) with `u64::MAX` as the seed the drop counter is DEAD.** Every
-///   subsequent dropped series saturates against it. 100 000 dropped labels
-///   later the value is bit-identical to what it was before the flood: the
-///   only signal that a label explosion is happening has been switched off
-///   pre-emptively, with one increment, by anything that can name a metric.
+/// * **(a) the advertised cap changed.** `series()` is now `MAX_SERIES`
+///   whatever anyone named first — there is no fold key to be pre-empted.
+/// * **(b) the drop counter read `seed + drops`.** `_dropped` is a struct
+///   field; `inc` cannot reach it, because `is_valid_name` refuses a leading
+///   `_`.
+/// * **(c) seeding it at `u64::MAX` killed it.** Unreachable, and doubly so:
+///   even a genuine saturation of `_dropped_events` leaves `_dropped`
+///   counting (see
+///   [`counters_pin_at_u64_max_but_the_drop_alarm_keeps_counting`]).
+///
+/// What an attacker *can* still do is occupy a slot, exactly as any other name
+/// does — that is finding 6, and it is unchanged.
 #[test]
-fn attacker_seeded_overflow_corrupts_the_overflow_accounting() {
+fn the_drop_counters_cannot_be_seeded_or_disarmed() {
     let _guard = serialized();
 
-    // ── (a) + (b): seed the bucket, then fill.
+    // ── The direct attack: name the gauges.
     let mut r = CounterRegistry::default();
-    r.inc(FOLD, 1_000_000); // the attacker speaks first
-    assert_eq!(r.series(), 1);
-
-    fill_distinct(&mut r, "real.", MAX - 1); // 4095 genuine series
-    assert_eq!(r.series(), MAX, "the seed burned one of the 4096 slots");
-
-    // The next genuine series is refused, one series EARLIER than the
-    // unseeded registry would have refused it.
-    r.inc("real.would-have-fit", 1);
+    for gauge in GAUGE_NAMES {
+        r.inc(gauge, u64::MAX);
+    }
+    assert_eq!(r.series(), 0, "a gauge name cannot become a series");
+    assert_eq!(r.dropped(), 0, "and cannot be seeded");
+    assert_eq!(r.dropped_events(), 0);
     assert_eq!(
-        r.series(),
-        MAX,
-        "with 'overflow' pre-seeded the cap is MAX_SERIES, not MAX_SERIES + 1 \
-         — the observable ceiling is attacker-controlled"
-    );
-    assert!(
-        !has_series(&r, "real.would-have-fit"),
-        "and one fewer genuine series is admitted than the doc implies"
+        r.refused(),
+        GAUGES as u64,
+        "_refused counts the attempts, by one each — never by the u64::MAX \
+         that was offered"
     );
 
-    // The drop counter is now seed + drops, with no way to recover either.
-    fill_distinct(&mut r, "dropped.", 5_000);
+    // ── The old attack, replayed: seed the name the fold used to overload.
+    //    It is now an ordinary series with no special meaning whatsoever.
+    let mut seeded = CounterRegistry::default();
+    seeded.inc("overflow", 1_000_000);
+    assert_eq!(seeded.series(), 1);
     assert_eq!(
-        r.get(FOLD),
-        1_000_000 + 1 + 5_000,
-        "attacker-injected counts are indistinguishable from real drops"
+        seeded.dropped(),
+        0,
+        "naming it does not touch the accounting"
     );
 
-    // A clean registry given the identical genuine history reports a
-    // different cap and a different drop count. Side by side:
+    fill_distinct(&mut seeded, "real.", MAX - 1); // 4095 genuine series
+    assert_eq!(seeded.series(), MAX, "the ordinary series took one slot");
+    seeded.inc("real.would_have_fit", 1);
+    assert_eq!(seeded.series(), MAX, "the cap is MAX_SERIES, as advertised");
+    assert_eq!(seeded.dropped(), 1, "and the drop is counted, once");
+    fill_distinct(&mut seeded, "dropped.", 5_000);
+    assert_eq!(seeded.dropped(), 5_001);
+    assert_eq!(
+        seeded.get("overflow"),
+        1_000_000,
+        "the attacker's counts stay in the attacker's own series, where an \
+         operator can see them for what they are"
+    );
+
+    // A clean registry given the identical genuine history: the same cap, and
+    // a drop count that differs by exactly one — the single slot the extra
+    // series occupies, which is what ANY name would have cost. No amount of
+    // seeding shifts the ceiling or corrupts the count.
     let mut clean = CounterRegistry::default();
     fill_distinct(&mut clean, "real.", MAX - 1);
-    clean.inc("real.would-have-fit", 1);
+    clean.inc("real.would_have_fit", 1);
     fill_distinct(&mut clean, "dropped.", 5_000);
-    assert_eq!(clean.series(), MAX + 1);
-    assert_eq!(clean.get(FOLD), 5_000);
-    assert!(
-        has_series(&clean, "real.would-have-fit"),
-        "unseeded, the same genuine series IS admitted"
+    assert_eq!(clean.series(), MAX);
+    assert_eq!(clean.series(), seeded.series(), "the cap is not negotiable");
+    assert_eq!(clean.dropped(), 5_000);
+    assert_eq!(
+        seeded.dropped() - clean.dropped(),
+        1,
+        "one seeded name costs exactly one slot, and nothing else"
     );
-    assert_ne!(
-        r.series(),
-        clean.series(),
-        "one attacker increment changes the registry's advertised cardinality"
-    );
+    assert!(has_series(&clean, "real.would_have_fit"));
 
-    // ── (c) the kill shot: seed the bucket at u64::MAX.
+    // ── (c) the old kill shot, now inert: `u64::MAX` offered to the drop
+    //    accounting through every reachable path.
     let mut r = CounterRegistry::default();
-    r.inc(FOLD, u64::MAX);
+    r.inc("_dropped", u64::MAX);
+    r.inc("overflow", u64::MAX);
     fill_distinct(&mut r, "real.", MAX - 1);
     assert_eq!(r.series(), MAX);
+    assert_eq!(r.dropped(), 0, "nothing was dropped yet, and it says so");
 
-    let before_flood = r.get(FOLD);
-    assert_eq!(before_flood, u64::MAX);
     fill_distinct(&mut r, "explosion.", 100_000);
     assert_eq!(
-        r.get(FOLD),
-        before_flood,
-        "100 000 dropped labels move the drop counter by ZERO: the fold's own \
-         alarm was disarmed before the flood started"
+        r.dropped(),
+        100_000,
+        "100 000 dropped labels move the alarm by 100 000: it could not be \
+         disarmed in advance"
     );
-    assert_eq!(r.series(), MAX, "and the key count never twitches either");
+    assert_eq!(r.series(), MAX);
 
-    // Nor does any other observable move: the snapshot before and after a
-    // 100k-label explosion is byte-identical.
-    let after = snapshot_bytes(&r);
+    // And it is visible in the export, not merely in an accessor: the
+    // snapshot before and after a further explosion differs.
+    let before = snapshot_bytes(&r);
     fill_distinct(&mut r, "explosion2.", 100_000);
-    assert_eq!(
+    assert_ne!(
         snapshot_bytes(&r),
-        after,
-        "a 100k-label explosion is completely invisible in export()"
+        before,
+        "a 100k-label explosion must be visible in export()"
     );
+    assert_eq!(r.dropped(), 200_000);
 }
 
-/// **DEFECT.** First writer wins, permanently. A registry filled with junk
-/// refuses every later series — including the ones the product itself
-/// registers — and there is no eviction, no TTL, no priority list and no
-/// removal API to recover.
+/// **DEFECT, STILL OPEN.** First writer wins, permanently. A registry filled
+/// with junk refuses every later series — including the ones the product
+/// itself registers — and there is no eviction, no TTL, no priority list and
+/// no removal API to recover.
 ///
-/// This is the exhaustion vector that actually matters. The fold protects the
-/// heap, at the price of the operator's telemetry: an attacker who can reach
-/// any code path that names a metric (with `by = 0`, so at zero cost to
-/// themselves) permanently deletes `gateway.requests`, `gateway.forwarded`
-/// and every refusal counter from the process, and the only symptom is a
-/// counter named `overflow` climbing — the counter
-/// [`attacker_seeded_overflow_corrupts_the_overflow_accounting`] shows can be
-/// disarmed in advance.
+/// This is the exhaustion vector that actually matters, and the one the repair
+/// did *not* address. The bound protects the heap at the price of the
+/// operator's telemetry: an attacker who can reach any code path that names a
+/// metric (with `by = 0`, so at zero cost to themselves) permanently deletes
+/// `gateway.requests`, `gateway.forwarded` and every refusal counter from the
+/// process.
+///
+/// What the repair did buy is the symptom: `_dropped` climbs, cannot be
+/// seeded, cannot be saturated in practice, and is always exported. Before, the
+/// only symptom was a counter named `overflow` that
+/// [`the_drop_counters_cannot_be_seeded_or_disarmed`] shows could be disarmed
+/// in advance.
 #[test]
 fn a_flooded_registry_permanently_blocks_every_later_legitimate_series() {
     let _guard = serialized();
@@ -1123,7 +1281,7 @@ fn a_flooded_registry_permanently_blocks_every_later_legitimate_series() {
         );
         assert!(!has_series(&r, name));
     }
-    assert_eq!(r.get(FOLD), (legitimate.len() * 100) as u64);
+    assert_eq!(r.dropped(), (legitimate.len() * 100) as u64);
 
     // A million more legitimate increments do not earn a slot back.
     for _ in 0..1_000_000u32 {
@@ -1134,20 +1292,25 @@ fn a_flooded_registry_permanently_blocks_every_later_legitimate_series() {
         0,
         "1M increments, still no slot: there is no eviction and no priority"
     );
-    assert_eq!(r.series(), MAX + 1);
+    assert_eq!(r.series(), MAX);
 
     // And the attacker's junk is immortal — every one of the 4096 squatted
     // names is still there, still readable, with no API to remove it.
     assert_eq!(r.get("attacker.0000000"), 1);
     assert_eq!(r.get("attacker.0004095"), 1);
     assert_eq!(
-        r.export()
+        series_rows(&r)
             .iter()
             .filter(|(n, _)| n.starts_with("attacker."))
             .count(),
         MAX,
         "4096 attacker-owned series retained for the process lifetime"
     );
+
+    // The alarm is loud, at least, and stays loud: 1 000 500 dropped calls,
+    // every one counted, in a counter nothing in the API can reset.
+    assert_eq!(r.dropped(), 500 + 1_000_000);
+    assert_eq!(r.refused(), 0, "the junk names were all well-formed");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1161,13 +1324,15 @@ fn a_flooded_registry_permanently_blocks_every_later_legitimate_series() {
 /// refusals go through `tag()`, which returns a `&'static str` from a closed
 /// set of eleven. 3 000 hostile calls — 1 MiB tool names, unicode tenants,
 /// attacker-chosen actors and request ids, every refusal class — produce
-/// exactly 14 series, never `overflow`, and `requests == forwarded + refused`
-/// holds throughout.
+/// exactly 14 series plus the registry's three gauges, and `requests ==
+/// forwarded + refused` holds throughout.
 ///
 /// It is the *only* thing standing between the registry and the flood proven
 /// above, and nothing enforces it but this assertion: `admit` builds its
 /// refusal label with `format!`, so one future `format!("...{}", req.tool)`
-/// hands the whole vector to the attacker.
+/// hands the whole vector to the attacker. The gauges are the second line of
+/// defence and they are asserted at zero: if caller text ever did reach a
+/// metric name, `_refused` would move even before the cardinality did.
 #[test]
 fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
     let _guard = serialized();
@@ -1349,21 +1514,19 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
 
     let m = d.metrics();
     let names: Vec<&str> = m.iter().map(|(n, _)| n.as_str()).collect();
+    let val = |k: &str| m.iter().find(|(n, _)| n == k).map(|(_, v)| *v).unwrap_or(0);
 
     assert!(
-        names.len() <= 14,
+        names.len() <= 14 + GAUGES,
         "the composed path must stay at fixed cardinality; got {names:?}"
-    );
-    assert!(
-        !names.contains(&"overflow"),
-        "the composed path must never reach MAX_SERIES: {names:?}"
     );
     for n in &names {
         assert!(
             *n == "gateway.requests"
                 || *n == "gateway.forwarded"
                 || *n == "gateway.refused"
-                || n.starts_with("gateway.refused."),
+                || n.starts_with("gateway.refused.")
+                || GAUGE_NAMES.contains(n),
             "unexpected metric name {n:?} — caller text reached a metric label"
         );
         assert!(
@@ -1373,7 +1536,17 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
     }
     assert!(m.windows(2).all(|w| w[0].0 < w[1].0), "metrics are sorted");
 
-    let val = |k: &str| m.iter().find(|(n, _)| n == k).map(|(_, v)| *v).unwrap_or(0);
+    // The second line of defence, at zero: the registry was never asked to
+    // refuse a name and never ran out of slots. A future `format!` leaking a
+    // tool name would move `_refused` long before it moved the cardinality.
+    for gauge in GAUGE_NAMES {
+        assert_eq!(
+            val(gauge),
+            0,
+            "{gauge} moved: caller text reached the registry"
+        );
+    }
+
     let calls = (CALLS + 3 * HUGE_CALLS_EACH) as u64;
     assert_eq!(val("gateway.requests"), calls);
     assert_eq!(
@@ -1394,8 +1567,8 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
     assert_eq!(d.audit().count(), calls as usize);
 
     // All eleven refusal tags plus requests/forwarded/refused: the closed set
-    // is fully exercised, so `names.len() == 14` is this design's *saturated*
-    // cardinality and not an artefact of thin coverage.
+    // is fully exercised, so `names.len() == 14 + GAUGES` is this design's
+    // *saturated* cardinality and not an artefact of thin coverage.
     let tags: Vec<&str> = names
         .iter()
         .filter_map(|n| n.strip_prefix("gateway.refused."))
@@ -1419,11 +1592,12 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
     );
     assert_eq!(
         names.len(),
-        14,
-        "the composed path's metric cardinality is exactly 14, saturated"
+        14 + GAUGES,
+        "the composed path's metric cardinality is exactly 14, saturated, \
+         plus the registry's three gauges"
     );
     eprintln!(
-        "[composed] {calls} hostile calls => {} series: {names:?}",
+        "[composed] {calls} hostile calls => {} rows: {names:?}",
         names.len()
     );
 }

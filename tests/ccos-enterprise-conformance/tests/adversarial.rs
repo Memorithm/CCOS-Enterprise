@@ -744,30 +744,30 @@ fn sensitive_admin_acts_need_a_real_justification() {
     assert!(validate(&anonymous).is_err());
 }
 
-/// A hostile client cannot blow up the metrics registry: unbounded label
-/// cardinality folds into `overflow` rather than exhausting memory, and the
-/// export stays ordered and readable.
+/// A hostile client cannot blow up the metrics registry: cardinality is capped
+/// exactly, the excess is counted out of band rather than lost, and the export
+/// stays ordered and readable.
 #[test]
 fn metric_label_explosion_stays_bounded_and_ordered() {
     let mut r = CounterRegistry::default();
     for i in 0..CounterRegistry::MAX_SERIES + 5_000 {
         r.inc(&format!("attacker.series.{i}"), 1);
     }
-    assert!(
-        r.series() <= CounterRegistry::MAX_SERIES + 1,
-        "series count stays bounded"
+    assert_eq!(
+        r.series(),
+        CounterRegistry::MAX_SERIES,
+        "the cap is exact, not approximate"
     );
-    assert!(
-        r.get("overflow") >= 5_000,
-        "the excess is accounted, not lost"
-    );
+    assert_eq!(r.dropped(), 5_000, "the excess is accounted, not lost");
+    assert_eq!(r.dropped_events(), 5_000);
+    assert_eq!(r.refused(), 0, "these names were all well-formed");
 
     let export = r.export();
     let names: Vec<&str> = export.iter().map(|(n, _)| *n).collect();
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(names, sorted, "export order is deterministic");
-    assert_eq!(export.len(), r.series());
+    assert_eq!(export.len(), r.series() + CounterRegistry::GAUGES);
 }
 
 /// A tenant deleted from the deployment stops being reachable immediately —

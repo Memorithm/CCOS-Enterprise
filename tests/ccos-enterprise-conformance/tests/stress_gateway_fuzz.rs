@@ -1601,8 +1601,9 @@ fn a_refused_request_retains_a_bounded_number_of_attacker_bytes() {
     // Nor does the metric registry: refusal labels are low-cardinality (HELD).
     // `audit.dropped` is a fixed series name, not one per dropped record.
     assert!(
-        d.metrics().len() <= 8,
-        "metric cardinality stays bounded under name flooding: {:?}",
+        d.metrics().len() <= 8 + 3,
+        "metric cardinality stays bounded under name flooding (the three \
+         `_`-prefixed rows are the registry's own gauges): {:?}",
         d.metrics()
     );
 }
@@ -1631,12 +1632,19 @@ fn hostile_tool_names_cannot_explode_metric_cardinality() {
     }
     let metrics = d.metrics();
     assert!(
-        metrics.len() <= 8,
+        metrics.len() <= 8 + 3,
         "3000 hostile names produced {} series: {metrics:?}",
         metrics.len()
     );
-    assert!(metrics.iter().all(|(k, _)| k.starts_with("gateway.")));
+    assert!(metrics
+        .iter()
+        .all(|(k, _)| k.starts_with("gateway.") || k.starts_with('_')));
     assert!(metrics.iter().all(|(k, _)| k.is_ascii() && k.len() < 64));
+    // Not one of the 3000 generated names reached the registry, so it was
+    // never asked to refuse a malformed one either.
+    let gauge = |n: &str| metrics.iter().find(|(k, _)| k == n).map(|(_, v)| *v);
+    assert_eq!(gauge("_refused"), Some(0), "a tool name reached a metric");
+    assert_eq!(gauge("_dropped"), Some(0));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1890,7 +1898,7 @@ fn hostile_identifiers_never_traverse_the_composed_path() {
     // become 6 000 metric series.
     let metrics = d.metrics();
     assert!(
-        metrics.len() <= 12,
+        metrics.len() <= 12 + 3,
         "hostile identifiers produced {} series: {metrics:?}",
         metrics.len()
     );

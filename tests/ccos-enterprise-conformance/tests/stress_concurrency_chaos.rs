@@ -1098,11 +1098,16 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     assert_eq!(tag_total, m("gateway.refused"), "the tags sum to the total");
     assert_eq!(
         metrics.len(),
-        3 + 12,
-        "requests/forwarded/refused plus one series per refusal kind, and \
-         nothing attacker-shaped: {:?}",
+        3 + 12 + CounterRegistry::GAUGES,
+        "requests/forwarded/refused plus one series per refusal kind plus the \
+         registry's own gauges, and nothing attacker-shaped: {:?}",
         metrics.keys().collect::<Vec<_>>()
     );
+    // The gauges read zero throughout: 32 threads of hostile traffic never
+    // pushed the registry to its cap and never offered it a malformed name.
+    for gauge in ["_dropped", "_dropped_events", "_refused"] {
+        assert_eq!(m(gauge), 0, "{gauge} moved under the storm");
+    }
     // Every request id in the storm is distinct, so replay suppression must
     // never have fired: if it had, a forwarded call would have been journaled
     // with `cost: 0` and the ledger reconciliation above would be reading a
@@ -1919,8 +1924,11 @@ fn a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explai
     let metrics = d.metrics();
     let names: Vec<&String> = metrics.iter().map(|(k, _)| k).collect();
     assert!(
-        metrics.iter().all(|(k, _)| k.starts_with("gateway.")),
-        "no counter tracks policy mutation either: {names:?}"
+        metrics
+            .iter()
+            .all(|(k, _)| k.starts_with("gateway.") || k.starts_with('_')),
+        "no counter tracks policy mutation either — only the gateway's own \
+         series and the registry's gauges are here: {names:?}"
     );
 }
 
@@ -2053,7 +2061,9 @@ fn one_panic_under_the_global_lock_denies_service_to_every_tenant() {
     );
     assert_eq!(g.audit().count(), 1);
     assert!(
-        g.metrics().iter().all(|(k, _)| k.starts_with("gateway.")),
+        g.metrics()
+            .iter()
+            .all(|(k, _)| k.starts_with("gateway.") || k.starts_with('_')),
         "DEFECT: nothing in the journal or the metrics records the incident"
     );
 }

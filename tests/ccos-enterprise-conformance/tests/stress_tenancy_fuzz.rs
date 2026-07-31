@@ -1152,8 +1152,11 @@ fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
         "DEFECT: a cross-tenant read is journaled nowhere"
     );
     assert!(
-        d.metrics().is_empty(),
-        "DEFECT: not even a counter moves for tenant memory traffic"
+        d.metrics()
+            .iter()
+            .all(|(k, v)| k.starts_with('_') && *v == 0),
+        "DEFECT: not even a counter moves for tenant memory traffic — the \
+         registry's own gauges are the only rows, and all read zero"
     );
 
     // A separate deployment, so the emptiness asserted above stays exactly

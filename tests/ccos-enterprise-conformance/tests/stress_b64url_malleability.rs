@@ -49,10 +49,32 @@
 //!   all of which the core verifier accepts, and which produce **16 distinct
 //!   `vendor::token_sha256` digests** — the exact value
 //!   `RevocationEntry::token_sha256` revokes on. Revoking a token by digest
-//!   is defeated by editing one character. Pinned by
-//!   [`a_license_token_has_sixteen_wire_spellings_and_sixteen_distinct_digests`];
-//!   the enterprise decoder refusing 15 of the 16 is pinned in the same test,
-//!   which is what makes the divergence provable from inside this crate.
+//!   is defeated by editing one character.
+//!
+//!   Measured against `ccos_core::license::Ed25519Verifier` directly (that
+//!   crate is not a dependency of this test package, so the probe was run
+//!   out-of-tree): of the 16 spellings of one machine-bound token, **16/16
+//!   verify as the same valid license** (`licensee: "acme"`, same bound
+//!   fingerprint), **1/16** is accepted by this crate's decoder, and the 16
+//!   produce **16 distinct `token_sha256` values**. Trailing `"\n"`, `" "`,
+//!   U+00A0, U+3000 and U+2028 were accepted by the core verifier as well
+//!   (5/5), so the spelling count is not 16 but unbounded.
+//!
+//!   Source-level, not exercised here (the `license-pq` feature is not
+//!   compiled into this workspace): the SLH-DSA verifier at
+//!   `CCOS-Core/src/license.rs:490-520` decodes its signature segment with the
+//!   *same* lax function (`license.rs:504`). An SLH-DSA-SHAKE-128s signature
+//!   is 7 856 bytes and 7 856 % 3 == 2, so that segment ends in a three-symbol
+//!   group with 2 free bits — 4 spellings per token rather than 16. The
+//!   post-quantum format inherits the defect; it does not escape it.
+//!
+//!   Pinned by
+//!   [`a_license_token_has_sixteen_wire_spellings_and_sixteen_distinct_digests`],
+//!   which asserts every half of this that is reachable from inside this
+//!   package: the 16 spellings denote bit-identical signature bytes, those
+//!   bytes are a genuinely valid ed25519 signature, the digests are 16
+//!   distinct values, and this crate's decoder refuses 15 of the 16 — the
+//!   refusal being the divergence itself.
 //!
 //! * **B64-2 (medium) — the envelopes above the canonical codec are not
 //!   canonical.** `release::verify_manifest_with` (`release.rs:78`) and
@@ -80,6 +102,24 @@
 //!   it. Pinned by
 //!   [`an_unbounded_manifest_signature_segment_is_fully_decoded_before_it_is_length_checked`].
 //!
+//! * **B64-4 (low) — the manifest is validated in one of its five fields, and
+//!   is the only one of the three artifacts without `deny_unknown_fields`.**
+//!   Once the signature checks out, `verify_manifest_with` inspects `sha256`
+//!   (`release.rs:100-104`) and nothing else: `tier: "PRO"`, `url: ""` or
+//!   `file:///etc/shadow`, `version: "../../etc"` and
+//!   `released_unix: u64::MAX` all verify and are handed to `ccos update` as a
+//!   legitimate release. And `ReleaseManifest` (`release.rs:33-47`) carries no
+//!   `#[serde(deny_unknown_fields)]`, while `RevocationList` and
+//!   `RevocationEntry` both do (`vendor.rs:166`, `vendor.rs:178`) — measured,
+//!   not assumed: a signed manifest with `min_client` and `requires_reboot`
+//!   verifies to a `ReleaseManifest` byte-identical to one without them, so a
+//!   field added tomorrow to gate an install is silently *dropped* by today's
+//!   verifier rather than refusing it. Every one of these needs the vendor
+//!   key, so it is blast radius rather than bypass — but the artifact that
+//!   triggers a download-and-install is the loosely validated one, and the
+//!   artifact that only revokes is the strict one. Pinned by
+//!   [`a_signed_manifest_is_validated_in_exactly_one_of_its_five_fields`].
+//!
 //! Everything asserted below is the product's **current, real** behaviour.
 //! Where that behaviour is a defect the assertion pins the defect and the
 //! comment names it, so a repair fails loudly here instead of silently
@@ -97,7 +137,7 @@ use ccos_enterprise_governance::vendor::{
     self, RevocationEntry, RevocationList, RevocationReason, MAX_REVOCATION_LIST_BYTES,
     REVOCATION_LIST_VERSION,
 };
-use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 // ── fixtures ──────────────────────────────────────────────────────────────
 
@@ -972,6 +1012,137 @@ fn to_sig(b64: &str) -> [u8; 64] {
         .expect("64 bytes")
 }
 
+/// Sign an arbitrary JSON body into a manifest envelope — the vendor's own
+/// capability, so this is what a *signed* manifest is allowed to say.
+fn sign_manifest_payload(json: &str) -> String {
+    let input = format!("{MANIFEST_TAG}.{}", b64url::encode(json.as_bytes()));
+    let sig = SigningKey::from_bytes(&SEED).sign(input.as_bytes());
+    format!("{input}.{}", b64url::encode(&sig.to_bytes()))
+}
+
+/// What the manifest verifier actually validates, once the signature is good.
+///
+/// `verify_manifest_with` checks the shape of exactly one of the five fields
+/// (`sha256`, `release.rs:100-104`). Everything else is taken verbatim, and
+/// `ReleaseManifest` (`release.rs:33-47`) carries no
+/// `#[serde(deny_unknown_fields)]` — unlike `RevocationList` and
+/// `RevocationEntry`, which both do (`vendor.rs:166`, `vendor.rs:178`). This
+/// test pins the current, real boundary of that validation.
+///
+/// It is not a signature bypass — everything here needs the vendor key — but
+/// it is the blast radius of a signing pipeline that templates a field, and
+/// the asymmetry with the revocation list is a defect of consistency: the
+/// artifact that triggers a **download and install** is the loosely validated
+/// one.
+#[test]
+fn a_signed_manifest_is_validated_in_exactly_one_of_its_five_fields() {
+    let pk = public_key();
+    let sha = "3b".repeat(32);
+
+    // The one field that is checked: a bad sha256 is refused even signed.
+    for bad in ["", "zz", &"A".repeat(64), &"3b".repeat(31)] {
+        let line = sign_manifest_payload(&format!(
+            r#"{{"version":"0.5.0","released_unix":1,"sha256":"{bad}","url":"u","tier":"pro"}}"#
+        ));
+        assert!(
+            release::verify_manifest_with(&pk, &line).is_err(),
+            "sha256 {bad:?} must be refused"
+        );
+    }
+
+    // The four that are not. Each of these verifies and is handed straight to
+    // the caller (`ccos update`) as a legitimate release description.
+    for (field, body) in [
+        (
+            "empty version",
+            format!(r#""version":"","released_unix":0,"sha256":"{sha}","url":"u","tier":"pro""#),
+        ),
+        (
+            "non-numeric version",
+            format!(
+                r#""version":"../../etc","released_unix":0,"sha256":"{sha}","url":"u","tier":"pro""#
+            ),
+        ),
+        (
+            "unknown tier",
+            format!(r#""version":"1.0","released_unix":0,"sha256":"{sha}","url":"u","tier":"PRO""#),
+        ),
+        (
+            "empty tier",
+            format!(r#""version":"1.0","released_unix":0,"sha256":"{sha}","url":"u","tier":"""#),
+        ),
+        (
+            "file:// url",
+            format!(
+                r#""version":"1.0","released_unix":0,"sha256":"{sha}","url":"file:///etc/shadow","tier":"community""#
+            ),
+        ),
+        (
+            "empty url",
+            format!(
+                r#""version":"1.0","released_unix":0,"sha256":"{sha}","url":"","tier":"community""#
+            ),
+        ),
+        (
+            "far-future date",
+            format!(
+                r#""version":"1.0","released_unix":18446744073709551615,"sha256":"{sha}","url":"u","tier":"pro""#
+            ),
+        ),
+    ] {
+        let line = sign_manifest_payload(&format!("{{{body}}}"));
+        let m = release::verify_manifest_with(&pk, &line)
+            .unwrap_or_else(|e| panic!("{field} was expected to verify, got: {e}"));
+        assert_eq!(m.sha256, sha);
+    }
+
+    // `tier: "PRO"` is not `"pro"`, so a caller doing the documented
+    // `tier == "pro"` license gate treats it as community — i.e. the licence
+    // requirement is dropped, not tightened. Pinned as current behaviour.
+    let line = sign_manifest_payload(&format!(
+        r#"{{"version":"1.0","released_unix":0,"sha256":"{sha}","url":"u","tier":"PRO"}}"#
+    ));
+    let m = release::verify_manifest_with(&pk, &line).expect("verifies");
+    assert_ne!(
+        m.tier, "pro",
+        "the tier string is passed through uninspected"
+    );
+
+    // Unknown fields are silently dropped (no `deny_unknown_fields`), so many
+    // distinct signed payloads verify to one identical `ReleaseManifest`.
+    let plain = sign_manifest_payload(&format!(
+        r#"{{"version":"1.0","released_unix":0,"sha256":"{sha}","url":"u","tier":"pro"}}"#
+    ));
+    let extended = sign_manifest_payload(&format!(
+        r#"{{"version":"1.0","released_unix":0,"sha256":"{sha}","url":"u","tier":"pro","min_client":"9.9.9","requires_reboot":true}}"#
+    ));
+    assert_ne!(plain, extended, "two different signed lines");
+    assert_eq!(
+        release::verify_manifest_with(&pk, &plain).expect("verifies"),
+        release::verify_manifest_with(&pk, &extended).expect("verifies"),
+        "an unknown field in a signed manifest is dropped without a word — a \
+         future `min_client`/`requires_reboot` gate is invisible to today's \
+         verifier instead of refusing to install"
+    );
+
+    // The revocation list, by contrast, refuses the same trick outright.
+    let signed = vendor::sign_revocation_list_ed25519(&SEED, &revocation_list(0)).expect("signs");
+    let parts: Vec<&str> = signed.split('.').collect();
+    let mut json: Vec<u8> = b64url::decode(parts[3]).expect("own output");
+    let extra = br#""surprise":1,"#;
+    json.splice(1..1, extra.iter().copied());
+    let payload_b64 = b64url::encode(&json);
+    let input = format!("{}.{}.{}.{}", parts[0], parts[1], parts[2], payload_b64);
+    let sig = SigningKey::from_bytes(&SEED).sign(input.as_bytes());
+    let forged = format!("{input}.{}", b64url::encode(&sig.to_bytes()));
+    let err = vendor::verify_revocation_list_with(&pk, forged.as_bytes(), NOW)
+        .expect_err("deny_unknown_fields must bite");
+    assert!(
+        err.to_string().contains("unknown field"),
+        "expected a deny_unknown_fields refusal, got: {err}"
+    );
+}
+
 /// **B64-3.** `verify_manifest_with` bounds nothing and decodes the whole
 /// signature segment before it checks that the segment is 64 bytes. The
 /// refusal message proves the ordering: it is the *length* complaint, which
@@ -1274,6 +1445,16 @@ fn a_tiny_revocation_list_has_a_legal_one_mebibyte_spelling() {
 ///   `RevocationEntry::token_sha256` revokes exactly that digest, so an
 ///   offline revocation by digest is defeated by editing one character;
 /// * this crate's own decoder refuses 15 of the 16, which is the divergence.
+///
+/// The remaining link — that `ccos-core` really does accept all 16 — cannot
+/// be asserted here (this package does not depend on `ccos-core`, and
+/// `b64url_decode` is `pub(crate)` in any case). It was measured
+/// out-of-tree against `Ed25519Verifier::with_public_key(&pk).verify(...)`:
+/// **16/16 accepted**, each yielding `licensee: "acme"` with the same bound
+/// machine fingerprint, while this crate's decoder accepted **1/16**. Adding
+/// `ccos-core` to this package's dev-dependencies would let the assertion
+/// move in here; that is a one-line `Cargo.toml` change this file is not
+/// permitted to make.
 #[test]
 fn a_license_token_has_sixteen_wire_spellings_and_sixteen_distinct_digests() {
     let pk = public_key();

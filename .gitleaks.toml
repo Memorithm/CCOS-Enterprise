@@ -1,0 +1,37 @@
+# gitleaks configuration for CCOS Enterprise.
+#
+# The default ruleset is kept in full — this file only allowlists the handful
+# of PUBLISHED CONSTANTS that look like secrets to a generic entropy rule.
+#
+# The allowlist is deliberately keyed on the exact VALUES, never on paths: a
+# real credential committed into these same files still fires. Widening this
+# to `paths = ["tests/.*"]` would blind the scanner to the place secrets are
+# most often leaked by accident, so don't.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+Published cross-implementation conformance vectors and a release checksum.
+Each is a SHA-256 of a fixed, public input, asserted verbatim by both the Rust
+and the PHP claim counter so the two can never silently diverge. They are
+protocol constants, not credentials: none of them is redeemable, and the
+inputs that produce them are documented in the code that pins them.
+"""
+regexes = [
+  # claim::code_hash("CCOS-AAAAA-AAAAA-AAAAA-AAAAA")
+  # — the wire value a client would send for that (non-existent) code.
+  '''387c45ee5457f5e622d1b35c7c1afc302097a81880416bdab8352a2fa7345d79''',
+  # claim::vault_key(<the hash above>)
+  # — the second-degree hash the vault is keyed by. Presenting it at /claim
+  #   is an UnknownCode refusal by construction; that is the point of the v2
+  #   keying, and stress_claim_protocol.rs asserts exactly that.
+  '''836bf706f07466e2c098e17d2521650949555f5054bcb3d398fd93547b050c4b''',
+  # claim::machine_fingerprint_of("vector-machine")
+  # — the opaque fingerprint in the signed-token vector shared with PHP.
+  '''6bb5b5a8623e94d18062c8ac5f37746f095bc93f9522307371c1bec7928a7c47''',
+  # sha256 of the pinned gitleaks release tarball, verified in ci-security.yml
+  # before the binary is trusted to run.
+  '''79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e''',
+]

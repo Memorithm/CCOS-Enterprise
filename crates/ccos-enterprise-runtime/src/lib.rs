@@ -94,6 +94,43 @@ use ccos_enterprise_tenancy::{TenantId, TenantScope};
 /// megabyte wide.
 pub const MAX_IDENTIFIER_BYTES: usize = 128;
 
+/// Whether an organization or tenant identifier is one this product will
+/// provision: non-empty, at most [`MAX_IDENTIFIER_BYTES`], and made only of
+/// ASCII `[a-z0-9_-]`.
+///
+/// Two separate reasons, and the second is why this is a refusal at
+/// provisioning time rather than a warning:
+///
+/// * **Confusables.** Raw `String` ids let `acme`, `Acme`, `ACME`, `"acme "`,
+///   `acme\u{200b}`, `\u{430}cme` (Cyrillic а) and the NFC/NFD spellings of an
+///   accented name all coexist as distinct tenants that render identically.
+///   An operator reading a console cannot tell which one holds the data, and
+///   a support request naming "acme" is unanswerable.
+/// * **Path safety.** Any tenant-scoped storage keyed by name — Core sessions,
+///   backups, exports — turns the id into a path component. `..`, `/`, a NUL
+///   or a leading `-` are then a traversal or an argument-injection away from
+///   another tenant's data. Constraining the id makes `<root>/<tenant>` safe
+///   *by construction*, which is a much better property than remembering to
+///   sanitize at every use site.
+///
+/// Hyphens are allowed because real tenant names use them (`victim-corp`,
+/// `t-00`); dots are not, so no id can be `.` or `..`.
+pub fn is_canonical_identifier(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    // The first byte must be alphanumeric. A leading `-` reads as a flag to
+    // anything that ever passes the id to a command line, and a leading `_`
+    // is the conventional hidden-file prefix; neither is worth the ambiguity
+    // when no real tenant name needs one.
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return false;
+    }
+    id.len() <= MAX_IDENTIFIER_BYTES
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 /// Default ceiling on the in-memory audit buffer. See the module docs: this
 /// bounds memory, it does not substitute for durable storage.
 pub const DEFAULT_AUDIT_CAPACITY: usize = 100_000;
@@ -322,6 +359,12 @@ impl Deployment {
     /// allowlist and activations while the journal still showed its forwarded
     /// calls. Returns `false` and changes nothing when the tenant exists.
     pub fn add_tenant(&mut self, org: &str, tenant: &str, state: TenantState) -> bool {
+        // Refused before anything is inserted: an id that cannot be rendered
+        // unambiguously, or safely turned into a path component, is not a
+        // tenant this product will carry. See [`is_canonical_identifier`].
+        if !is_canonical_identifier(org) || !is_canonical_identifier(tenant) {
+            return false;
+        }
         let id = TenantId(tenant.to_string());
         if self.tenants.contains_key(&id) {
             return false;
@@ -755,7 +798,10 @@ impl std::fmt::Display for RestoreError {
 impl std::error::Error for RestoreError {}
 
 fn check_identifier(what: &str, value: &str) -> Result<(), RestoreError> {
-    if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+    // The same rule `add_tenant` enforces. A snapshot is a file an operator or
+    // a bad merge can edit, so the restore path must not be the back door
+    // through which a confusable or path-unsafe id enters a live deployment.
+    if !is_canonical_identifier(value) {
         return Err(RestoreError::MalformedIdentifier {
             what: what.to_string(),
             value: clamp(value),
@@ -835,6 +881,7 @@ impl Deployment {
 
         for (name, t) in snapshot.tenants {
             check_identifier("tenant", &name)?;
+            check_identifier("org", &t.owner)?;
             if t.owner.is_empty() {
                 return Err(RestoreError::TenantWithoutOwner { tenant: name });
             }
@@ -1275,6 +1322,38 @@ mod tests {
             Some(&Refusal::PermissionDenied),
             "an unauthorized caller must not learn that this tool is administrative"
         );
+    }
+
+    /// The predicate itself, stated as a table. Two properties are being
+    /// bought — unambiguous rendering and path safety — and every rejected
+    /// shape below buys one of them.
+    #[test]
+    fn the_identifier_rule_admits_real_names_and_refuses_confusable_or_unsafe_ones() {
+        for good in ["acme", "t-00", "victim-corp", "a", "9lives", "a_b-c9"] {
+            assert!(is_canonical_identifier(good), "{good:?} is a real name");
+        }
+        for bad in [
+            "",                                    // nothing to name
+            "Acme",                                // case confusable
+            "acme ",                               // trailing space
+            " acme",                               // leading space
+            "acme\u{200b}",                        // zero-width
+            "\u{430}cme",                          // Cyrillic homoglyph
+            "e\u{301}quipe",                       // NFD
+            "..",                                  // traversal
+            ".",                                   // self
+            "a/b",                                 // separator
+            "a\\b",                                // Windows separator
+            "a\u{0}b",                             // NUL
+            "-rf",                                 // reads as a flag
+            "_hidden",                             // conventional hidden prefix
+            "a.b",                                 // dots are not allowed at all
+            &"a".repeat(MAX_IDENTIFIER_BYTES + 1), // over the bound
+        ] {
+            assert!(!is_canonical_identifier(bad), "{bad:?} must be refused");
+        }
+        // Exactly at the bound is fine; one past it is not.
+        assert!(is_canonical_identifier(&"a".repeat(MAX_IDENTIFIER_BYTES)));
     }
 
     #[test]

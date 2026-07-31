@@ -85,7 +85,7 @@ pub const DEFAULT_REPLAY_MEMORY: usize = 65_536;
 
 /// Why a call did not reach Core. Every variant is an announced refusal — the
 /// product never fails open and never fails silently.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Refusal {
     /// The caller's identity was not proven to the required strength.
     Unauthenticated,
@@ -112,7 +112,7 @@ pub enum Refusal {
 }
 
 /// The outcome of one admission decision, as journaled.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Outcome {
     Forwarded,
     Refused(Refusal),
@@ -139,7 +139,7 @@ impl Outcome {
 /// `0` for every refusal. The predecessor had neither, so no amount of
 /// auditing could reconcile the ledger and two interleavings produced two
 /// journals that could not reproduce one another.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuditRecord {
     /// Monotonic, assigned under the same borrow that decided.
     pub sequence: u64,
@@ -557,6 +557,292 @@ fn tag(r: &Refusal) -> &'static str {
         Refusal::ModelNotAllowed => "model_not_allowed",
         Refusal::VariantNotActivated => "variant_not_activated",
         Refusal::BudgetExhausted => "budget_exhausted",
+    }
+}
+
+// ── Snapshot and restore ─────────────────────────────────────────────────
+
+/// Schema tag written into every snapshot. A snapshot whose tag this build
+/// does not recognise is refused, never coerced: a governance ledger read
+/// under the wrong shape is worse than no ledger at all.
+pub const SNAPSHOT_SCHEMA: &str = "ccos.enterprise.deployment/v1";
+
+/// One tenant's governed state, as plain data.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TenantSnapshot {
+    pub owner: String,
+    pub budget: TokenBudget,
+    pub models: ModelAllowlist,
+    pub qpages: QPageRegistry,
+}
+
+/// A deployment's governed state, as plain data.
+///
+/// This is the boundary between the runtime and durable storage: the runtime
+/// owns the *shape* of its state and the invariants that make it legal, and
+/// `ccos-enterprise-store` owns bytes, atomicity and corruption. Neither
+/// crate reaches into the other's job.
+///
+/// What is **not** here, deliberately: the audit buffer, the replay memory and
+/// the decision counter. Those are rebuilt by replaying the journal from
+/// [`DeploymentSnapshot::sequence_watermark`], so there is exactly one
+/// authority for the ordering of decisions and it is the journal.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DeploymentSnapshot {
+    pub schema: String,
+    /// The sequence the next decision will take *as of this snapshot*. The
+    /// journal is replayed from here on restore.
+    pub sequence_watermark: u64,
+    /// Records evicted from the in-memory buffer before this snapshot. Carried
+    /// so a restored deployment cannot understate what it has already lost.
+    pub audit_dropped: u64,
+    pub required_strength: AuthStrength,
+    pub tenants: BTreeMap<String, TenantSnapshot>,
+    pub roles: RoleBook,
+    pub governed_tools: BTreeMap<String, Permission>,
+    /// Tenant-scoped cells, as `(tenant, key, value)` triples.
+    pub cells: Vec<(String, String, String)>,
+}
+
+/// Why a snapshot was refused. Every variant is a **fail-closed** outcome: a
+/// deployment that cannot be restored exactly must not start approximately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreError {
+    /// The snapshot was written by a build with a different state shape.
+    SchemaMismatch { found: String, expected: String },
+    /// A ledger holding `spent > limit` is a state `charge` cannot produce, so
+    /// the file was edited or corrupted. Accepting it would hand the tenant a
+    /// budget the product never granted — or a negative one.
+    LedgerOverLimit {
+        tenant: String,
+        spent: u64,
+        limit: u64,
+    },
+    /// A tenant with no owning organization can never pass the credential
+    /// binding, so it is unreachable state that will silently refuse every
+    /// call — indistinguishable, to an operator, from a permissions bug.
+    TenantWithoutOwner { tenant: String },
+    /// An identifier that `admit` would refuse as malformed must not be
+    /// installable through the back door.
+    MalformedIdentifier { what: String, value: String },
+    /// A journaled record whose tenant no longer exists cannot be re-applied,
+    /// so the ledger it implies cannot be reproduced.
+    JournalTenantUnknown { sequence: u64, tenant: String },
+    /// The journal does not continue the snapshot: replaying it would either
+    /// skip decisions or double-count them.
+    JournalDiscontinuity { expected: u64, found: u64 },
+}
+
+impl std::fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SchemaMismatch { found, expected } => {
+                write!(f, "snapshot schema {found:?}, this build reads {expected:?}")
+            }
+            Self::LedgerOverLimit {
+                tenant,
+                spent,
+                limit,
+            } => write!(
+                f,
+                "tenant {tenant:?} has spent {spent} of a {limit} limit — \
+                 a state `charge` cannot produce"
+            ),
+            Self::TenantWithoutOwner { tenant } => {
+                write!(f, "tenant {tenant:?} has no owning organization")
+            }
+            Self::MalformedIdentifier { what, value } => {
+                write!(f, "{what} {value:?} is empty or over the identifier bound")
+            }
+            Self::JournalTenantUnknown { sequence, tenant } => write!(
+                f,
+                "journal record {sequence} names tenant {tenant:?}, which the snapshot does not have"
+            ),
+            Self::JournalDiscontinuity { expected, found } => write!(
+                f,
+                "journal resumes at sequence {found}, snapshot expects {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RestoreError {}
+
+fn check_identifier(what: &str, value: &str) -> Result<(), RestoreError> {
+    if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+        return Err(RestoreError::MalformedIdentifier {
+            what: what.to_string(),
+            value: clamp(value),
+        });
+    }
+    Ok(())
+}
+
+impl Deployment {
+    /// Capture the governed state. Cheap enough to take on every admin change
+    /// and small enough to write atomically; the journal carries the volume.
+    pub fn snapshot(&self) -> DeploymentSnapshot {
+        DeploymentSnapshot {
+            schema: SNAPSHOT_SCHEMA.to_string(),
+            sequence_watermark: self.next_sequence,
+            audit_dropped: self.audit_dropped,
+            required_strength: self.required_strength,
+            tenants: self
+                .tenants
+                .iter()
+                .map(|(id, state)| {
+                    (
+                        id.0.clone(),
+                        TenantSnapshot {
+                            owner: self
+                                .tenant_owner
+                                .get(id)
+                                .map(|o| o.0.clone())
+                                .unwrap_or_default(),
+                            budget: state.budget.clone(),
+                            models: state.models.clone(),
+                            qpages: state.qpages.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            roles: self.roles.clone(),
+            governed_tools: self.governed_tools.clone(),
+            cells: self
+                .store
+                .iter()
+                .map(|((t, k), v)| (t.0.clone(), k.clone(), v.clone()))
+                .collect(),
+        }
+    }
+
+    /// Rebuild a deployment from a snapshot, then replay `journal` on top.
+    ///
+    /// The journal is the authority for ordering and for anything decided
+    /// after the snapshot was taken, so a crash between the last snapshot and
+    /// the last decision loses nothing: the tail is re-applied here. Only the
+    /// **cost** is re-applied — the decision itself is not re-made, because
+    /// re-deciding against restored state could produce a different answer
+    /// (a role revoked in between, say) and rewrite history.
+    ///
+    /// Every failure is fail-closed. In particular a ledger holding
+    /// `spent > limit` is refused rather than clamped: clamping would silently
+    /// hand a tenant capacity nobody granted.
+    pub fn restore(
+        snapshot: DeploymentSnapshot,
+        journal: &[AuditRecord],
+    ) -> Result<Self, RestoreError> {
+        if snapshot.schema != SNAPSHOT_SCHEMA {
+            return Err(RestoreError::SchemaMismatch {
+                found: snapshot.schema,
+                expected: SNAPSHOT_SCHEMA.to_string(),
+            });
+        }
+
+        let mut d = Deployment::new();
+        d.required_strength = snapshot.required_strength;
+        d.roles = snapshot.roles;
+        d.governed_tools = snapshot.governed_tools;
+        d.audit_dropped = snapshot.audit_dropped;
+
+        for (name, t) in snapshot.tenants {
+            check_identifier("tenant", &name)?;
+            if t.owner.is_empty() {
+                return Err(RestoreError::TenantWithoutOwner { tenant: name });
+            }
+            if t.budget.spent > t.budget.limit {
+                return Err(RestoreError::LedgerOverLimit {
+                    tenant: name,
+                    spent: t.budget.spent,
+                    limit: t.budget.limit,
+                });
+            }
+            let id = TenantId(name);
+            d.tenant_owner.insert(id.clone(), OrgId(t.owner));
+            d.tenants.insert(
+                id,
+                TenantState {
+                    budget: t.budget,
+                    models: t.models,
+                    qpages: t.qpages,
+                },
+            );
+        }
+
+        for (tenant, key, value) in snapshot.cells {
+            d.store.insert((TenantId(tenant), key), value);
+        }
+
+        // Replay the journal.
+        //
+        // Two different things happen to a record, and the distinction is the
+        // whole correctness argument:
+        //
+        // * **cost** is applied only at or after `sequence_watermark`, because
+        //   the snapshot's ledger already folded in everything before it.
+        //   Re-applying those would bill a tenant twice for one call.
+        // * **everything else** — the audit buffer, the counters and the
+        //   replay memory — is rebuilt from the *whole* journal, because the
+        //   snapshot deliberately does not carry them. Skipping the older
+        //   records would understate `gateway.requests` and hand back a trail
+        //   that starts at the last checkpoint rather than at the beginning.
+        //
+        // Sequences must be dense and ascending throughout. A gap means
+        // decisions were lost; a repeat means one would be counted twice.
+        // Both are refusals rather than repairs.
+        let mut next = journal.first().map(|r| r.sequence).unwrap_or(0);
+        for record in journal {
+            if record.sequence != next {
+                return Err(RestoreError::JournalDiscontinuity {
+                    expected: next,
+                    found: record.sequence,
+                });
+            }
+            next = record.sequence + 1;
+
+            let tenant = TenantId(record.tenant.clone());
+            if record.cost > 0 && record.sequence >= snapshot.sequence_watermark {
+                let Some(state) = d.tenants.get_mut(&tenant) else {
+                    return Err(RestoreError::JournalTenantUnknown {
+                        sequence: record.sequence,
+                        tenant: record.tenant.clone(),
+                    });
+                };
+                if state.budget.charge(record.cost) != PolicyDecision::Allow {
+                    return Err(RestoreError::LedgerOverLimit {
+                        tenant: record.tenant.clone(),
+                        spent: state.budget.spent.saturating_add(record.cost),
+                        limit: state.budget.limit,
+                    });
+                }
+            }
+            // A forwarded decision holds its request id against replay, and
+            // the buffer and counters are rebuilt exactly as `admit` left them.
+            if record.outcome.is_forwarded() {
+                d.remember((tenant, record.request_id.clone()));
+            }
+            d.metrics.inc("gateway.requests", 1);
+            match &record.outcome {
+                Outcome::Forwarded => d.metrics.inc("gateway.forwarded", 1),
+                Outcome::Refused(r) => {
+                    d.metrics.inc("gateway.refused", 1);
+                    d.metrics.inc(&format!("gateway.refused.{}", tag(r)), 1);
+                }
+            }
+            while d.audit.len() >= d.audit_capacity {
+                d.audit.pop_front();
+                d.audit_dropped += 1;
+                d.metrics.inc("audit.dropped", 1);
+            }
+            if d.audit_capacity > 0 {
+                d.audit.push_back(record.clone());
+            } else {
+                d.audit_dropped += 1;
+                d.metrics.inc("audit.dropped", 1);
+            }
+        }
+        d.next_sequence = next;
+        Ok(d)
     }
 }
 

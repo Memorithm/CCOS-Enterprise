@@ -12,6 +12,7 @@ members = [
     "crates/ccos-enterprise-qpages",
     "crates/ccos-enterprise-admin",
     "crates/ccos-enterprise-runtime",
+    "crates/ccos-enterprise-store",
     "tools/ccos-license-server",
     "tests/ccos-enterprise-conformance",
 ]

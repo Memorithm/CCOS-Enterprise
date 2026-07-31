@@ -171,6 +171,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-store"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-core",
+ "ccos-enterprise-auth",
+ "ccos-enterprise-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ccos-enterprise-tenancy"
 version = "0.1.0-pre"
 dependencies = [

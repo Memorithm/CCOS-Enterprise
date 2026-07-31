@@ -64,13 +64,17 @@
 //!    and reporting what it hit, so a mass privilege change is no longer one
 //!    typo away from a provisioning script.
 //!
-//!    **Still broken**: role mutation journals nothing, and no
-//!    `ccos_enterprise_admin::JUSTIFICATION_REQUIRED` entry covers it. Layer 6
-//!    now demands a reason for administrative *tool calls*, which makes this
-//!    gap sharper rather than smaller — the call must be justified, and the
-//!    role edit granting the right to make it need not be.
+//!    The *silence* is now repaired too: every role mutation on a serving
+//!    deployment is journaled with its blast radius — the permissions before
+//!    and after, and every principal whose rights moved — in the same stream
+//!    as the decisions it changes. What is **still open** is that nothing
+//!    *demands* a name or a reason: `Deployment::as_admin` records both when a
+//!    caller offers them, the bare methods journal the change with both empty,
+//!    and no `ccos_enterprise_admin::JUSTIFICATION_REQUIRED` entry covers role
+//!    mutation. A `&mut Deployment` is the whole authority, so the guarantee
+//!    the product can make is visibility, not permission.
 //!    → [`add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act`],
-//!    [`redefining_a_role_escalates_every_holder_with_an_empty_audit_trail`]
+//!    [`redefining_a_role_is_journaled_with_its_blast_radius`]
 //!
 //! 3. **`RoleBook` is unbounded in every dimension.** No cap on roles, on
 //!    actors, on roles-per-actor, or on name length — while the sibling
@@ -140,7 +144,8 @@ use std::time::Instant;
 
 use ccos_enterprise_auth::AuthStrength;
 use ccos_enterprise_conformance::{
-    actor, request, two_tenant_deployment, Call, Outcome, Refusal, TenantState,
+    actor, request, two_tenant_deployment, Call, GovernanceChange, JournalEntry, Outcome, Refusal,
+    TenantState,
 };
 use ccos_enterprise_observability::CounterRegistry;
 use ccos_enterprise_rbac::{Permission, Role, RoleBook};
@@ -628,9 +633,10 @@ fn assignment_storage_is_quadratic_in_admin_calls() {
 /// which is named for what it does and reports what it hit. A mass privilege
 /// change can no longer be reached by a typo in a provisioning script.
 ///
-/// What is **not** fixed, and is still asserted below: redefinition journals
-/// nothing. See
-/// [`redefining_a_role_escalates_every_holder_with_an_empty_audit_trail`].
+/// `RoleBook` itself still journals nothing — it is a data structure with no
+/// notion of a trail — so the record is written one layer up, by
+/// `Deployment::redefine_role`. See
+/// [`redefining_a_role_is_journaled_with_its_blast_radius`].
 #[test]
 fn add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act() {
     let _guard = serialized();
@@ -720,19 +726,22 @@ fn add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act() {
     assert!(!book.remove_role("editor-that-never-was"));
 }
 
-/// The half that is **still open**, through the product path: redefinition is
-/// now a deliberate act with its own name, but it journals **nothing**.
-/// `Deployment::redefine_role` escalates every `reader` to `policy.admin` and
-/// leaves an empty audit trail, and `ccos_enterprise_admin`'s
-/// `JUSTIFICATION_REQUIRED` list does not cover role mutation, so there is
-/// still no surface on which this act demands a reason.
+/// The other half, **now repaired**: redefinition is journaled, with its blast
+/// radius, in the same stream as the decisions it changes.
 ///
-/// Layer 6 now exists in the composed path for *tool calls*
-/// (`Deployment::require_justification`), which makes the gap sharper rather
-/// than smaller: an administrative tool call must be justified, and the role
-/// edit that grants somebody the right to make it need not be.
+/// This test used to end with the escalated reader performing an
+/// administrative act and *nothing anywhere* saying how they came to be
+/// allowed to. The scenario is unchanged; what it now asserts is the record
+/// that closes it — who, why, from what to what, and which principals moved —
+/// sitting in the merged journal between the refusal and the forward.
+///
+/// The remaining gap is named at the end and is deliberate: nothing *demands*
+/// a reason to mutate a live deployment, because a `&mut Deployment` is
+/// already the whole authority. What the product can guarantee, and now does,
+/// is that the change is never invisible — an unattributed edit is journaled
+/// as unattributed rather than not journaled at all.
 #[test]
-fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
+fn redefining_a_role_is_journaled_with_its_blast_radius() {
     let _guard = serialized();
     let mut d = two_tenant_deployment();
     let bob = actor("memorithm", "bob", AuthStrength::Token); // reader
@@ -753,25 +762,46 @@ fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
     );
     let audit_before = d.audit().count();
 
-    // One call. No justification, no actor, no target, no record.
-    assert!(d.redefine_role("reader", &["memory.read", "policy.admin"]));
+    // The mass privilege change, made under an operator's name and reason.
+    assert!(d
+        .as_admin("root", "incident 902: bob needs to rotate the allowlist")
+        .redefine_role("reader", &["memory.read", "policy.admin"]));
     assert_eq!(
         d.audit().count(),
         audit_before,
-        "DEFECT: a mass privilege change produced zero audit records"
-    );
-    assert!(
-        !ccos_enterprise_admin::JUSTIFICATION_REQUIRED.contains(&"role.grant"),
-        "role mutation is not even in the justification-required list"
+        "a rule change is not a decision, and does not pretend to be one"
     );
 
-    // The escalated reader now performs the administrative act. A reason is
-    // supplied, because layer 6 demands one for `policy.set` — and supplying
-    // it *sharpens* this finding rather than blunting it. The call is
-    // justified and recorded; the grant that made the call possible is
-    // neither. An auditor reading the trail sees a well-formed administrative
-    // act by a principal who, an hour earlier, could not have performed it,
-    // and nothing anywhere says how that changed.
+    let change = d.governance().next().expect("the change is journaled");
+    assert_eq!(change.actor.as_deref(), Some("root"));
+    assert_eq!(
+        change.justification.as_deref(),
+        Some("incident 902: bob needs to rotate the allowlist")
+    );
+    let GovernanceChange::RoleRedefined {
+        role,
+        from,
+        to,
+        holders,
+    } = &change.change
+    else {
+        panic!("wrong change kind: {:?}", change.change);
+    };
+    assert_eq!(role, "reader");
+    assert_eq!(from, &["memory.read"], "what the role granted before");
+    assert_eq!(
+        to,
+        &["memory.read", "policy.admin"],
+        "and after — the escalation is legible without reading the code"
+    );
+    assert!(
+        holders.contains(&"bob".to_string()),
+        "the blast radius names the principals whose rights moved: {holders:?}"
+    );
+
+    // The escalated reader now performs the administrative act. Layer 6
+    // demands a reason for `policy.set`, and the trail now carries both: the
+    // act, and the grant that made the act possible.
     let now = request("acme", "bob", "policy.set", "r-after");
     assert_eq!(
         d.admit(Call {
@@ -782,19 +812,41 @@ fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
             variant: None,
             justification: Some("rotating the model allowlist, ticket 902"),
         }),
-        Outcome::Forwarded,
-        "DEFECT: the reader is an administrator now, and nothing recorded why"
+        Outcome::Forwarded
     );
     assert_eq!(
         d.audit().last().and_then(|r| r.justification.as_deref()),
-        Some("rotating the model allowlist, ticket 902"),
-        "the act is justified — the escalation that permitted it is not"
+        Some("rotating the model allowlist, ticket 902")
     );
     assert_eq!(
         d.spent("acme"),
         Some(1),
         "and the escalated call is billed as normal"
     );
+
+    // The merged journal, which is the form that actually answers the
+    // question: refusal, then the change that flipped it, then the forward.
+    let rows = d.journal();
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(matches!(rows[0], JournalEntry::Decision(r) if !r.outcome.is_forwarded()));
+    assert!(matches!(rows[1], JournalEntry::Governance(_)));
+    assert!(matches!(rows[2], JournalEntry::Decision(r) if r.outcome.is_forwarded()));
+    assert_eq!(rows[1].sequence(), 1, "the change sits before decision 1");
+
+    // STILL OPEN, and narrower than it was: nothing *demands* the attribution
+    // above. The same edit through the bare method is journaled with both
+    // fields empty — visible, but anonymous — and no
+    // `ccos_enterprise_admin::JUSTIFICATION_REQUIRED` entry covers role
+    // mutation, because that list gates `AdminAction`s and this is a method
+    // call on a `&mut Deployment`.
+    assert!(d.redefine_role("reader", &["memory.read"]));
+    let anonymous = d.governance().last().expect("journaled all the same");
+    assert_eq!(
+        anonymous.actor, None,
+        "an unattributed change stays visible"
+    );
+    assert_eq!(anonymous.justification, None);
+    assert!(!ccos_enterprise_admin::JUSTIFICATION_REQUIRED.contains(&"role.grant"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────

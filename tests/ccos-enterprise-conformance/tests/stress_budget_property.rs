@@ -829,7 +829,7 @@ fn the_ledger_is_private_and_a_live_tenant_is_never_reprovisioned() {
     //     are compile errors now: `budget` is private. What remains are the
     //     builders, and exercising every one of them must not move the meter.
     {
-        let t = d.tenant_mut("acme").expect("tenant");
+        let mut t = d.tenant_mut("acme").expect("tenant");
         assert_eq!(t.spent(), 1_000, "the ledger is readable…");
         assert_eq!(t.limit(), 1_000, "…and so is the ceiling…");
         t.allow_model("another-model")

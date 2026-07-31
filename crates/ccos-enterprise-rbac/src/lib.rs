@@ -117,6 +117,32 @@ impl RoleBook {
         self.roles.contains_key(name)
     }
 
+    /// The permissions a role grants, in name order; empty for an unknown role.
+    ///
+    /// A governance journal that records "the role changed" without recording
+    /// *what it changed to* is not evidence, so this exists for the caller that
+    /// has to write the before/after down.
+    pub fn permissions_of(&self, name: &str) -> Vec<&str> {
+        self.roles
+            .get(name)
+            .into_iter()
+            .flat_map(|r| r.permissions.iter())
+            .map(|p| p.0.as_str())
+            .collect()
+    }
+
+    /// Every actor currently holding this role, in name order.
+    ///
+    /// The blast radius of a redefinition or a removal: without it a journal
+    /// can say a role was rewritten but not whose rights moved.
+    pub fn holders_of(&self, name: &str) -> Vec<&str> {
+        self.assignments
+            .iter()
+            .filter(|(_, grants)| grants.contains(name))
+            .map(|(actor, _)| actor.as_str())
+            .collect()
+    }
+
     /// The roles this actor holds, in name order.
     pub fn roles_of(&self, actor: &str) -> Vec<&str> {
         self.assignments

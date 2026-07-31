@@ -46,30 +46,70 @@
 //! * **No stack overflow anywhere**, including a 10 000-bracket recursion
 //!   bomb, and no panic on any input this file could construct.
 //!
+//! ## What was repaired
+//!
+//! * **A live daemon no longer erases out-of-band vault edits.**
+//!   `Counter::handle_claim` now calls `Counter::refresh_vault()`
+//!   (`lib.rs:351`) before it consults the ledger: a `stat` of the vault file
+//!   every claim, and a full `Vault::load` whenever `(mtime, len)` no longer
+//!   matches what this process last read or wrote. A missing file is not an
+//!   error. Before that, the counter held the whole map in memory and wrote it
+//!   back on every sale, so a revocation applied with `ccos-license-admin`
+//!   against a running daemon was not merely ignored — the next sale
+//!   overwrote it. The behavioural guard for that repair lives in
+//!   `stress_http_abuse.rs`; it is recorded here because it changed **every
+//!   number this file measures**, and because it is the one thing that moved
+//!   in the claim path. Every measurement below was re-taken against it.
+//!
+//!   It made the claim path **more** expensive, not less, and it did not go
+//!   near findings 1 or 2 — those are still open, still pinned, and the only
+//!   thing that changed about them is the arithmetic:
+//!   - a refused request against a 100 000-entry / 23 400 059 B ledger with
+//!     the file on disk now costs **102 055 126 B and 0.68 s** the first time
+//!     and after every out-of-band edit (39 327 750 B of deep copy plus
+//!     62 727 376 B of re-read), settling to the unchanged 39 327 750 B /
+//!     56 ms once the fingerprint stops moving;
+//!   - the first sale after start-up costs **~19 133 420 B** against a
+//!     10 000-entry / 2 353 609 B ledger, versus **~12 845 771 B** in steady
+//!     state — the 6 287 649 B difference is that one `Vault::load`.
+//!
+//!   Read-path figures here are exact: allocation is a property of the code
+//!   path, identical in debug and release, which is why the assertions are on
+//!   bytes rather than on time. Figures that include a `save` carry a `~`
+//!   because `write_durable` names its temp file `<vault>.tmp.<pid>`, so the
+//!   path length — and with it the byte count — moves by one or two between
+//!   processes. No assertion depends on those last digits.
+//!
 //! ## What BROKE
 //!
 //! 1. **EXHAUSTION — every sale rewrites and fsyncs the whole ledger.**
-//!    `Vault::save` (`lib.rs:163`) serializes the entire `BTreeMap` on every
-//!    single claim, and `Counter::handle_claim` (`lib.rs:284`) calls it
-//!    inside the request. Marginal cost is a hard **234 B/entry**, so seat
-//!    number N costs 234*N bytes of pretty-printing plus a full `fsync`: at
-//!    100 000 entries one sale writes **23.4 MB** and takes 0.6-0.9 s (debug)
-//!    or 0.14 s (release). Measured end to end through the handler: **200
-//!    sales against a 100 000-entry ledger move 4 693 589 800 B — 4.7 GB —
-//!    through `fsync` to record 200 state flips.** Selling all 100 000 seats
-//!    moves **~1.17 TB** to record 23.4 MB of truth: 50 000x write
-//!    amplification, and it is quadratic, so it gets worse. Each save also
-//!    allocates 3.1-3.8x the file: `to_string_pretty` builds it whole, then
-//!    `format!` copies it whole again just to append one newline. There is no
-//!    cap on entries — the sibling `CounterRegistry` caps itself at
+//!    `Vault::save` (`lib.rs:172`) serializes the entire `BTreeMap` on every
+//!    single claim, and `Counter::handle_claim` (`lib.rs:334`) calls it inside
+//!    the request via `save_vault` (`lib.rs:316`). Marginal cost is a hard
+//!    **234 B/entry**, so seat number N costs 234*N bytes of pretty-printing
+//!    plus a full `fsync`: at 100 000 entries one sale writes **23.4 MB** and
+//!    takes 0.6-0.9 s (debug) or 0.14 s (release). Measured end to end through
+//!    the handler: **200 sales against a 100 000-entry ledger move
+//!    4 693 589 800 B — 4.7 GB — through `fsync` to record 200 state flips.**
+//!    Selling all 100 000 seats moves **~1.17 TB** to record 23.4 MB of truth:
+//!    50 000x write amplification, and it is quadratic, so it gets worse. Each
+//!    save also allocates 3.1-3.8x the file: `to_string_pretty` builds it
+//!    whole, then `format!` copies it whole again just to append one newline.
+//!    There is no cap on entries — the sibling `CounterRegistry` caps itself at
 //!    `MAX_SERIES = 4096` precisely so "a label explosion can never exhaust
 //!    memory"; the vault, which holds the money, caps at nothing.
+//!    Re-measured after the `refresh_vault` repair, which sits in front of this
+//!    and changed none of it: 40 sales against a 10 000-entry / 2 353 609 B
+//!    ledger take 68.6 ms each and allocate **~12 845 771 B per sale in steady
+//!    state — 5.5 whole copies of the ledger to flip one bit** — with the
+//!    first sale after start-up costing ~19 133 420 B because it re-reads the
+//!    file first.
 //!    -> [`every_sale_rewrites_and_fsyncs_the_entire_ledger`],
 //!    [`the_marginal_cost_of_one_sale_is_the_whole_ledger`]
 //!
 //! 2. **EXHAUSTION — an unauthenticated refused request deep-copies the whole
 //!    ledger.** `Counter::handle_claim` takes `let before = self.vault.clone()`
-//!    (`lib.rs:281`) **before** it knows whether the code exists. A request
+//!    (`lib.rs:355`) **before** it knows whether the code exists. A request
 //!    for a code that is not in the vault — the cheapest thing an attacker can
 //!    send, and the only thing a brute-forcer ever sends — allocates a full
 //!    copy of every key, licensee, label and fingerprint and then throws it
@@ -79,6 +119,15 @@
 //!    56.5 ms of CPU in debug and **36.2 ms in release**. The allocation
 //!    figures are byte-identical in both profiles, which is why this file
 //!    asserts on them rather than on time.
+//!    The `refresh_vault` repair landed one line above that clone and left it
+//!    exactly where it was, while adding a second ledger-sized cost to the
+//!    same unauthenticated path. Against a 100 000-entry ledger whose file is
+//!    really on disk — the production shape — one refused request costs
+//!    **102 055 126 B and 0.68 s** whenever the fingerprint check misses:
+//!    the first 404 after start-up, and every 404 that follows an operator's
+//!    upload. It settles back to 39 327 750 B / 56 ms once the file stops
+//!    moving. So a brute-forcer scanning while the vendor edits the vault
+//!    makes each of its own misses read the whole ledger *and* copy it.
 //!    The global 0.5 req/s `TokenBucket` at `ccos-license-server.rs:104` is
 //!    the only thing in front of it, and it was sized for "one request per
 //!    sale", not for "each refusal costs a copy of the business".
@@ -154,8 +203,10 @@
 //! 10. **4 KiB in, megabytes out.** `MAX_BODY` caps a request at 4 KiB, but a
 //!     1 MiB licensee in the vault is accepted, signed whole, and returned in
 //!     a **1 398 346 B** claim response to a **182 B** request — a 7 683x
-//!     request/response asymmetry, 16.4 MB allocated to serve it, on a
-//!     connection nothing has authenticated.
+//!     request/response asymmetry, **~18 531 434 B allocated to serve it**, on
+//!     a connection nothing has authenticated. (That figure was 16.4 MB before
+//!     `refresh_vault`; the extra ~2.1 MB is the cold re-read of the 1 MiB
+//!     ledger on the first claim. The asymmetry itself is untouched.)
 //!     -> [`a_megabyte_licensee_is_signed_whole_and_returned_over_the_wire`]
 //!
 //! Run the whole file:
@@ -342,6 +393,7 @@ fn counter_for(vault: Vault, path: &Path) -> Counter {
         // Deliberately un-throttled: this file measures what one request
         // *costs*, not what the shipped 0.5 req/s bucket lets through.
         bucket: TokenBucket::new(1.0e9, 1.0e9),
+        vault_seen: None,
     }
 }
 
@@ -1512,11 +1564,13 @@ fn claimed_entries_with_no_owner_are_dead_seats_forever() {
 // §8  EXHAUSTION: what one sale costs the ledger
 // ═════════════════════════════════════════════════════════════════════
 
-/// **DEFECT 1, part one — the deterministic half.** `Vault::save` serializes
-/// the entire map. The marginal cost per entry is a constant, so the cost of
-/// recording sale number N is linear in N: the ledger is its own amplifier.
-/// Byte counts are exact and machine-independent, so this is asserted, not
-/// merely printed.
+/// **DEFECT 1, part one — the deterministic half. STILL OPEN.** `Vault::save`
+/// serializes the entire map. The marginal cost per entry is a constant, so
+/// the cost of recording sale number N is linear in N: the ledger is its own
+/// amplifier. Byte counts are exact and machine-independent, so this is
+/// asserted, not merely printed. Nothing in the `refresh_vault` repair reaches
+/// this path — it is pure serialization arithmetic, and every number below is
+/// the same as it was before.
 #[test]
 fn the_marginal_cost_of_one_sale_is_the_whole_ledger() {
     let sizes: Vec<(u32, usize)> = [1_000u32, 10_000, 100_000]
@@ -1573,8 +1627,19 @@ fn the_marginal_cost_of_one_sale_is_the_whole_ledger() {
     );
 }
 
-/// **DEFECT 1, part two — the wall clock.** Same finding, measured against a
-/// real disk with real `fsync`s, through the real request handler.
+/// **DEFECT 1, part two — the wall clock. STILL OPEN.** Same finding,
+/// measured against a real disk with real `fsync`s, through the real request
+/// handler. `save_vault` (`lib.rs:316`) still calls `Vault::save`, which still
+/// re-pretty-prints and re-`fsync`s the entire `BTreeMap` for every one-bit
+/// state flip; nothing incremental was introduced, so this stays a pin rather
+/// than a regression guard.
+///
+/// The numbers below were re-taken after `handle_claim` gained its
+/// `refresh_vault()` call, which added a `stat` to every claim and a whole
+/// `Vault::load` to any claim whose fingerprint check misses. The last block
+/// separates the two so the per-sale cost is stated honestly: the repair made
+/// the claim path *more* expensive, and the O(N) write it sits in front of is
+/// untouched.
 #[test]
 fn every_sale_rewrites_and_fsyncs_the_entire_ledger() {
     let dir = scratch("amplify");
@@ -1621,14 +1686,15 @@ fn every_sale_rewrites_and_fsyncs_the_entire_ledger() {
     let mut counter = counter_for(Vault::load(&path).expect("load"), &path);
 
     let t0 = Instant::now();
-    let mut total_alloc = 0u64;
+    let mut per_sale: Vec<u64> = Vec::with_capacity(SALES as usize);
     for i in 0..SALES {
         let body = claim_body(&wire(i), &fp(i));
         let ((status, _), alloc) = allocated_by(|| counter.handle("POST", CLAIM_PATH, &body, NOW));
         assert_eq!(status, 200);
-        total_alloc += alloc;
+        per_sale.push(alloc);
     }
     let elapsed = t0.elapsed();
+    let total_alloc: u64 = per_sale.iter().sum();
     let file = std::fs::metadata(&path).expect("stat").len();
     println!(
         "[§8] {SALES} sales against a {LEDGER}-entry ledger: {elapsed:?} total, \
@@ -1645,12 +1711,45 @@ fn every_sale_rewrites_and_fsyncs_the_entire_ledger() {
         "one sale allocated less than three copies of the ledger — has this been fixed?"
     );
 
+    // What the `refresh_vault` repair costs, separated from the above. It runs
+    // at the top of every claim: `vault_seen` starts `None`, so the FIRST sale
+    // after start-up re-reads and re-parses the whole file before doing any of
+    // the work already measured; `save_vault` then re-fingerprints what it
+    // just wrote, so every later sale pays only the `stat`. Neither number is
+    // an improvement — the point of this block is that the sale still costs
+    // several whole copies of the ledger *underneath* the new read.
+    let first = per_sale[0];
+    let steady = per_sale[1..].iter().sum::<u64>() / (u64::from(SALES) - 1);
+    assert!(
+        first > steady,
+        "the first claim after start-up did not re-read the ledger — was \
+         refresh_vault removed? {first} vs {steady}"
+    );
+    println!(
+        "[§8] refresh_vault: the first sale after start-up costs {first} B — {extra} B more \
+         than the {steady} B steady state, i.e. one whole Vault::load of the {file} B file. \
+         Steady state is that load's `stat` only, and the O(N) write underneath it is \
+         unchanged.",
+        extra = first - steady,
+    );
+    // The finding itself, restated on the steady-state number so the one-off
+    // cold read cannot be mistaken for it: even with nothing to re-read, one
+    // sale still allocates three whole ledgers to flip one bit.
+    assert!(
+        steady >= 3 * file,
+        "in steady state one sale allocated {steady} B, less than three copies of a \
+         {file} B ledger — save() would then have become incremental, and it has not"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The same measurement at the scale the finding is about: **4.7 GB of
 /// fsynced writes to record 200 one-bit state flips**. ~2.5 min in debug,
-/// ~27 s in release.
+/// ~27 s in release. Still open — `save_vault` still writes the whole map.
+/// The `refresh_vault` repair adds a `stat` per sale and one 23.4 MB re-read
+/// on the first, which is noise beside the 4.7 GB counted here (this figure
+/// counts writes only, and the write path was not repaired).
 /// `cargo test --release -p ccos-enterprise-conformance --test \
 ///  stress_vault_scale -- --ignored --nocapture sales_against_a_100k_ledger`
 #[test]
@@ -1692,11 +1791,22 @@ fn sales_against_a_100k_ledger_move_gigabytes_to_record_200_flips() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **DEFECT 2.** `Counter::handle_claim` clones the entire vault *before*
-/// consulting it. The cheapest possible request — an unknown code, which is
+/// **DEFECT 2 — STILL OPEN, and the `refresh_vault` repair made it worse.**
+/// `Counter::handle_claim` clones the entire vault *before* consulting it
+/// (`lib.rs:355`). The cheapest possible request — an unknown code, which is
 /// all a brute-forcer ever sends and all a scanner ever sends — therefore
 /// costs a full deep copy of every key, licensee, label and fingerprint in
-/// the ledger, thrown away microseconds later.
+/// the ledger, thrown away microseconds later. That line was not touched by
+/// the repair, so this test keeps pinning it.
+///
+/// What *did* change sits one line above it: `handle_claim` now calls
+/// `refresh_vault()` (`lib.rs:351`) before it decides anything, so the same
+/// unauthenticated request also `stat`s the vault file and — whenever
+/// `(mtime, len)` no longer matches what this process last read or wrote —
+/// re-reads and re-parses the whole file *as well as* cloning it. The second
+/// half of this test measures that on the production shape (a vault file that
+/// actually exists), because the honest cost of one refused request went up,
+/// not down.
 #[test]
 fn an_unknown_code_404_deep_copies_the_entire_ledger() {
     let dir = scratch("clone");
@@ -1732,7 +1842,95 @@ fn an_unknown_code_404_deep_copies_the_entire_ledger() {
     // Deterministic: allocation is a property of the code path, not the host.
     assert!(
         ratio >= 50,
-        "a 404 no longer copies the ledger — has lib.rs:281 been fixed? {small} -> {large}"
+        "a 404 no longer copies the ledger — has lib.rs:355 been fixed? {small} -> {large}"
+    );
+
+    // ── The same refused request, with the vault file where production
+    //    keeps it ─────────────────────────────────────────────────────────
+    //
+    // The measurements above run against a counter whose vault file does not
+    // exist, which is exactly what lets them assert "a 404 must not touch the
+    // disk": `refresh_vault` treats a missing file as "nothing to adopt" and
+    // returns without reading anything. A deployed counter always has the
+    // file, so the production cost is measured separately here — three
+    // refused requests, identical bytes on the wire, against the same
+    // 100 000-entry ledger:
+    //
+    //   * cold — `vault_seen` starts `None`, so the first refusal re-reads
+    //     and re-parses the whole file *and then* deep-copies it;
+    //   * warm — the fingerprint now matches, so the refresh is one `stat`
+    //     and the deep copy is the whole cost, unchanged by the repair;
+    //   * after an out-of-band edit — the operator uploads a vault
+    //     (`docs/LICENSING_SERVER.md` tells them to), the fingerprint moves,
+    //     and the very next brute-force miss pays the full re-read again.
+    //
+    // So a scanner that keeps guessing while a vendor edits the ledger makes
+    // every single miss cost a file read *plus* a ledger copy, and neither is
+    // work the request asked for.
+    let seeded = dir.join("on-disk.json");
+    let vault = synthetic_vault(100_000);
+    vault.save(&seeded).expect("seed a real ledger on disk");
+    let pristine = std::fs::read(&seeded).expect("read");
+    let mut counter = counter_for(vault, &seeded);
+
+    let t0 = Instant::now();
+    let ((status, _), cold) = allocated_by(|| counter.handle("POST", CLAIM_PATH, &unknown, NOW));
+    let cold_t = t0.elapsed();
+    assert_eq!(status, 404, "cold refusal");
+    let t0 = Instant::now();
+    let ((status, _), warm) = allocated_by(|| counter.handle("POST", CLAIM_PATH, &unknown, NOW));
+    let warm_t = t0.elapsed();
+    assert_eq!(status, 404, "warm refusal");
+    assert_eq!(
+        std::fs::read(&seeded).expect("read"),
+        pristine,
+        "a 404 wrote to the ledger"
+    );
+
+    // The operator's upload: one entry more, so the length moves and the
+    // fingerprint cannot miss it.
+    let mut by_hand = Vault::load(&seeded).expect("the operator loads the ledger");
+    by_hand.entries.insert(
+        format!("{:064x}", u64::from(u32::MAX)),
+        unclaimed("Late Arrival Ltd", Some(365)),
+    );
+    by_hand.save(&seeded).expect("the upload lands");
+    let after_upload = std::fs::read(&seeded).expect("read");
+    let t0 = Instant::now();
+    let ((status, _), edited) = allocated_by(|| counter.handle("POST", CLAIM_PATH, &unknown, NOW));
+    let edited_t = t0.elapsed();
+    assert_eq!(status, 404, "refusal after an out-of-band edit");
+    assert_eq!(
+        std::fs::read(&seeded).expect("read"),
+        after_upload,
+        "a 404 overwrote the operator's upload"
+    );
+
+    println!(
+        "[§8] one 404 against a 100 000-entry / {} B ledger with the file ON DISK: \
+         cold {cold} B in {cold_t:?}, warm {warm} B in {warm_t:?}, after an out-of-band \
+         edit {edited} B in {edited_t:?} — the {reread} B on top is refresh_vault \
+         re-reading the file, the {warm} B underneath it is still the deep copy of \
+         lib.rs:355, on a connection nothing has authenticated",
+        pristine.len(),
+        reread = cold.saturating_sub(warm),
+    );
+    // The repair is present: the cold refusal really does re-read the file.
+    assert!(
+        cold > warm,
+        "the cold 404 did not re-read the ledger — was refresh_vault removed? \
+         {cold} vs {warm}"
+    );
+    assert!(
+        edited > warm,
+        "an out-of-band edit was not adopted — {edited} vs {warm}"
+    );
+    // ...and the defect is present: the warm refusal, which does nothing but
+    // `stat` and look up a key that is not there, still copies the ledger.
+    assert!(
+        warm >= large,
+        "a 404 stopped deep-copying the ledger — lib.rs:355 would then be fixed, \
+         and it is not: {warm} vs {large}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1884,11 +2082,15 @@ fn a_failed_save_never_discloses_a_token_and_never_corrupts_the_file() {
 // §10  Size asymmetry: 4 KiB in, megabytes out
 // ═════════════════════════════════════════════════════════════════════
 
-/// **DEFECT 10.** The request side is capped at `MAX_BODY = 4 KiB`. The
-/// response side is capped at nothing: a licensee string is copied verbatim
-/// into the signed payload, so a 1 MiB name — which nothing rejects when the
-/// vendor types it — becomes a ~1.4 MB single-line HTTP response, after being
-/// buffered twice by `save`.
+/// **DEFECT 10 — STILL OPEN.** The request side is capped at
+/// `MAX_BODY = 4 KiB`. The response side is capped at nothing: a licensee
+/// string is copied verbatim into the signed payload, so a 1 MiB name — which
+/// nothing rejects when the vendor types it — becomes a ~1.4 MB single-line
+/// HTTP response, after being buffered twice by `save`. The allocation printed
+/// below rose from 16.4 MB to ~18 531 434 B when `handle_claim` gained its
+/// `refresh_vault()` call: this counter starts with `vault_seen: None`, so the
+/// one claim it serves re-reads the 1 MiB ledger before signing. The
+/// asymmetry the test is about is unchanged.
 #[test]
 fn a_megabyte_licensee_is_signed_whole_and_returned_over_the_wire() {
     let dir = scratch("megabyte");

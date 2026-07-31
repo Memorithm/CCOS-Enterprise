@@ -1,6 +1,6 @@
 //! # Hostile stress of the claim counter's HTTP/1.1 loop
 //!
-//! `ccos_license_server::serve` (`tools/ccos-license-server/src/lib.rs:342`)
+//! `ccos_license_server::serve` (`tools/ccos-license-server/src/lib.rs:430`)
 //! is the only network surface the CCOS product exposes, it is unauthenticated
 //! by construction (a claim code *is* the credential, and it never travels),
 //! and it is the checkout counter: if it is down, nobody can activate a
@@ -12,73 +12,127 @@
 //! > whole-request deadline**, so a drip-feeding client cannot park the queue."
 //! > — `docs/LICENSING_SERVER.md`, Deployment
 //!
-//! > "the deadline keeps one slow client from parking the queue"
-//! > — `lib.rs:340`
+//! > "A slow client now costs one thread and its own latency, not everyone's."
+//! > — `lib.rs:428`
 //!
 //! > "`revoke` makes the counter refuse the code" — `docs/LICENSING_SERVER.md`
 //!
 //! Everything asserted below is the product's **current, real** behaviour.
-//! Where that behaviour is a defect the assertion pins the defect and the
-//! comment names it, so a repair fails loudly here instead of silently
-//! changing the commercial posture. Nothing here is weakened to pass.
+//! Where that behaviour is still a defect the assertion pins the defect and
+//! the comment names it; where a defect has been **repaired** the assertion
+//! pins the repair, so a regression fails loudly here instead of silently
+//! changing the commercial posture. Nothing here is weakened to pass, and the
+//! finding numbers below are the ones the original report used — repaired
+//! findings keep their number under "What was repaired" so every per-test
+//! citation stays valid.
 //!
 //! ## What held
 //!
 //! * **Nothing this file could send made the counter stop serving.** Every
 //!   single attack — 16 KiB header floods, `u64::MAX` content lengths, JSON
 //!   nesting bombs, invalid UTF-8 in the request line, bodies that overrun
-//!   their announcement, 64 abrupt resets, 32-way claim races — is followed by
-//!   a survivor probe, and the counter answered every one. No panic, no
-//!   poisoned state, no leaked descriptor, no wedged loop.
+//!   their announcement, 64 abrupt resets, 64 simultaneous idle sockets, 32-way
+//!   claim races — is followed by a survivor probe, and the counter answered
+//!   every one. No panic, no poisoned state, no leaked descriptor, no wedged
+//!   loop.
 //! * **Memory is genuinely bounded.** `content_length > MAX_BODY` is checked
-//!   *before* `vec![0u8; content_length]` (`lib.rs:392-395`), so the largest
+//!   *before* `vec![0u8; content_length]` (`lib.rs:541-544`), so the largest
 //!   allocation an attacker can force per request is 4 KiB, and the head is
 //!   capped at 8 KiB. A head of exactly `MAX_HEAD` is still served; 8 193
-//!   bytes is refused.
+//!   bytes is refused. Concurrency is bounded the same way: at most
+//!   `MAX_CONCURRENT_CONNECTIONS` = 64 threads are in flight (`lib.rs:60`,
+//!   `444-453`) and the 65th connection is shed with an announced `503`, not
+//!   queued silently and not spawned.
 //! * **The single-seat property survives a 32-way race.** 32 threads from 32
 //!   different machines racing the *same* code on the *same* counter produce
 //!   exactly one `200` and 31 `410`s, one machine fingerprint in the ledger,
-//!   and one signed token — because the loop is sequential, the flip is
-//!   persisted before the token is disclosed, and the ledger is the arbiter.
-//!   32 threads from the *same* machine get 32 **byte-identical** tokens.
+//!   and one signed token. Since the concurrency repair those 32 claims really
+//!   are in flight together, and the property holds because the ledger is
+//!   shared behind a mutex (`lib.rs:431`, `468`), the flip is persisted before
+//!   the token is disclosed, and the ledger is the arbiter. 32 threads from the
+//!   *same* machine get 32 **byte-identical** tokens.
 //! * **The rate limiter never burns a seat.** `handle_claim` checks the bucket
-//!   *before* it parses or touches the vault (`lib.rs:268`), so a `429` leaves
+//!   *before* it parses or touches the vault (`lib.rs:335`), so a `429` leaves
 //!   the code exactly as claimable as it was, and it claims cleanly once the
 //!   bucket refills.
-//! * **There is no keep-alive, ever**, which is the only reason the
-//!   `Content-Length` sloppiness below is not a request-smuggling
-//!   vulnerability behind the documented nginx/Caddy reverse proxy.
+//! * **There is no keep-alive, ever**, which is what keeps the remaining
+//!   `Content-Length` sloppiness below (finding 3) from being a
+//!   request-smuggling vulnerability behind the documented nginx/Caddy reverse
+//!   proxy.
 //! * **Nothing from the request is reflected into the response.** Status,
 //!   reason phrase and body are all drawn from fixed strings; there is no
 //!   header-injection or response-splitting surface.
 //!
-//! ## What BROKE
+//! ## What was repaired
 //!
-//! 1. **AVAILABILITY — the deadline does not stop a client from parking the
-//!    queue; it only bounds how long each parking lasts.** The loop is
-//!    strictly sequential (`lib.rs:343`), so *one* connection is *all* of the
-//!    counter's capacity. A client that completes the TCP handshake and then
-//!    sends **zero bytes** parks every paying customer for `IO_TIMEOUT` = 5 s
-//!    (`lib.rs:51`); one that drips a byte every 20 ms parks them for
-//!    `REQUEST_DEADLINE` = 10 s (`lib.rs:55`). Measured end to end: an honest
-//!    `GET /healthz` issued 250 ms after one silent socket waits **5.0 s**; one
-//!    issued behind a slowloris waits **10.0 s**. The cost is linear in
-//!    attacker sockets and the attacker pays nothing — no bytes, no
-//!    completion, no rate-limit token (the bucket is only consulted *after* a
-//!    request parses, `lib.rs:268`). A single host holding the default 128-deep
-//!    accept backlog open and idle buys **~10 minutes of total outage per
-//!    round**, forever, from one IP, with zero payload. The documented claim
-//!    "a drip-feeding client cannot park the queue" is false; what is true is
-//!    "cannot park the queue *indefinitely*".
-//!    -> [`one_silent_socket_parks_every_paying_customer_for_the_io_timeout`],
-//!    [`slowloris_is_cut_at_the_deadline_but_parks_the_queue_until_it_fires`],
-//!    [`queue_denial_is_linear_in_idle_attacker_sockets`] (ignored, ~15 s)
+//! 1. **AVAILABILITY — one connection is no longer all of the counter's
+//!    capacity.** *Was:* the loop was strictly sequential, so a client that
+//!    completed the TCP handshake and then sent **zero bytes** parked every
+//!    paying customer for `IO_TIMEOUT` = 5 s, and one that dripped a byte every
+//!    20 ms parked them for `REQUEST_DEADLINE` = 10 s. Measured end to end by
+//!    this file at the time: an honest `GET /healthz` issued 250 ms behind one
+//!    silent socket waited **5.0 s**; one issued behind a slowloris waited
+//!    **10.0 s**; three idle sockets cost **15 s**, so a single host holding
+//!    the default 128-deep accept backlog open and idle bought ~10 minutes of
+//!    total outage per round, forever, from one IP, with zero payload — and the
+//!    attacker paid nothing, not even a rate-limit token (the bucket is only
+//!    consulted once a request parses, `lib.rs:335`). *Now:* `serve` runs one
+//!    thread per connection with at most `MAX_CONCURRENT_CONNECTIONS` = 64 in
+//!    flight and an announced `503` past the cap (`lib.rs:430-483`). The same
+//!    attacks, measured the same way, now cost the honest client single-digit
+//!    **milliseconds**, and the attacker's socket sits parked paying its own
+//!    timeout alone. The runbook sentence quoted above is finally true, though
+//!    its *mechanism* is now stale: connections are no longer handled
+//!    sequentially (`docs/LICENSING_SERVER.md:104` still says they are).
+//!    -> [`one_silent_socket_no_longer_parks_any_paying_customer`],
+//!    [`a_slowloris_is_cut_at_the_deadline_and_no_longer_parks_the_queue`],
+//!    [`idle_attacker_sockets_no_longer_add_up_to_an_outage`],
+//!    [`past_the_concurrency_cap_the_counter_sheds_load_with_an_announced_503`]
+//!
+//! 3a. **SPEC — an unparseable or duplicated `Content-Length` is now refused.**
+//!    *Was:* the parser ended in `.parse().ok().unwrap_or(0)`, so
+//!    `Content-Length: -1`, `abc`, an empty value and `99999999999999999999999`
+//!    all meant "no body" and the request was **served** where RFC 9112 §6.3
+//!    requires a 400 — and the absurdity inverted, `u64::MAX` being refused
+//!    (it fits `usize` and exceeds `MAX_BODY`) while `u64::MAX + 1` returned
+//!    **200 OK**. Two `Content-Length` headers were not refused either; the
+//!    **first** won, so `0` followed by `113` read no body at all. Both are
+//!    halves of a classic front-end/back-end desync. *Now:* absent means 0, and
+//!    a header that is present must be exactly **one** header whose value is
+//!    entirely ASCII digits and fits a `usize` (`lib.rs:519-540`); anything
+//!    else is `400 malformed request` before a body is read. `+113` is refused
+//!    too — RFC 9112 §6.3 allows only DIGIT.
+//!    -> [`an_unparseable_content_length_is_now_refused_not_served_as_bodyless`],
+//!    [`duplicate_content_lengths_are_now_refused_but_hidden_ones_are_still_invisible`]
+//!
+//! 5. **CORRECTNESS — a running counter now adopts vault edits instead of
+//!    erasing them.** *Was:* `serve` took the `Counter` by value and never
+//!    re-read `vault.json`; every successful claim wrote that memory over the
+//!    file. The runbook tells vendors to sell, re-arm and revoke seats with
+//!    `ccos-license-admin --vault <the same file>` and states that `revoke`
+//!    "makes the counter refuse the code" — the CLI itself prints "revoked …
+//!    — the counter now refuses this code". Against a running daemon all of
+//!    that was false: a revoked code was still **sold** (`200` + a valid signed
+//!    token), that very claim **erased** the revocation, and a seat sold while
+//!    the daemon was up was unclaimable (`404`) and then **deleted** from the
+//!    file. Money moved the wrong way in both directions. *Now:* `Counter`
+//!    carries a `vault_seen` fingerprint (`lib.rs:266`) and `refresh_vault`
+//!    (`lib.rs:296`) re-reads the file at the start of every claim whenever it
+//!    no longer matches what this process last read or wrote, so a revocation
+//!    applied mid-run is honoured (`410`), a seat sold mid-run is claimable,
+//!    and both survive the next claim's write-back. A ledger that cannot be
+//!    re-read fails closed with `500` instead of being overwritten from memory;
+//!    a *missing* file is not an error and memory is kept.
+//!    -> [`a_running_counter_now_adopts_every_vault_edit_made_while_it_ran`],
+//!    [`an_unreadable_ledger_is_now_refused_not_overwritten_from_memory`]
+//!
+//! ## What is still broken
 //!
 //! 2. **AVAILABILITY — 240 bytes lock out every paying customer, and 12
 //!    bytes/second holds the lockout forever.** The token bucket is **global**
-//!    (`lib.rs:209-211` calls this deliberate) and is charged *before* the
-//!    request is understood: `lib.rs:268` runs ahead of the `serde_json` parse
-//!    at `lib.rs:271`, so a request that is not a claim at all still spends a
+//!    (`lib.rs:218-220` calls this deliberate) and is charged *before* the
+//!    request is understood: `lib.rs:335` runs ahead of the `serde_json` parse
+//!    at `lib.rs:338`, so a request that is not a claim at all still spends a
 //!    token. The cheapest one is `POST /claim HTTP/1.1\r\n\r\n` — **24
 //!    bytes**, no headers, no body. The shipped parameters are burst 10 /
 //!    0.5 per second (`bin/ccos-license-server.rs:100`), so ten of them
@@ -91,33 +145,26 @@
 //!    throughout — also asserted here.
 //!    -> [`ten_junk_requests_lock_out_every_paying_customer`]
 //!
-//! 3. **SPEC — an unparseable `Content-Length` is silently treated as zero
-//!    instead of being refused.** `lib.rs:387-391` ends in `.ok().unwrap_or(0)`,
-//!    so `Content-Length: -1`, `Content-Length: abc`, `Content-Length:` and
-//!    `Content-Length: 99999999999999999999999` (any value that overflows
-//!    `usize`) all mean "no body" and the request is **served**, not rejected.
-//!    RFC 9112 §6.3 requires a 400. The inversion is perfect and asserted
-//!    here: `Content-Length: 18446744073709551615` (`u64::MAX`, which *fits*
-//!    `usize`) is refused, while `18446744073709551616` — one larger, more
-//!    absurd — returns **200 OK**. Duplicate `Content-Length` headers are not
-//!    rejected either (RFC 9112 §6.3 again); the **first** wins, so
-//!    `Content-Length: 0` followed by `Content-Length: 113` reads no body at
-//!    all. A header hidden behind a bare CR, behind an obs-fold continuation,
-//!    or written `Content-Length : 113` is invisible to this parser and
-//!    visible to a lenient one. `Transfer-Encoding: chunked` is ignored
-//!    outright — not 501'd, as RFC 9112 §6.1 requires — so a chunked claim is
-//!    silently a bodyless claim, and with both headers present
-//!    `Content-Length` wins, which is precisely backwards from §6.3. Each of
-//!    these is one half of a classic front-end/back-end desync, and the *only*
-//!    thing that keeps them from being request smuggling behind the documented
-//!    nginx/Caddy reverse proxy is that this server never reuses a connection.
-//!    -> [`an_unparseable_content_length_is_served_as_a_bodyless_request`],
-//!    [`the_first_of_two_content_lengths_wins_and_neither_is_refused`],
+//! 3. **SPEC — a `Content-Length` this parser cannot *see* is still silently
+//!    no body.** The value is now validated strictly (repair 3a above), but
+//!    header *framing* is not: the name is compared verbatim against a
+//!    `split_once(':')`, so `Content-Length : 113` is invisible here and
+//!    visible to a lenient front end; `str::lines` does not end a line at a
+//!    bare CR, so a header hidden behind one is absorbed into the previous
+//!    value; and an obs-fold continuation (RFC 9112 §5.2) is never unfolded.
+//!    `Transfer-Encoding: chunked` is ignored outright — not 501'd, as RFC
+//!    9112 §6.1 requires — so a chunked claim is silently a bodyless claim,
+//!    and with both headers present `Content-Length` wins, which is precisely
+//!    backwards from §6.3. Each of these is one half of a classic
+//!    front-end/back-end desync, and the *only* thing that keeps them from
+//!    being request smuggling behind the documented nginx/Caddy reverse proxy
+//!    is that this server never reuses a connection.
+//!    -> [`duplicate_content_lengths_are_now_refused_but_hidden_ones_are_still_invisible`],
 //!    [`transfer_encoding_chunked_is_ignored_not_refused`],
 //!    [`no_connection_is_ever_reused_which_is_what_defuses_the_desync`]
 //!
 //! 4. **SPEC — `HEAD` is unroutable and every `405` lies about it.** The match
-//!    at `lib.rs:259-264` accepts only `GET` and `POST`, so `HEAD /healthz` —
+//!    at `lib.rs:326-331` accepts only `GET` and `POST`, so `HEAD /healthz` —
 //!    the request every load balancer and uptime monitor sends first — is
 //!    `405 Method Not Allowed`, **with a response body**, which RFC 9110
 //!    §9.3.2 forbids for `HEAD` under any status. No `405` carries the `Allow`
@@ -128,24 +175,7 @@
 //!    -> [`method_path_matrix_is_exactly_the_documented_statuses`],
 //!    [`head_responses_carry_a_body_and_no_405_carries_allow`]
 //!
-//! 5. **CORRECTNESS — a running counter never re-reads its vault, so
-//!    `ccos-license-admin` silently loses.** `serve` takes the `Counter` by
-//!    value and holds the vault in memory for the process lifetime
-//!    (`lib.rs:342`); every successful claim writes that memory over the file
-//!    (`lib.rs:284`). The runbook tells vendors to sell, re-arm and revoke
-//!    seats with `ccos-license-admin --vault <the same file>` and states that
-//!    `revoke` "makes the counter refuse the code" — the CLI itself prints
-//!    "revoked … — the counter now refuses this code"
-//!    (`bin/ccos-license-admin.rs:322`). Against a running daemon, asserted
-//!    here: a code revoked on disk is **still sold** (`200` + a valid signed
-//!    token), the revocation is then **erased** from the ledger by that very
-//!    claim, and a seat *sold* while the daemon was up is **never claimable**
-//!    (`404`) and is **deleted from the file** by the next claim of any other
-//!    code. Money is lost in both directions and the ledger ends up
-//!    disagreeing with what the vendor was told happened.
-//!    -> [`a_running_counter_erases_every_vault_edit_made_while_it_ran`]
-//!
-//! 6. **SPEC — the request line is never validated.** `lib.rs:384-386` takes
+//! 6. **SPEC — the request line is never validated.** `lib.rs:515-518` takes
 //!    the first two whitespace-separated tokens of the first line and drops
 //!    the rest, so there is no method-token charset check, no request-target
 //!    form check and no HTTP-version check at all: `GET /healthz` with no
@@ -160,20 +190,40 @@
 //!    [`requests_without_a_request_line_are_refused_not_guessed`]
 //!
 //! 7. **ROBUSTNESS — one byte-at-a-time `read(2)` per header byte.**
-//!    `lib.rs:377` reads the head into a 1-byte buffer, so an 8 KiB header
+//!    `lib.rs:509` reads the head into a 1-byte buffer, so an 8 KiB header
 //!    flood costs 8 192 syscalls before it is refused, and a well-formed
 //!    request costs one syscall per byte of its head. It is a constant factor,
-//!    not an exhaustion vector on its own, but it multiplies every parked
-//!    second in finding 1.
+//!    not an exhaustion vector on its own; it used to multiply every parked
+//!    second in finding 1, and since that repair it costs only the connection
+//!    that sends the bytes.
 //!    -> [`a_header_flood_is_refused_at_max_head`]
 //!
+//! 8. **SPEC — the shed `503` is announced badly.** New with the concurrency
+//!    repair, and found by the test that guards it. The shed path
+//!    (`lib.rs:444-453`) writes the refusal and drops the stream **without
+//!    ever reading the request**, so a caller that sent one leaves bytes in
+//!    the receive queue, the close becomes an RST, and the announced body
+//!    `{"error":"counter busy — try again shortly"}` is destroyed in flight —
+//!    on loopback that is the common case, and the caller sees a truncated
+//!    `503` that some HTTP clients report as a network error rather than as a
+//!    refusal. The body is only observable intact by a client that sent
+//!    nothing. And `write_response` has no `503` arm (`lib.rs:560-568`), so
+//!    the status line reads `503 Internal Server Error`: the status is right,
+//!    the phrase says the counter crashed when what happened is that it
+//!    protected itself. Neither costs a sale — the caller is told to retry
+//!    either way — but a load shedder that cannot deliver its own reason is
+//!    one an operator will misdiagnose.
+//!    -> [`past_the_concurrency_cap_the_counter_sheds_load_with_an_announced_503`]
+//!
 //! Run the whole file: `cargo test -p ccos-enterprise-conformance --test
-//! stress_http_abuse` — 21 tests, ~10 s wall-clock in debug and in release,
-//! dominated by the three parking measurements (they overlap, since the test
-//! harness runs them on separate threads against separate counters). The
-//! linearity proof is `#[ignore]`d because it is 15 s of deliberate outage:
-//! `cargo test -p ccos-enterprise-conformance --test stress_http_abuse --
-//! --ignored --nocapture`.
+//! stress_http_abuse` — 23 tests, ~10 s wall-clock in debug and in release,
+//! dominated by the two *per-connection* bounds that are supposed to fire: the
+//! slowloris deadline (10 s) and the truncated-body read timeout (5 s). Both
+//! now cost only the attacker's own connection, which is why the three
+//! parking measurements no longer add anything: they resolve in
+//! milliseconds. Nothing here is `#[ignore]`d — the linearity proof used to be
+//! 15 s of deliberate outage and is now sub-second, because the outage is
+//! gone.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -184,7 +234,9 @@ use ccos_enterprise_governance::b64url;
 use ccos_enterprise_governance::claim::{
     code_from_entropy, code_hash, machine_fingerprint_of, vault_key, ClaimRequest, CLAIM_SCHEMA,
 };
-use ccos_license_server::{serve, Counter, Entry, Status, TokenBucket, Vault};
+use ccos_license_server::{
+    serve, Counter, Entry, Status, TokenBucket, Vault, MAX_CONCURRENT_CONNECTIONS,
+};
 
 // ── The counter's own private constants, mirrored ────────────────────
 //
@@ -192,19 +244,31 @@ use ccos_license_server::{serve, Counter, Entry, Status, TokenBucket, Vault};
 // they cannot be imported. Mirroring them here is deliberate: if someone
 // retunes the server, the boundary tests below fail and force the numbers in
 // this file's report to be re-derived rather than silently going stale.
+// `MAX_CONCURRENT_CONNECTIONS` is the exception: the concurrency repair made
+// it `pub`, so it is imported above and this file cannot drift from it.
 
-/// `lib.rs:49` — the head is refused at or beyond this many bytes.
+/// `lib.rs:51` — the head is refused at or beyond this many bytes.
 const MAX_HEAD: usize = 8 * 1024;
-/// `lib.rs:50` — an announced body larger than this is refused before it is
+/// `lib.rs:52` — an announced body larger than this is refused before it is
 /// allocated.
 const MAX_BODY: usize = 4 * 1024;
-/// `lib.rs:51` — per-read socket timeout. This is what a *silent* client costs.
+/// `lib.rs:53` — per-read socket timeout. This is what a *silent* client costs
+/// **its own connection**; since the concurrency repair it costs nobody else.
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
-/// `lib.rs:55` — whole-request deadline. This is what a *dripping* client costs.
+/// `lib.rs:64` — whole-request deadline. This is what a *dripping* client costs
+/// its own connection.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 /// `bin/ccos-license-server.rs:100` — the shipped bucket: burst 10, 30/min.
 const SHIPPED_BURST: f64 = 10.0;
 const SHIPPED_PER_SECOND: f64 = 0.5;
+
+/// What "served promptly" means for an honest client that is queued behind an
+/// attacker: one fifth of the per-read timeout, i.e. a full second, which is
+/// ~300x the measured unobstructed latency and still far below the 5 s the
+/// same request used to take. Deliberately generous — the property under test
+/// is "the honest client does not wait for the attacker's timeout", and a
+/// tight bound would be measuring the CI machine's scheduler instead.
+const PROMPT: Duration = Duration::from_millis(1_000);
 
 /// How long a *client* in this file waits before giving up. Deliberately far
 /// beyond every server-side bound, so a hang is always attributable to the
@@ -332,9 +396,11 @@ impl Reply {
 
     /// The `error` field of an announced refusal — the counter distinguishes
     /// "the HTTP framing was rejected" (`malformed request`, written by
-    /// `serve` at `lib.rs:357`) from "the framing was accepted and the claim
-    /// JSON was rejected" (`malformed claim request`, `lib.rs:273`). Which one
-    /// comes back proves which code path an abusive request reached.
+    /// `serve` at `lib.rs:475`) from "the framing was accepted and the claim
+    /// JSON was rejected" (`malformed claim request`, `lib.rs:340`). Which one
+    /// comes back proves which code path an abusive request reached. Since the
+    /// `Content-Length` repair this distinction is what separates a value the
+    /// framer refused from one it read as zero.
     fn error(&self) -> Option<String> {
         serde_json::from_str::<serde_json::Value>(self.body())
             .ok()?
@@ -492,7 +558,10 @@ impl Counterparty {
 ///
 /// `serve` never returns, so the thread is deliberately detached and lives
 /// until the test binary exits — exactly the daemon's lifecycle, and the only
-/// way to observe that the loop holds its vault in memory forever (finding 5).
+/// way to observe what a *long-lived* process does with its ledger: it used to
+/// hold the startup snapshot in memory forever and write it back over every
+/// out-of-band edit (former finding 5), and it now re-reads the file whenever
+/// the file changed underneath it.
 fn counter(tag: &str, burst: f64, per_second: f64) -> Counterparty {
     let dir = std::env::temp_dir().join(format!(
         "ccos-http-abuse-{tag}-{pid}",
@@ -517,6 +586,7 @@ fn counter(tag: &str, burst: f64, per_second: f64) -> Counterparty {
         vault_path: vault_path.clone(),
         seed: SEED,
         bucket: TokenBucket::new(burst, per_second),
+        vault_seen: None,
     };
     std::thread::spawn(move || {
         let _ = serve(listener, counter);
@@ -540,7 +610,7 @@ fn counter(tag: &str, burst: f64, per_second: f64) -> Counterparty {
 /// ignore at least one empty line received before the request line (it is the
 /// documented workaround for buggy clients that append CRLF to a previous
 /// request). This one refuses it, because `head.lines().next()` returns the
-/// empty line and `split_whitespace().next()?` then bails (`lib.rs:384`).
+/// empty line and `split_whitespace().next()?` then bails (`lib.rs:516`).
 /// Fail-closed, so it is a deviation rather than a hole — pinned so a
 /// deliberate change is visible.
 #[test]
@@ -571,13 +641,13 @@ fn requests_without_a_request_line_are_refused_not_guessed() {
 
 /// Garbage methods and absurd request targets are classified, never executed.
 ///
-/// The method is matched *before* the path (`lib.rs:259`), which is why
+/// The method is matched *before* the path (`lib.rs:326`), which is why
 /// `GET /claim` — the product's own endpoint — is `404 Not Found` while
 /// `WOPBOPALOOBOP /nope` is `405 Method Not Allowed`. Both are asserted
 /// because both are the shipped behaviour, and the pairing is exactly
 /// backwards from what RFC 9110 §15.5.6 intends.
 ///
-/// The request line itself is never validated: `lib.rs:384-386` takes the
+/// The request line itself is never validated: `lib.rs:515-518` takes the
 /// first two whitespace-separated tokens of the first line and ignores
 /// everything after them. So there is no method-token charset check, no
 /// request-target form check and no HTTP-version check — `GET /healthz` with
@@ -643,7 +713,7 @@ fn garbage_methods_and_absurd_targets_are_classified_never_executed() {
     }
 
     // Invalid UTF-8 in the request line is replaced, not rejected, by
-    // `String::from_utf8_lossy` (`lib.rs:382`) — the method becomes U+FFFD
+    // `String::from_utf8_lossy` (`lib.rs:514`) — the method becomes U+FFFD
     // and lands on 405. It must not panic and must not be `GET`.
     let mut invalid = Vec::from(&b"\xff\xfe\x80 /healthz HTTP/1.1\r\n\r\n"[..]);
     let reply = c.send(&invalid);
@@ -656,26 +726,36 @@ fn garbage_methods_and_absurd_targets_are_classified_never_executed() {
     c.assert_still_serving("eleven garbage request lines");
 }
 
-/// **DEFECT (finding 3).** Every `Content-Length` the parser cannot turn into
-/// a `usize` is silently taken to mean zero (`lib.rs:387-391` ends in
-/// `.parse().ok() … .unwrap_or(0)`), so the request is **served** rather than
-/// refused. RFC 9112 §6.3 requires a 400 for an invalid `Content-Length`.
+/// **REGRESSION GUARD (repaired finding 3a).** Every `Content-Length` the
+/// parser could not turn into a `usize` **used to** be silently taken to mean
+/// zero — the old framer ended in `.parse().ok() … .unwrap_or(0)`, which could
+/// not tell "no header" from "header I could not read" — so the request was
+/// **served** rather than refused, where RFC 9112 §6.3 requires a 400.
 ///
-/// The consequences are asserted in both directions:
-/// * `GET /healthz` with `Content-Length: -1` and a body returns **200 OK**;
-/// * `POST /claim` with `Content-Length: -1` is answered `malformed claim
+/// What that cost, in the three directions this test measured at the time:
+/// * `GET /healthz` with `Content-Length: -1` and a body returned **200 OK**;
+/// * `POST /claim` with `Content-Length: -1` was answered `malformed claim
 ///   request` **without ever waiting for the announced body**, so a customer
-///   behind a proxy that rewrites lengths is told their code is malformed;
-/// * and the absurdity inverts: `u64::MAX` is refused because it fits `usize`
-///   and exceeds `MAX_BODY`, while `u64::MAX + 1` is *accepted* because it
-///   overflows the parse.
+///   behind a proxy that rewrites lengths was told their *code* was malformed
+///   when it was the framing that had been mangled;
+/// * and the absurdity inverted: `u64::MAX` was refused (it fits `usize` and
+///   exceeds `MAX_BODY`) while `u64::MAX + 1` — one larger, more absurd — was
+///   *accepted*, because it overflowed the parse into zero.
+///
+/// Behind the documented nginx/Caddy reverse proxy that is one half of a
+/// request-smuggling primitive: the proxy frames a body this server frames
+/// away. The framer is now strict (`lib.rs:519-540`) — absent means 0, present
+/// means exactly one header whose value is entirely ASCII digits and fits a
+/// `usize`, anything else is `400 malformed request` before a byte of body is
+/// read. Every input below is the one that used to be served; all of them are
+/// now refused, the inversion is closed in both directions, and no seat moves.
 #[test]
-fn an_unparseable_content_length_is_served_as_a_bodyless_request() {
+fn an_unparseable_content_length_is_now_refused_not_served_as_bodyless() {
     let c = counter("clength", 1e6, 1e6);
     let body = claim_body(&wire(0), &fp(1));
 
-    // Served as bodyless: the framer accepted the request and did not wait one
-    // millisecond for the body it was promised.
+    // Refused by the *framer*, not served as bodyless — and refused without
+    // waiting one millisecond for the body that was announced.
     for value in [
         "-1",
         "-4096",
@@ -694,39 +774,46 @@ fn an_unparseable_content_length_is_served_as_a_bodyless_request() {
         );
         assert_eq!(
             reply.status(),
-            Some(200),
-            "Content-Length: {value:?} was served as a healthy bodyless GET"
+            Some(400),
+            "Content-Length: {value:?} must be refused, never served as a \
+             healthy bodyless GET"
+        );
+        assert_eq!(
+            reply.error().as_deref(),
+            Some("malformed request"),
+            "Content-Length: {value:?} is refused by the framer, before routing"
         );
         assert!(
             reply.elapsed < Duration::from_secs(1),
-            "Content-Length: {value:?} — the counter answered without waiting \
-             for the announced body ({:?})",
+            "Content-Length: {value:?} — the refusal must not cost a wait for \
+             the announced body ({:?})",
             reply.elapsed
         );
     }
 
-    // The same coercion on the endpoint that matters: the claim body is never
-    // read and the customer is told their claim is malformed.
+    // The same value on the endpoint that matters. The claim parser is never
+    // reached now, so the customer is told the *request* was malformed rather
+    // than being told their code was.
     let reply = speak_head_only(c.addr, "POST /claim HTTP/1.1\r\nContent-Length: -1\r\n\r\n");
     assert_eq!(reply.status(), Some(400));
     assert_eq!(
         reply.error().as_deref(),
-        Some("malformed claim request"),
-        "the framer accepted the request and handed the claim parser an empty body"
+        Some("malformed request"),
+        "the framer refused it; the claim parser never saw an empty body"
     );
     assert!(
         reply.elapsed < Duration::from_secs(1),
         "{:?}",
         reply.elapsed
     );
-    // Nothing was sold, which is the one thing that must remain true.
+    // Nothing was sold, which was true before the repair and must stay true.
     assert_eq!(
         c.on_disk().entries[&key(0)].status,
         Status::Unclaimed,
         "a length the parser could not read must never move the ledger"
     );
 
-    // Refused, because these *do* parse and exceed MAX_BODY.
+    // Refused for the other reason: these *do* parse and exceed MAX_BODY.
     for value in [
         format!("{}", MAX_BODY + 1),
         format!("{}", u32::MAX),
@@ -739,8 +826,8 @@ fn an_unparseable_content_length_is_served_as_a_bodyless_request() {
         reply.assert_refused(&format!("Content-Length: {value}"));
     }
 
-    // The inversion, stated as one pair of assertions: the larger, more absurd
-    // value is the one that gets served.
+    // The inversion, stated as the same pair of assertions with the outcome
+    // flipped: the absurd value is no longer the one that gets served.
     let refused = speak_head_only(
         c.addr,
         &format!(
@@ -748,57 +835,110 @@ fn an_unparseable_content_length_is_served_as_a_bodyless_request() {
             u64::MAX
         ),
     );
-    let served = speak_head_only(
+    let one_larger = speak_head_only(
         c.addr,
         "GET /healthz HTTP/1.1\r\nContent-Length: 18446744073709551616\r\n\r\n",
     );
     assert_eq!(refused.status(), Some(400), "u64::MAX is refused");
-    assert_eq!(served.status(), Some(200), "u64::MAX + 1 is served");
+    assert_eq!(
+        one_larger.status(),
+        Some(400),
+        "u64::MAX + 1 is refused too — the inversion is closed"
+    );
 
-    // A `+` sign is accepted by Rust's integer parser though RFC 9112 §6.3
-    // allows only DIGIT — the body really is read.
-    let plus = format!(
-        "POST /claim HTTP/1.1\r\nContent-Length: +{}\r\n\r\n{body}",
+    // A `+` sign used to be accepted, because Rust's integer parser takes it
+    // and the old framer asked nothing else; RFC 9112 §6.3 allows only DIGIT.
+    // The head alone is now refused...
+    let plus_head = format!(
+        "POST /claim HTTP/1.1\r\nContent-Length: +{}\r\n\r\n",
         body.len()
     );
-    let reply = c.send(plus.as_bytes());
+    let reply = speak_head_only(c.addr, &plus_head);
+    assert_eq!(reply.status(), Some(400), "`+N` is not a length: {reply:?}");
+    assert_eq!(reply.error().as_deref(), Some("malformed request"));
+    // ...and so is the whole request that used to sell the seat. (Sent as one
+    // burst, so the unread body may cost the response an RST — `assert_refused`
+    // accepts either announced refusal; the ledger below is unambiguous.)
+    let reply = c.send(format!("{plus_head}{body}").as_bytes());
+    reply.assert_refused("`+N` as a Content-Length");
+    assert!(reply.token().is_none(), "and it did not sell the seat");
     assert_eq!(
-        reply.status(),
-        Some(200),
-        "`+N` is a length here: {reply:?}"
+        c.on_disk().entries[&key(0)].status,
+        Status::Unclaimed,
+        "a non-DIGIT length must never reach the claim parser"
     );
-    assert!(reply.token().is_some(), "and it sold the seat");
 
     c.assert_still_serving("the content-length matrix");
 }
 
-/// **DEFECT (finding 3).** Two `Content-Length` headers are not a 400; the
-/// **first** one wins (`lib.rs:389` uses `.find`). RFC 9112 §6.3 requires
-/// rejecting the message unless every value is identical.
+/// **REGRESSION GUARD (repaired finding 3a) + still-open finding 3.** Two
+/// `Content-Length` headers **used to** be accepted and the **first** one won
+/// (the old framer used `.find`), where RFC 9112 §6.3 requires rejecting the
+/// message unless every value is identical. That is the classic CL.CL desync:
+/// a front end that takes the *last* value and a back end that takes the
+/// *first* disagree about where the message ends. Both orders were asserted,
+/// and `Content-Length: 0` followed by the real length read no body at all
+/// while the real length followed by `0` sold a seat.
 ///
-/// Both orders are asserted, because which one wins is the whole point of a
-/// CL.CL desync: a front end that takes the *last* value and a back end that
-/// takes the *first* disagree about where this message ends.
+/// The framer now refuses the message outright when a second `Content-Length`
+/// is present (`lib.rs:533`), in either order — asserted first below.
 ///
-/// Which value framed the message is read off the answer, not guessed: a
-/// non-zero length makes the counter block in the body loop until `IO_TIMEOUT`
-/// and answer `malformed request`, a zero length makes it answer `malformed
-/// claim request` in milliseconds. The latency assertions are the proof.
+/// **The rest of this test still pins a defect.** Three shapes hide the header
+/// from *this* parser while a lenient front end sees it, and those are
+/// unchanged: the name is compared verbatim so `Content-Length : N` is
+/// invisible, `str::lines` does not end a line at a bare CR, and an obs-fold
+/// continuation is never unfolded. All three are still framed as bodyless
+/// here, which is still one half of a desync — see finding 3.
+///
+/// Which value framed the message is read off the answer, not guessed:
+/// `malformed request` means the framer refused, `malformed claim request`
+/// means it accepted the message as bodyless and the claim parser saw nothing,
+/// and a non-zero length would have blocked in the body loop until
+/// `IO_TIMEOUT`. The latency assertions are the proof that none of them did.
 #[test]
-fn the_first_of_two_content_lengths_wins_and_neither_is_refused() {
+fn duplicate_content_lengths_are_now_refused_but_hidden_ones_are_still_invisible() {
     let c = counter("dupclen", 1e6, 1e6);
     let body = claim_body(&wire(0), &fp(1));
 
-    // Every shape below must be framed as bodyless by *this* parser, and each
-    // is a shape some other parser in the chain would frame differently.
+    // REPAIRED: a second Content-Length is refused by the framer itself.
     for (what, head) in [
         (
-            "the first of two Content-Lengths (0) wins",
+            "two Content-Lengths, 0 first",
             format!(
                 "POST /claim HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: {}\r\n\r\n",
                 body.len()
             ),
         ),
+        (
+            "two Content-Lengths, the real length first",
+            format!(
+                "POST /claim HTTP/1.1\r\nContent-Length: {}\r\nContent-Length: 0\r\n\r\n",
+                body.len()
+            ),
+        ),
+        (
+            "two identical Content-Lengths",
+            "POST /claim HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".to_string(),
+        ),
+    ] {
+        let reply = speak_head_only(c.addr, &head);
+        assert_eq!(reply.status(), Some(400), "{what}: {reply:?}");
+        assert_eq!(
+            reply.error().as_deref(),
+            Some("malformed request"),
+            "{what}: refused by the framer, so no parser downstream can \
+             disagree with it about where this message ends"
+        );
+        assert!(
+            reply.elapsed < Duration::from_secs(1),
+            "{what}: the counter waited for a body it should not have seen ({:?})",
+            reply.elapsed
+        );
+    }
+
+    // STILL A DEFECT: each of these hides the header from this parser and
+    // shows it to a lenient one, so the message is framed as bodyless here.
+    for (what, head) in [
         (
             // The header name is compared verbatim, so a space before the
             // colon hides it entirely.
@@ -846,8 +986,11 @@ fn the_first_of_two_content_lengths_wins_and_neither_is_refused() {
         "and no seat moved"
     );
 
-    // First = the real length -> the trailing declaration is ignored, the body
-    // is read whole and the claim is honoured.
+    // The order that used to *sell*: first = the real length, so the trailing
+    // declaration was ignored, the body was read whole and the claim was
+    // honoured. Sent as one burst with the body attached, exactly as before —
+    // the unread body may cost the response an RST, so `assert_refused` takes
+    // either announced refusal and the ledger below is the unambiguous half.
     let reply = c.send(
         format!(
             "POST /claim HTTP/1.1\r\nContent-Length: {}\r\nContent-Length: 0\r\n\r\n{body}",
@@ -855,8 +998,16 @@ fn the_first_of_two_content_lengths_wins_and_neither_is_refused() {
         )
         .as_bytes(),
     );
-    assert_eq!(reply.status(), Some(200), "{reply:?}");
-    assert!(reply.token().is_some());
+    reply.assert_refused("two Content-Lengths with the body attached");
+    assert!(
+        reply.token().is_none(),
+        "a CL.CL message must never sell a seat: {reply:?}"
+    );
+    assert_eq!(
+        c.on_disk().entries[&key(0)].status,
+        Status::Unclaimed,
+        "the seat the CL.CL desync used to sell is still unclaimed"
+    );
 
     c.assert_still_serving("duplicate and hidden content lengths");
 }
@@ -906,12 +1057,17 @@ fn transfer_encoding_chunked_is_ignored_not_refused() {
     c.assert_still_serving("chunked framing");
 }
 
-/// **DEFECT (finding 1, body half).** A `Content-Length` larger than the bytes
-/// actually sent does not hang the counter forever — but it does hold it for
-/// the full `IO_TIMEOUT`, because the body loop blocks in `read` until the
-/// per-read timeout fires (`lib.rs:401`). This is the "does the deadline
-/// work" test: the answer is yes, and the price is five seconds of the
-/// counter's entire capacity for a 90-byte request.
+/// A `Content-Length` larger than the bytes actually sent holds **its own
+/// connection** for the full `IO_TIMEOUT`: the body loop blocks in `read`
+/// until the per-read timeout fires (`lib.rs:546-555`). This is the "does the
+/// per-read bound work" test, and the answer is yes.
+///
+/// Under the sequential loop (former finding 1) those five seconds were five
+/// seconds of the counter's *entire capacity*, bought for a 90-byte request.
+/// They are now five seconds of one thread out of
+/// `MAX_CONCURRENT_CONNECTIONS`, and every other customer is served meanwhile
+/// — which is what [`one_silent_socket_no_longer_parks_any_paying_customer`]
+/// measures directly.
 #[test]
 fn a_short_body_under_a_long_content_length_is_cut_at_the_io_timeout() {
     let c = counter("shortbody", 1e6, 1e6);
@@ -921,7 +1077,7 @@ fn a_short_body_under_a_long_content_length_is_cut_at_the_io_timeout() {
     let mut s = TcpStream::connect(c.addr).expect("connect");
     s.set_read_timeout(Some(CLIENT_PATIENCE)).expect("timeout");
     // Announce the whole body, send half of it, then go quiet without closing:
-    // an EOF would end the read immediately (`Ok(0)` at `lib.rs:402`), so the
+    // an EOF would end the read immediately (`Ok(0)` at `lib.rs:551`), so the
     // hostile move is to stay connected and silent.
     write!(
         s,
@@ -1010,12 +1166,16 @@ fn bytes_beyond_the_announced_length_are_never_a_second_request() {
     c.assert_still_serving("two smuggling attempts");
 }
 
-/// **DEFECT (finding 3, mitigation).** The reason none of the framing
-/// disagreements above is a request-smuggling vulnerability behind the
-/// documented reverse proxy is *only* that the loop never reuses a
-/// connection: it writes `Connection: close`, drops the stream, and accepts
-/// the next one. Pinned as an explicit invariant, because the day someone adds
-/// keep-alive to speed up the counter, findings 3's four disagreements become
+/// **DEFECT (finding 3, mitigation).** The `Content-Length` repair closed two
+/// of the framing disagreements (an unreadable value and a duplicated header
+/// are now refused outright), but three remain: a header this parser cannot
+/// *see* — hidden behind a space before the colon, behind a bare CR, or behind
+/// an obs-fold continuation — plus `Transfer-Encoding` being ignored rather
+/// than 501'd. The reason none of those is a request-smuggling vulnerability
+/// behind the documented reverse proxy is *only* that the loop never reuses a
+/// connection: it writes `Connection: close`, drops the stream, and moves on.
+/// Pinned as an explicit invariant, because the day someone adds keep-alive to
+/// speed up the counter, finding 3's remaining disagreements become
 /// exploitable in the same commit.
 #[test]
 fn no_connection_is_ever_reused_which_is_what_defuses_the_desync() {
@@ -1041,9 +1201,10 @@ fn no_connection_is_ever_reused_which_is_what_defuses_the_desync() {
     c.assert_still_serving("a keep-alive request");
 }
 
-/// **DEFECT (finding 6).** The head is refused at `MAX_HEAD`, and the boundary
+/// **DEFECT (finding 7).** The head is refused at `MAX_HEAD`, and the boundary
 /// is exact — but it is reached one `read(2)` syscall per byte
-/// (`lib.rs:377`), so refusing a flood costs 8 192 syscalls.
+/// (`lib.rs:509`), so refusing a flood costs 8 192 syscalls. Since the
+/// concurrency repair those syscalls are spent on the flooder's own thread.
 #[test]
 fn a_header_flood_is_refused_at_max_head() {
     let c = counter("headflood", 1e6, 1e6);
@@ -1174,51 +1335,74 @@ fn hostile_claim_bodies_are_refused_without_moving_the_ledger() {
 // §2  Availability: what one connection costs everybody else
 // ═════════════════════════════════════════════════════════════════════
 
-/// **DEFECT (finding 1).** The cheapest denial in the product: complete a TCP
-/// handshake and send **nothing**. `read_request` blocks in `read` until
-/// `IO_TIMEOUT` (`lib.rs:377`), and because the loop is sequential
-/// (`lib.rs:343`) that is five seconds during which *every* paying customer's
-/// claim waits. Zero bytes sent, zero rate-limit tokens consumed (the bucket
-/// is only reached by a request that parsed), zero completions needed.
+/// **REGRESSION GUARD (repaired finding 1).** The cheapest denial the product
+/// ever had: complete a TCP handshake and send **nothing**. `read_request`
+/// blocks in `read` until `IO_TIMEOUT` (`lib.rs:505-513`), and because the
+/// loop was strictly sequential that used to be five seconds during which
+/// *every* paying customer's claim waited. Zero bytes sent, zero rate-limit
+/// tokens consumed (the bucket is only reached by a request that parsed), zero
+/// completions needed — and the cost was linear in attacker sockets.
 ///
-/// The measurement is the honest client's own latency, not the server's
-/// internals: a `GET /healthz` that normally answers in under a millisecond
-/// takes five seconds because one socket ahead of it is silent.
+/// `serve` now runs one thread per connection (`lib.rs:430-483`), so the
+/// silent socket pays its own `IO_TIMEOUT` alone. The measurement is unchanged
+/// — the honest client's own end-to-end latency, not the server's internals —
+/// and it is printed, because the number *is* the finding: a `POST /claim`
+/// issued 250 ms behind a silent socket used to take 5.0 s and must now take
+/// milliseconds. Both halves are asserted: the honest client is served
+/// promptly, and the attacker's socket has still been answered nothing at that
+/// instant, i.e. it is parked on its own timeout rather than on everyone's.
 #[test]
-fn one_silent_socket_parks_every_paying_customer_for_the_io_timeout() {
+fn one_silent_socket_no_longer_parks_any_paying_customer() {
     let c = counter("silent", 1e6, 1e6);
 
     // Baseline: an unobstructed request.
     let quick = c.healthz();
     assert_eq!(quick.status(), Some(200));
     assert!(
-        quick.elapsed < Duration::from_secs(1),
+        quick.elapsed < PROMPT,
         "baseline latency should be sub-second: {:?}",
         quick.elapsed
     );
 
     // The attack: one socket, zero bytes, held open.
-    let idle = TcpStream::connect(c.addr).expect("connect");
+    let mut idle = TcpStream::connect(c.addr).expect("connect");
     // Give the loop time to accept it and block on the first read.
     std::thread::sleep(Duration::from_millis(250));
 
     let honest = c.claim(0, 1);
-    assert_eq!(honest.status(), Some(200), "the queue drained: {honest:?}");
-    assert!(
-        honest.elapsed >= IO_TIMEOUT - Duration::from_millis(750),
-        "one silent socket should have parked the counter for IO_TIMEOUT; \
-         the honest client only waited {:?}",
+    assert_eq!(honest.status(), Some(200), "{honest:?}");
+    println!(
+        "[http-abuse] 1 silent socket, 0 bytes sent -> honest claim answered in \
+         {:?} (was IO_TIMEOUT = {IO_TIMEOUT:?} under the sequential loop)",
         honest.elapsed
     );
     assert!(
-        honest.elapsed < IO_TIMEOUT + REQUEST_DEADLINE,
-        "the counter never recovered: {:?}",
+        honest.elapsed < PROMPT,
+        "a silent socket must cost only itself; the honest client waited {:?}, \
+         which is the parked-queue defect (it used to be IO_TIMEOUT = {IO_TIMEOUT:?})",
         honest.elapsed
+    );
+
+    // ...and the attacker is still sitting there with nothing back, paying its
+    // own IO_TIMEOUT on its own thread. A read that times out (or would block)
+    // proves the connection is still open and still unanswered; EOF or bytes
+    // would mean it had already been dealt with, and the measurement above
+    // would then not be the one described.
+    idle.set_read_timeout(Some(Duration::from_millis(50)))
+        .expect("timeout");
+    let mut peek = [0u8; 1];
+    let parked = idle.read(&mut peek);
+    assert!(
+        matches!(
+            &parked,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut
+        ),
+        "the silent socket should still be parked and unanswered while the \
+         honest client is served, got {parked:?}"
     );
     drop(idle);
 
-    // The seat really was sold once the queue drained — the denial is pure
-    // latency, not corruption.
+    // The seat really was sold — promptly, and with no corruption anywhere.
     let token = honest.token().expect("a token was issued");
     let payload = verified_payload(&token);
     assert_eq!(payload["machine"], serde_json::json!(fp(1)));
@@ -1226,18 +1410,24 @@ fn one_silent_socket_parks_every_paying_customer_for_the_io_timeout() {
     c.assert_still_serving("a silent socket");
 }
 
-/// **DEFECT (finding 1).** The documented defence — "a drip-feeding client
-/// cannot park the queue" — is only half true. The `REQUEST_DEADLINE` does
-/// fire: a client sending one byte every 20 ms is cut after ten seconds
-/// instead of the hours the per-read timeout alone would allow. But it is cut
-/// *after* ten seconds of parking the only worker there is, so the queue was
-/// parked; the deadline merely bounds each parking.
+/// **REGRESSION GUARD (repaired finding 1).** The documented defence — "a
+/// drip-feeding client cannot park the queue" — used to be only half true. The
+/// `REQUEST_DEADLINE` did fire: a client sending one byte every 20 ms is cut
+/// after ten seconds instead of the hours the per-read timeout alone would
+/// allow. But it was cut *after* ten seconds of parking the only worker there
+/// was, so the queue **had** been parked; the deadline merely bounded each
+/// parking, and a second dripper started the clock again.
 ///
-/// The key availability property — the loop is not *permanently* wedged — is
-/// asserted directly: a second client's well-formed claim is served, with a
-/// real token, immediately after the deadline fires.
+/// Both halves are now asserted, measured exactly as before:
+/// * the dripper is still cut at `REQUEST_DEADLINE` and never served — the
+///   per-connection bound still works and is still the thing that stops a
+///   drip from lasting hours;
+/// * and another client's correct claim is answered in **milliseconds** while
+///   the dripper is still dripping, not after the deadline fires. The honest
+///   client's latency is printed, because that number is the whole finding:
+///   it used to be 10.0 s.
 #[test]
-fn slowloris_is_cut_at_the_deadline_but_parks_the_queue_until_it_fires() {
+fn a_slowloris_is_cut_at_the_deadline_and_no_longer_parks_the_queue() {
     let c = counter("slowloris", 1e6, 1e6);
 
     let addr = c.addr;
@@ -1271,24 +1461,25 @@ fn slowloris_is_cut_at_the_deadline_but_parks_the_queue_until_it_fires() {
     // Let the loop accept the dripper and start reading.
     std::thread::sleep(Duration::from_millis(250));
 
-    // The key availability assertion: another client's correct claim is still
-    // answered — late, but answered, with a real seat.
+    // The key availability assertion: another client's correct claim is
+    // answered *while the dripper is still dripping*, with a real seat.
     let honest = c.claim(0, 1);
     assert_eq!(honest.status(), Some(200), "{honest:?}");
     let payload = verified_payload(&honest.token().expect("token"));
     assert_eq!(payload["machine"], serde_json::json!(fp(1)));
     assert_eq!(payload["licensee"], serde_json::json!("Customer 00"));
 
-    // ...but it waited for the whole deadline, which is the defect.
-    assert!(
-        honest.elapsed >= REQUEST_DEADLINE - Duration::from_secs(2),
-        "the dripper should have parked the queue until the deadline fired; \
-         the honest client only waited {:?}",
+    // ...and it did not wait for the deadline, which is the repair.
+    println!(
+        "[http-abuse] 1 slowloris (1 byte / 20 ms) -> honest claim answered in \
+         {:?} (was REQUEST_DEADLINE = {REQUEST_DEADLINE:?} under the sequential loop)",
         honest.elapsed
     );
     assert!(
-        honest.elapsed < REQUEST_DEADLINE + IO_TIMEOUT + Duration::from_secs(5),
-        "the counter never recovered from one dripping client: {:?}",
+        honest.elapsed < PROMPT,
+        "the dripper parked the queue again: the honest client waited {:?}, \
+         and the drip was still running (it used to wait REQUEST_DEADLINE = \
+         {REQUEST_DEADLINE:?})",
         honest.elapsed
     );
 
@@ -1314,18 +1505,18 @@ fn slowloris_is_cut_at_the_deadline_but_parks_the_queue_until_it_fires() {
     c.assert_still_serving("a slowloris");
 }
 
-/// **EXHAUSTION (finding 1).** The denial is linear in attacker sockets and
-/// the attacker pays nothing per socket. Three idle connections cost fifteen
-/// seconds of total outage; the default 128-deep accept backlog therefore
-/// costs ~10 minutes per round from a single IP with zero payload.
+/// **REGRESSION GUARD (repaired finding 1, exhaustion half).** The denial used
+/// to be linear in attacker sockets, and the attacker paid nothing per socket:
+/// three idle connections cost fifteen seconds of total outage, so the default
+/// 128-deep accept backlog extrapolated to ~10 minutes per round from a single
+/// IP with zero payload, forever.
 ///
-/// Ignored because it is ~16 s of deliberate parking. Run it with:
-/// `cargo test -p ccos-enterprise-conformance --test stress_http_abuse --
-/// --ignored --nocapture`
+/// Same three idle sockets, same measurement, opposite bound: the honest
+/// client is served promptly and the extrapolation is now ~0. This test used
+/// to be `#[ignore]`d because running it meant 16 s of deliberate outage;
+/// there is no outage left to schedule around, so it runs with the rest.
 #[test]
-#[ignore = "~16 s of deliberate parking. Run: cargo test -p ccos-enterprise-conformance \
-            --test stress_http_abuse -- --ignored --nocapture"]
-fn queue_denial_is_linear_in_idle_attacker_sockets() {
+fn idle_attacker_sockets_no_longer_add_up_to_an_outage() {
     let c = counter("linear", 1e6, 1e6);
 
     let mut idle = Vec::new();
@@ -1339,17 +1530,119 @@ fn queue_denial_is_linear_in_idle_attacker_sockets() {
     let per_socket = honest.elapsed.as_secs_f64() / 3.0;
     println!(
         "[http-abuse] 3 idle sockets, 0 bytes sent -> honest client waited {:?} \
-         ({per_socket:.2} s per socket); 128-deep backlog extrapolates to {:.1} minutes",
+         ({:.2} ms per socket); 128-deep backlog extrapolates to {:.2} seconds \
+         (was 5 s per socket, i.e. ~10 minutes, under the sequential loop)",
         honest.elapsed,
-        per_socket * 128.0 / 60.0
+        per_socket * 1_000.0,
+        per_socket * 128.0
     );
     assert!(
-        honest.elapsed >= IO_TIMEOUT * 2,
-        "three idle sockets should cost at least two timeouts: {:?}",
-        honest.elapsed
+        honest.elapsed < PROMPT,
+        "three idle sockets cost the honest client {:?} — the denial is linear \
+         in attacker sockets again (it used to be {:?})",
+        honest.elapsed,
+        IO_TIMEOUT * 3
     );
     drop(idle);
     c.assert_still_serving("three idle sockets");
+}
+
+/// **REGRESSION GUARD (repaired finding 1, the new bound) + DEFECT (finding
+/// 8).** One thread per connection is not free either, so the repair came with
+/// a cap: `MAX_CONCURRENT_CONNECTIONS` = 64 in flight (`lib.rs:60`), and past
+/// it the counter answers an announced `503` instead of queueing silently or
+/// spawning without limit (`lib.rs:444-453`). That ceiling is the reason
+/// unbounded concurrency is not simply a different exhaustion vector, so it is
+/// pinned here: 64 idle sockets are accepted, the 65th caller is **told** the
+/// counter is busy within milliseconds rather than being parked, and capacity
+/// returns on its own as soon as the idle sockets go away.
+///
+/// Two warts on that path are pinned with it (finding 8), both discovered by
+/// this test:
+/// * the shed path writes the response and drops the stream **without ever
+///   reading the request**, so a caller that actually sent one leaves bytes in
+///   the receive queue, the close becomes an RST, and the announced JSON body
+///   is destroyed in flight often enough to be the common case on loopback.
+///   The caller sees a truncated `503` — some HTTP clients report that as a
+///   network error rather than as a refusal. The body is therefore read here
+///   from a probe that sends *nothing*, which is the only way to observe it
+///   intact;
+/// * `write_response` has no `503` arm, so the status line reads
+///   `503 Internal Server Error` (`lib.rs:560-568`). The status is right and
+///   the phrase is not: this is load shedding, not a crash.
+#[test]
+fn past_the_concurrency_cap_the_counter_sheds_load_with_an_announced_503() {
+    let c = counter("shed", 1e6, 1e6);
+
+    // Fill every slot with sockets that will never send a byte.
+    let idle: Vec<TcpStream> = (0..MAX_CONCURRENT_CONNECTIONS)
+        .map(|_| TcpStream::connect(c.addr).expect("connect"))
+        .collect();
+    assert_eq!(idle.len(), 64, "the shipped cap, mirrored from the server");
+
+    // Poll a real request until the accept loop has taken all 64 and the cap
+    // is in force. A clean 200 means there was still a slot; anything else
+    // means the caller was shed. Every probe must be answered promptly
+    // whichever side of the cap it lands on — being parked is the one outcome
+    // that is never allowed, and it is the outcome the repair removed.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut capped = false;
+    while !capped && Instant::now() < deadline {
+        let probe = c.healthz();
+        assert!(
+            probe.elapsed < PROMPT,
+            "a probe at the cap was parked for {:?} instead of being answered",
+            probe.elapsed
+        );
+        match probe.status() {
+            Some(200) => std::thread::sleep(Duration::from_millis(50)),
+            // 503, or a status line the RST truncated away — either way this
+            // caller was shed, not served and not parked.
+            _ => {
+                assert!(
+                    probe.body() != r#"{"ok":true}"#,
+                    "a shed caller must never be served: {probe:?}"
+                );
+                capped = true;
+            }
+        }
+    }
+    assert!(
+        capped,
+        "64 idle sockets must fill the cap and shed the 65th caller"
+    );
+
+    // The announced refusal, read whole. `speak` with an empty request sends
+    // nothing, so there is nothing unread for the close to turn into an RST.
+    let shed = speak(c.addr, b"");
+    assert!(
+        shed.elapsed < PROMPT,
+        "the shed answer must be immediate: {:?}",
+        shed.elapsed
+    );
+    assert_eq!(shed.status(), Some(503), "{shed:?}");
+    assert_eq!(
+        shed.error().as_deref(),
+        Some("counter busy — try again shortly"),
+        "load shedding is announced, not silent: {shed:?}"
+    );
+    // Pinned, not endorsed (finding 8): the reason phrase says the counter
+    // crashed when what happened is that it protected itself.
+    assert!(
+        shed.raw
+            .starts_with("HTTP/1.1 503 Internal Server Error\r\n"),
+        "the 503 reason phrase is still the fallback one: {:?}",
+        shed.raw
+    );
+
+    // Capacity comes back on its own: the idle sockets EOF, their threads
+    // finish, and the slots are released.
+    drop(idle);
+    let deadline = Instant::now() + IO_TIMEOUT + Duration::from_secs(5);
+    while Instant::now() < deadline && c.healthz().status() != Some(200) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    c.assert_still_serving("64 simultaneous idle sockets");
 }
 
 /// Abrupt clients — connect and reset, half-close mid-head, reset after the
@@ -1400,7 +1693,7 @@ fn sixty_four_abrupt_clients_do_not_wedge_the_loop() {
 /// /nope}` plus `/claim` itself.
 ///
 /// **DEFECT (finding 4).** The match is on `(method, path)` with method
-/// first (`lib.rs:259-264`), so:
+/// first (`lib.rs:325-332`), so:
 /// * `POST /healthz` is `404` although the path exists and only the method is
 ///   wrong — RFC 9110 §15.5.6 wants `405`;
 /// * `GET /claim` is `404` for the same reason, on the endpoint the entire
@@ -1463,7 +1756,7 @@ fn method_path_matrix_is_exactly_the_documented_statuses() {
 }
 
 /// **DEFECT (finding 4).** Two protocol violations in the response writer
-/// (`lib.rs:410-425`), pinned so a fix fails here loudly:
+/// (`lib.rs:559-574`), pinned so a fix fails here loudly:
 /// * a `HEAD` request gets a response **body** — RFC 9110 §9.3.2 forbids a
 ///   body in a response to `HEAD` under any status, and a front end that
 ///   pipelines would desync on it;
@@ -1514,7 +1807,7 @@ fn head_responses_carry_a_body_and_no_405_carries_allow() {
 // ═════════════════════════════════════════════════════════════════════
 
 /// The one thing the limiter must never do: burn a seat. `handle_claim`
-/// consults the bucket at `lib.rs:268`, before the body is parsed and before
+/// consults the bucket at `lib.rs:335`, before the body is parsed and before
 /// the vault is touched, so a `429` cannot move the ledger — and the code
 /// claims cleanly once the bucket refills.
 ///
@@ -1568,8 +1861,8 @@ fn a_rate_limited_claim_never_burns_the_seat_it_refused() {
 /// every paying customer gets `429`.
 ///
 /// The junk is as cheap as HTTP allows: `POST /claim HTTP/1.1\r\n\r\n`, **24
-/// bytes**, no headers, no body. It is charged a token at `lib.rs:268` and
-/// only then discovered to be unparseable at `lib.rs:271`. At the shipped
+/// bytes**, no headers, no body. It is charged a token at `lib.rs:335` and
+/// only then discovered to be unparseable at `lib.rs:338`. At the shipped
 /// refill of 0.5/s (`bin/ccos-license-server.rs:100`) one such request every
 /// two seconds — **12 bytes per second** — holds the entire product's
 /// fulfillment path in `429` indefinitely, from any address, with no way for
@@ -1634,9 +1927,12 @@ fn ten_junk_requests_lock_out_every_paying_customer() {
 /// `200`, 31 `410`s, one machine fingerprint in the ledger, and the issued
 /// token binds that machine and nobody else.
 ///
-/// This is the single-seat property under the only concurrency the product
-/// can actually experience — and it holds precisely because the loop is
-/// sequential and the flip is persisted before the token is disclosed.
+/// This is the single-seat property under the only concurrency the product can
+/// actually experience. It used to hold because the accept loop was
+/// sequential, so the 32 claims could not overlap at all; since the
+/// concurrency repair they genuinely do overlap, and it holds because the
+/// ledger is shared behind a mutex (`lib.rs:431`, `468`), the flip is
+/// persisted before the token is disclosed, and the ledger is the arbiter.
 #[test]
 fn thirty_two_machines_race_one_code_and_exactly_one_seat_is_sold() {
     let c = counter("race32", 1e6, 1e6);
@@ -1704,7 +2000,7 @@ fn thirty_two_machines_race_one_code_and_exactly_one_seat_is_sold() {
 /// 32 threads race the same code from the **same** machine — the lost-token
 /// recovery path under concurrency. All 32 succeed, and all 32 tokens are
 /// **byte-identical**, because the expiry is fixed at the first claim and
-/// re-issues reuse it verbatim (`lib.rs:186`) and ed25519 signing is
+/// re-issues reuse it verbatim (`lib.rs:195`) and ed25519 signing is
 /// deterministic. There is never any ambiguity about which of a customer's
 /// tokens is the real one.
 #[test]
@@ -1756,25 +2052,31 @@ fn thirty_two_reclaims_from_one_machine_yield_one_identical_token() {
 // §6  The loop's state model: what a running counter does to its ledger
 // ═════════════════════════════════════════════════════════════════════
 
-/// **DEFECT (finding 5).** `serve` takes the `Counter` by value and never
-/// re-reads `vault.json`; every successful claim writes the in-memory ledger
-/// over the file (`lib.rs:284`). The runbook tells vendors to manage seats
-/// with `ccos-license-admin --vault <the same file>` while the daemon runs,
-/// and the CLI prints "revoked … — the counter now refuses this code".
+/// **REGRESSION GUARD (repaired finding 5).** `serve` used to take the
+/// `Counter` by value and never re-read `vault.json`, while every successful
+/// claim wrote the in-memory ledger over the file. The runbook tells vendors
+/// to manage seats with `ccos-license-admin --vault <the same file>` *while
+/// the daemon runs*, and the CLI prints "revoked … — the counter now refuses
+/// this code" (`bin/ccos-license-admin.rs:322`).
 ///
-/// Against a running counter, all three of those are false, and this test
-/// asserts the real behaviour end to end over HTTP:
-/// 1. a seat **sold** while the daemon ran is not claimable (`404`);
-/// 2. a code **revoked** while the daemon ran is still **sold** (`200` with a
-///    valid signed token);
-/// 3. that claim then **erases** both edits from the file — the revocation
-///    becomes `claimed`, and the newly sold seat disappears from the ledger
-///    entirely.
+/// Against a running counter all three of those used to be false, and this
+/// test measured it end to end over HTTP: a seat **sold** mid-run was
+/// unclaimable (`404`), a code **revoked** mid-run was still **sold** (`200`
+/// with a valid signed token), and that claim then **erased** both edits from
+/// the file — the revocation became `claimed` and the newly sold seat
+/// disappeared entirely. Money moved the wrong way in both directions and the
+/// ledger ended up disagreeing with what the vendor had been told happened.
 ///
-/// The money moves the wrong way in both directions, and the ledger ends up
-/// disagreeing with what the vendor was told happened.
+/// `Counter::refresh_vault` (`lib.rs:296`) now re-reads the file at the start
+/// of every claim whenever its fingerprint no longer matches what this process
+/// last read or wrote. Same edits, same requests, opposite outcomes:
+/// 1. the seat sold while the daemon ran **is** claimable, with a token that
+///    verifies and carries the licensee the vendor typed at the CLI;
+/// 2. the code revoked while the daemon ran is **refused** (`410`), and no
+///    token is issued;
+/// 3. both edits **survive** the write-back that used to destroy them.
 #[test]
-fn a_running_counter_erases_every_vault_edit_made_while_it_ran() {
+fn a_running_counter_now_adopts_every_vault_edit_made_while_it_ran() {
     let c = counter("liveedit", 1e6, 1e6);
 
     // The vendor, at the CLI, exactly as the runbook documents: revoke a bad
@@ -1796,59 +2098,85 @@ fn a_running_counter_erases_every_vault_edit_made_while_it_ran() {
     assert_eq!(believed.entries[&key(1)].status, Status::Revoked);
     assert!(believed.entries.contains_key(&key(SOLD_LATE)));
 
-    // 1. The seat sold while the daemon ran does not exist to the counter.
+    // 1. The seat sold while the daemon ran is a real seat.
     let sold_late = c.claim(SOLD_LATE, 3);
     assert_eq!(
         sold_late.status(),
-        Some(404),
-        "a seat sold against a running counter is unclaimable: {sold_late:?}"
+        Some(200),
+        "a seat sold against a running counter must be claimable: {sold_late:?}"
     );
-    assert_eq!(sold_late.error().as_deref(), Some("unknown claim code"));
+    let payload = verified_payload(&sold_late.token().expect("token"));
+    assert_eq!(payload["machine"], serde_json::json!(fp(3)));
+    assert_eq!(
+        payload["licensee"],
+        serde_json::json!("Customer Sold While Running"),
+        "the token carries what the vendor typed at the CLI, not the startup snapshot"
+    );
 
-    // 2. The revoked code is still sold, with a token that verifies.
+    // 2. The revoked code is refused — which is exactly what the CLI promised
+    //    the vendor when it printed "the counter now refuses this code".
     let revoked = c.claim(1, 4);
     assert_eq!(
         revoked.status(),
-        Some(200),
-        "a revoked code was still sold: {revoked:?}"
+        Some(410),
+        "a code revoked mid-run must be refused, not sold: {revoked:?}"
     );
-    let payload = verified_payload(&revoked.token().expect("token"));
-    assert_eq!(payload["machine"], serde_json::json!(fp(4)));
-    assert_eq!(payload["licensee"], serde_json::json!("Customer 01"));
+    assert_eq!(
+        revoked.error().as_deref(),
+        Some("this code was revoked by the vendor")
+    );
+    assert!(revoked.token().is_none(), "a revoked code issues nothing");
 
-    // 3. That very claim wrote the daemon's memory over the vendor's file.
+    // 3. Neither edit was erased by the claim that ran after it.
     let after = c.on_disk();
     assert_eq!(
         after.entries[&key(1)].status,
-        Status::Claimed,
-        "the revocation was erased by the claim it should have refused"
+        Status::Revoked,
+        "the revocation survived the next claim's write-back"
     );
-    assert!(
-        !after.entries.contains_key(&key(SOLD_LATE)),
-        "the seat sold while the daemon ran was deleted from the ledger"
+    assert_eq!(
+        after.entries[&key(SOLD_LATE)].status,
+        Status::Claimed,
+        "the seat sold while the daemon ran was honoured and recorded"
+    );
+    assert_eq!(
+        after.entries[&key(SOLD_LATE)].machine.as_deref(),
+        Some(fp(3).as_str())
     );
     assert_eq!(
         after.entries.len(),
-        CODES as usize,
-        "the ledger reverted to exactly the daemon's startup snapshot"
+        CODES as usize + 1,
+        "the ledger is the vendor's file plus the seat that was just sold, \
+         not the daemon's startup snapshot"
     );
 
     c.assert_still_serving("a live vault edit");
 }
 
-/// The same mechanism from the other side: the counter's ledger is memory,
-/// and the file is a projection of it that is rewritten in full on every
-/// successful claim — including an idempotent re-issue that changes nothing.
-///
-/// Proven without timing: corrupt the file to unparseable garbage, re-claim
-/// from the machine that already owns the seat (which changes no state at
-/// all), and observe that the file is a complete, valid ledger again. Every
-/// repeat claim therefore costs a full serialize + `fsync` of every seat the
-/// vendor has ever sold — the write amplification measured at scale in
+/// **REGRESSION GUARD (repaired finding 5) + the mechanism from the other
+/// side.** The counter's ledger is memory and the file is a projection of it,
+/// rewritten in full on every successful claim — including an idempotent
+/// re-issue that changes nothing. That much is unchanged, and it is why every
+/// repeat claim costs a full serialize + `fsync` of every seat the vendor has
+/// ever sold: the write amplification measured at scale in
 /// `stress_vault_scale.rs`, reachable here by an unauthenticated repeat
 /// request over the network.
+///
+/// What changed is what happens when the projection and the file disagree.
+/// This test used to corrupt the file to unparseable garbage, re-claim from
+/// the machine that already owns the seat, and observe that the counter
+/// **overwrote** the garbage with its own memory and answered `200` — a
+/// running daemon silently repairing a file it had no business trusting its
+/// memory over. Now the reload is attempted first and fails closed
+/// (`lib.rs:351-354`): the claim is refused `500`, nothing is issued, and the
+/// operator's file is left exactly as it was found for them to look at.
+///
+/// The rewrite-from-memory path is then shown on the case the repair
+/// deliberately kept: a *missing* file is not an error (`lib.rs:297-304`), so
+/// memory is still the last truth standing and the next claim restores the
+/// whole ledger from it.
 #[test]
-fn an_idempotent_reissue_rewrites_the_whole_ledger_from_memory() {
+fn an_unreadable_ledger_is_now_refused_not_overwritten_from_memory() {
     let c = counter("rewrite", 1e6, 1e6);
 
     let first = c.claim(0, 5);
@@ -1856,13 +2184,36 @@ fn an_idempotent_reissue_rewrites_the_whole_ledger_from_memory() {
     let token = first.token().expect("token");
 
     // The disk is now garbage. Nothing about the claim state changed.
-    std::fs::write(&c.vault_path, b"{ not a vault at all").expect("corrupt the file");
+    let garbage = b"{ not a vault at all";
+    std::fs::write(&c.vault_path, garbage).expect("corrupt the file");
     assert!(
         Vault::load(&c.vault_path).is_err(),
         "the ledger really is unreadable now"
     );
 
-    // An idempotent re-issue: same code, same machine, no state change.
+    // An idempotent re-issue: same code, same machine, no state change — and
+    // it is refused, because the ledger it would have to write over cannot be
+    // read.
+    let again = c.claim(0, 5);
+    assert_eq!(
+        again.status(),
+        Some(500),
+        "an unreadable ledger must fail closed: {again:?}"
+    );
+    assert_eq!(
+        again.error().as_deref(),
+        Some("ledger unavailable — nothing was issued")
+    );
+    assert!(again.token().is_none(), "and it issued nothing");
+    assert_eq!(
+        std::fs::read(&c.vault_path).expect("the file is still there"),
+        garbage,
+        "the operator's file was left untouched, not overwritten from memory"
+    );
+
+    // The one case the repair deliberately keeps: no file at all is not an
+    // error, so the daemon's memory is the last truth standing...
+    std::fs::remove_file(&c.vault_path).expect("remove the ledger");
     let again = c.claim(0, 5);
     assert_eq!(again.status(), Some(200), "{again:?}");
     assert_eq!(
@@ -1871,7 +2222,7 @@ fn an_idempotent_reissue_rewrites_the_whole_ledger_from_memory() {
         "a re-issue is byte-identical — the expiry is stored, never extended"
     );
 
-    // ...rewrote the entire ledger, all CODES entries of it.
+    // ...and that claim rewrote the entire ledger, all CODES entries of it.
     let restored = c.on_disk();
     assert_eq!(restored.entries.len(), CODES as usize);
     assert_eq!(restored.entries[&key(0)].status, Status::Claimed);

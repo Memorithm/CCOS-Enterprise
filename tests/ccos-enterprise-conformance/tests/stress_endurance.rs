@@ -57,6 +57,26 @@
 //!   admission, flat throughout: no gate degrades as the trail grows).
 //!   → [`endurance_five_million_admissions`]
 //!
+//! ## What was repaired
+//!
+//! * **A boundary refusal no longer doubles the attacker's bytes.** It used
+//!   to: `classify` formatted the *whole* tool name into
+//!   `Refusal::OutsideBoundary`, `admit` cloned that message into the record
+//!   and returned it, and a merely token-authenticated caller sending a 1 MiB
+//!   tool name therefore retained **2.00 bytes per attacker byte** — twice
+//!   what an anonymous one cost, putting 4 GiB of operator memory 2 GiB of
+//!   request body away. The gateway now refuses any name over
+//!   `MAX_TOOL_NAME_BYTES` (256) as non-canonical *before* it matches
+//!   anything, so a megabyte-scale name is refused unread with a 35-byte
+//!   constant, and it passes what it does echo through a sanitizer capped at
+//!   64 characters. Re-measured on the identical workload: **1.00 bytes per
+//!   attacker byte**, the same single copy the anonymous path costs, with no
+//!   second one. The cap holds where it bites, too — at the largest name the
+//!   boundary will still classify (256 bytes, canonical, forbidden) the name
+//!   *is* echoed, truncated at 64 characters with an ellipsis, for a 119-byte
+//!   message. The message is now bounded by the template, not by the caller.
+//!   → [`audit_record_size_is_attacker_controlled_but_boundary_refusals_no_longer_double_it`]
+//!
 //! ## What BROKE
 //!
 //! 1. **The audit trail is an unbounded `Vec` with no cap, no rotation and no
@@ -78,15 +98,20 @@
 //!    → [`unauthenticated_flood_grows_the_audit_trail_without_bound`],
 //!    [`endurance_five_million_admissions`]
 //!
-//! 2. **Per-record size is attacker-controlled too, so the vector is
-//!    unbounded in two dimensions at once.** The record clones
-//!    `request.{tenant,actor,tool}` verbatim, unvalidated and untruncated. An
-//!    anonymous caller who never passes the identity gate still gets a 1 MiB
-//!    tool name copied into the trail — measured **1.00 bytes retained per
-//!    attacker byte** — and a merely token-authenticated one gets **2.00**,
-//!    because `Refusal::OutsideBoundary` embeds the whole tool name a second
-//!    time in its message. 4 GiB of memory is 4 GiB of request body away.
-//!    → [`audit_record_size_is_attacker_controlled_and_boundary_refusals_double_it`]
+//! 2. **Per-record size is *still* attacker-controlled, so the vector is
+//!    unbounded in two dimensions at once.** Only the second dimension's
+//!    doubling was closed (above); the copy underneath it was not. `admit`
+//!    clones `request.{tenant,actor,tool}` into the record verbatim,
+//!    unvalidated and untruncated, *before and regardless of* which gate
+//!    refused the call — so the gateway's 256-byte canonical-name limit
+//!    bounds what the boundary will classify and echo, and bounds nothing
+//!    about what is journaled. An anonymous caller who never passes the
+//!    identity gate still gets a 1 MiB tool name copied into the trail —
+//!    re-measured at **1.00 bytes retained per attacker byte**, and the
+//!    token-authenticated boundary case now costs the same 1.00 rather than
+//!    2.00. 4 GiB of memory is still 4 GiB of request body away; it merely
+//!    takes twice the request body it used to.
+//!    → [`audit_record_size_is_attacker_controlled_but_boundary_refusals_no_longer_double_it`]
 //!
 //! 3. **There is no way to shed the trail short of destroying the
 //!    deployment.** The only accessors are `audit()` (a shared slice),
@@ -896,21 +921,48 @@ fn unauthenticated_flood_grows_the_audit_trail_without_bound() {
     );
 }
 
-/// **Finding 2 — the same vector, per byte.** The record clones
-/// `request.{tenant,actor,tool}` with no length check anywhere in the path, so
-/// the attacker chooses the *size* of each record as well as the count.
-/// Worse for a token-strength caller: `Refusal::OutsideBoundary` formats the
-/// whole tool name into its message, which is then cloned into the record
-/// *and* returned — two copies of every attacker byte.
+/// **Finding 2 — the same vector, per byte; half repaired, half still open.**
+///
+/// What the defect was: the record clones `request.{tenant,actor,tool}` with
+/// no length check anywhere in the path, so the attacker chose the *size* of
+/// each record as well as the count — and it was worse for a token-strength
+/// caller, because `Refusal::OutsideBoundary` formatted the **whole** tool
+/// name into its message, which `admit` then cloned into the record *and*
+/// returned. Two copies of every attacker byte: a measured 2.00 retained
+/// bytes per attacker byte against an anonymous caller's 1.00, so 4 GiB of
+/// operator memory was 2 GiB of request body away.
+///
+/// What it cost and what was repaired: `classify` now refuses any name over
+/// `MAX_TOOL_NAME_BYTES` (256) as non-canonical *before* it matches anything,
+/// and passes everything it does echo through a sanitizer capped at 64
+/// characters, so a refusal message is a bounded constant however large the
+/// name. The doubling is gone; this test now guards that bound, at a 1 MiB
+/// name (refused unread) and at the largest name the boundary will still
+/// classify (256 bytes, canonical, forbidden — the one that does reach the
+/// message).
+///
+/// **Still open, deliberately pinned below:** the *first* copy. `admit`
+/// journals `request.tool` verbatim before and regardless of which gate
+/// refused the call, so an anonymous caller who never passes the identity
+/// gate still gets a 1 MiB tool name copied into the trail at 1.00 retained
+/// bytes per attacker byte. Bounding the boundary's message did not bound the
+/// record.
 #[test]
-fn audit_record_size_is_attacker_controlled_and_boundary_refusals_double_it() {
+fn audit_record_size_is_attacker_controlled_but_boundary_refusals_no_longer_double_it() {
     let _guard = serialized();
     const BIG: usize = 1024 * 1024;
     const CALLS: usize = 32;
+    /// Hard ceiling on a refusal message: the longest template
+    /// (`"tool namespace '…' is outside the Enterprise boundary"`, 52 bytes)
+    /// around a sanitized name of at most 64 characters — 3 bytes each in the
+    /// worst case, every one replaced by U+FFFD — plus the ellipsis.
+    const REFUSAL_MESSAGE_CAP: usize = 52 + 64 * 3 + 3;
     let names = tenant_names();
     let huge_tool = "x".repeat(BIG);
 
-    // (a) Unauthenticated: refused at gate 1, still copied verbatim.
+    // (a) STILL OPEN. Unauthenticated: refused at gate 1, still copied
+    //     verbatim into the record. Unchanged by the repair, and asserted
+    //     here at its real value so that bounding the record would trip it.
     let mut d = fleet_deployment(&names);
     let ghost = actor("nowhere", "ghost", AuthStrength::Anonymous);
     let mut req = request(&names[0], "ghost", &huge_tool, "r-0");
@@ -941,13 +993,18 @@ fn audit_record_size_is_attacker_controlled_and_boundary_refusals_double_it() {
     );
     drop(d);
 
-    // (b) Token strength, no role, known tenant: the boundary refusal repeats
-    //     the tool name inside its message, so the trail keeps it twice.
+    // (b) REPAIRED. Token strength, no role, known tenant — the case that used
+    //     to cost double, because the boundary refusal repeated the whole tool
+    //     name inside its message and the trail then kept it twice. Identical
+    //     input, opposite expectation: a 1 MiB name is now over the 256-byte
+    //     canonical limit, so it is refused unread and the message it produces
+    //     is a constant that mentions none of it.
     let mut d = fleet_deployment(&names);
     let mallory = actor("memorithm", "mallory", AuthStrength::Token);
     let forbidden = format!("shell.{}", "y".repeat(BIG));
     let mut req = request(&names[0], "mallory", &forbidden, "r-0");
     let base = live_bytes();
+    let mut longest_message = 0usize;
     for i in 0..CALLS {
         req.request_id.clear();
         write!(req.request_id, "r-{i}").expect("String write is infallible");
@@ -961,7 +1018,18 @@ fn audit_record_size_is_attacker_controlled_and_boundary_refusals_double_it() {
         let Some(Refusal::OutsideBoundary(why)) = out.refusal() else {
             panic!("call {i}: expected a boundary refusal");
         };
-        assert!(why.len() > BIG, "the refusal message echoes the whole name");
+        longest_message = longest_message.max(why.len());
+        assert!(
+            why.len() <= REFUSAL_MESSAGE_CAP,
+            "call {i}: the refusal message is {} B for a {BIG} B name — it \
+             must not grow with the caller's input",
+            why.len()
+        );
+        assert!(
+            !why.contains(&"y".repeat(65)),
+            "call {i}: the refusal message still echoes an unbounded run of \
+             the attacker's bytes: {why}"
+        );
     }
     let boundary_bytes = live_bytes().saturating_sub(base);
     let boundary_ratio = boundary_bytes as f64 / (CALLS * BIG) as f64;
@@ -969,16 +1037,77 @@ fn audit_record_size_is_attacker_controlled_and_boundary_refusals_double_it() {
     println!(
         "attacker-sized records ({CALLS} x {} MiB tool name): \
          anonymous {:.1} MiB retained ({anon_ratio:.2} B/attacker byte), \
-         boundary refusal {:.1} MiB retained ({boundary_ratio:.2} B/attacker byte)",
+         boundary refusal {:.1} MiB retained ({boundary_ratio:.2} B/attacker \
+         byte), longest refusal message {longest_message} B",
         BIG / (1024 * 1024),
         mib(anon_bytes),
         mib(boundary_bytes),
     );
+    // THE REPAIR, measured: the second copy is gone. A boundary refusal now
+    // costs the same one copy an anonymous refusal does, not two. If the
+    // message ever embeds the name again this crosses 1.5 and fails.
     assert!(
-        boundary_ratio >= 1.99,
-        "a boundary refusal should retain ~2 bytes per attacker byte \
-         (name + echoed message), measured {boundary_ratio:.2}"
+        boundary_ratio < 1.5,
+        "a boundary refusal must no longer retain a second copy of every \
+         attacker byte, measured {boundary_ratio:.2}"
     );
+    // STILL OPEN: the first copy. The record itself is unbounded, and the
+    // gate that refused the call never had a say in that.
+    assert!(
+        boundary_ratio >= 0.99,
+        "the record still stores the name verbatim (finding 2 is only half \
+         repaired); measured {boundary_ratio:.2} — if this dropped, the \
+         record grew a length cap and the rest of the finding is fixed too"
+    );
+    assert_eq!(
+        d.audit()[0].tool.len(),
+        forbidden.len(),
+        "the trail still stores the attacker's whole name, refused or not"
+    );
+    drop(d);
+
+    // (c) The bound where it actually bites: the largest name the boundary
+    //     will still classify — 256 bytes, canonical, and forbidden on its
+    //     `shell.` head. This one *does* reach the message, so it is the case
+    //     that proves the sanitizer caps the echo rather than the length check
+    //     merely hiding it.
+    let mut d = fleet_deployment(&names);
+    let at_limit = format!("shell.{}", "y".repeat(250));
+    assert_eq!(at_limit.len(), 256, "the largest name still classified");
+    let req = request(&names[0], "mallory", &at_limit, "r-max");
+    let out = d.admit(Call {
+        actor: &mallory,
+        request: &req,
+        model: "claude-opus",
+        cost_tokens: 0,
+        variant: None,
+    });
+    let Some(Refusal::OutsideBoundary(why)) = out.refusal() else {
+        panic!("a 256-byte `shell.` name must still be a boundary refusal");
+    };
+    assert!(
+        why.len() <= REFUSAL_MESSAGE_CAP,
+        "the echoed name must be truncated, message was {} B: {why}",
+        why.len()
+    );
+    assert!(
+        why.len() < at_limit.len(),
+        "the message ({} B) must be shorter than the name it reports \
+         ({} B)",
+        why.len(),
+        at_limit.len()
+    );
+    assert!(
+        !why.contains(&"y".repeat(65)),
+        "the sanitizer must cap the echoed name at 64 characters: {why}"
+    );
+    assert!(why.contains('…'), "a truncated name must say so: {why}");
+    println!(
+        "  at the 256-byte classification limit the refusal reads ({} B): {why}",
+        why.len()
+    );
+    // …and, still open, the record beside it keeps all 256 bytes.
+    assert_eq!(d.audit()[0].tool.len(), at_limit.len());
 }
 
 /// **Finding 3.** Rotation is not merely absent, it is unimplementable from

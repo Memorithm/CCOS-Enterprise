@@ -14,34 +14,49 @@
 //! This file attacks that promise with a deterministic fuzzer (fixed seeds, no
 //! wall clock in any assertion) plus an exhaustive Unicode sweep.
 //!
-//! ## VERDICT: the parser is neither total nor sound.
+//! ## VERDICT: the parser is total and sound again; four findings stay open.
 //!
-//! * **CLAIM-1 (critical) — `canonical_code` PANICS on hostile input.**
-//!   `crates/ccos-enterprise-governance/src/claim.rs:129-135` slices the
-//!   accumulated symbol buffer by *byte* index (`&body[0..5]`, `[5..10]`,
-//!   `[10..15]`, `[15..20]`) after a filter that lets multi-byte characters
-//!   through (CLAIM-2). When such a character straddles byte 5, 10 or 15 the
-//!   slice is not on a `char` boundary and `canonical_code` panics instead of
-//!   returning `None`:
+//! Two of the six findings below have been **repaired** in
+//! `crates/ccos-enterprise-governance/src/claim.rs`. The tests that proved
+//! them are kept verbatim in their inputs and inverted in their expectations,
+//! so they now guard the repair instead of pinning the defect. The other four
+//! are still the product's real, current behaviour.
+//!
+//! ### What was repaired
+//!
+//! * **CLAIM-1 (critical) — `canonical_code` used to PANIC on hostile input.**
+//!   `claim.rs` slices the accumulated symbol buffer by *byte* index
+//!   (`&body[0..5]`, `[5..10]`, `[10..15]`, `[15..20]`), and the alphabet
+//!   filter used to let multi-byte characters through (CLAIM-2). When such a
+//!   character straddled byte 5, 10 or 15 the slice was not on a `char`
+//!   boundary and `canonical_code` panicked instead of returning `None`:
 //!   `canonical_code("CCOS-AAAAа-AAAA-AAAAA-AAAAA")` (Cyrillic `а`, U+0430) →
-//!   `byte index 5 is not a char boundary`. This is reachable in-tree from
+//!   `byte index 5 is not a char boundary`. It was reachable in-tree from
 //!   `tools/ccos-license-server/src/bin/ccos-license-admin.rs:297`, i.e. from
 //!   `ccos-license-admin revoke <CODE>` — the vendor's incident-response path.
-//!   An attacker-supplied "please revoke my code" string crashes the revoke
-//!   instead of refusing it, and the leaked code stays live. Pinned by
-//!   [`canonical_code_panics_when_a_multibyte_symbol_straddles_a_group_boundary`].
+//!   An attacker-supplied "please revoke my code" string crashed the revoke
+//!   instead of refusing it, and the leaked code stayed live. The guard now
+//!   refuses non-ASCII outright, so nothing multi-byte ever reaches the
+//!   slicing. Guarded by
+//!   [`canonical_code_no_longer_panics_when_a_multibyte_symbol_straddles_a_group_boundary`],
+//!   which keeps every input that used to abort the test binary — including
+//!   the Cyrillic paste above — and asserts `None`.
 //!
-//! * **CLAIM-2 (high) — the alphabet filter validates a *truncated* cast.**
-//!   `claim.rs:117` tests `ALPHABET.contains(&(c as u8))`. `char as u8` keeps
-//!   only the low byte, so **138 976** non-ASCII code points are accepted as
-//!   Crockford symbols — exactly those whose code point mod 256 lands in the
-//!   alphabet (verified exhaustively over all of Unicode, zero deviation from
-//!   that model). `symbols.push(c)` then stores the *original* character, so
-//!   `canonical_code` returns `Some` values that are not claim codes at all:
-//!   `canonical_code("аAAAAAAAAAAAAAAAAAAA")` →
+//! * **CLAIM-2 (high) — the alphabet filter used to validate a *truncated*
+//!   cast.** The test was `ALPHABET.contains(&(c as u8))` alone. `char as u8`
+//!   keeps only the low byte, so **138 976** non-ASCII code points were
+//!   accepted as Crockford symbols — exactly those whose code point mod 256
+//!   lands in the alphabet (verified exhaustively over all of Unicode, zero
+//!   deviation from that model). `symbols.push(c)` then stored the *original*
+//!   character, so `canonical_code` returned `Some` values that were not claim
+//!   codes at all: `canonical_code("аAAAAAAAAAAAAAAAAAAA")` →
 //!   `Some("CCOS-аAAA-AAAAA-AAAAA-AAAAA")` — 27 chars, a four-symbol group,
-//!   and a symbol outside the alphabet the function exists to enforce. Pinned
-//!   by [`canonical_code_accepts_138976_non_ascii_code_points_via_truncating_cast`].
+//!   and a symbol outside the alphabet the function exists to enforce. The
+//!   guard is now `!c.is_ascii() || !ALPHABET.contains(&(c as u8))`, so all
+//!   138 976 yield `None`. Guarded, still exhaustively over Unicode, by
+//!   [`canonical_code_refuses_the_138976_non_ascii_code_points_the_truncating_cast_accepted`].
+//!
+//! ### What is still BROKEN
 //!
 //! * **CLAIM-3 (medium) — `code_from_entropy` silently discards 28 of the 128
 //!   bits it is handed.** Bytes 13..16 and the low nibble of byte 12 never
@@ -69,9 +84,10 @@
 //!   [`canonical_code_rejects_the_trailing_newline_that_every_paste_carries`].
 //!
 //! Everything asserted below is the product's **current, real** behaviour.
-//! Where that behaviour is a defect the assertion pins the defect and the
-//! comment names it, so a repair fails loudly here instead of silently
-//! changing the protocol.
+//! Where that behaviour is still a defect the assertion pins the defect and
+//! the comment names it, so a repair fails loudly here instead of silently
+//! changing the protocol. Where a defect was repaired the assertion pins the
+//! *repair*, on the same inputs, so a regression fails just as loudly.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -166,8 +182,10 @@ fn assert_canonical_shape(code: &str, provenance: &str) {
     }
 }
 
-/// `canonical_code` is not total (CLAIM-1). Everything that feeds it hostile
-/// input goes through here so a panic is data instead of a dead test binary.
+/// `canonical_code` was not total (CLAIM-1): it aborted the process instead of
+/// returning `None`. It is total now, but everything that feeds it hostile
+/// input still goes through here, so a *regression* is data — a named,
+/// localized failure — instead of a dead test binary.
 #[derive(Debug, PartialEq, Eq)]
 enum Parse {
     Panicked,
@@ -503,8 +521,9 @@ fn canonical_code_hostile_ascii_corpus() {
 /// * a `U`/`u` anywhere ⇒ `None` (not in the alphabet, and not folded);
 /// * the function is a pure function of its argument.
 ///
-/// For ASCII this holds — the parser's soundness fails only once non-ASCII is
-/// in play (CLAIM-2/CLAIM-1, next two tests).
+/// For ASCII this always held. The parser's soundness used to fail only once
+/// non-ASCII was in play (CLAIM-1/CLAIM-2) — both repaired, and guarded as
+/// such by the next two tests.
 #[test]
 fn canonical_code_ascii_fuzz_upholds_the_twenty_symbol_contract() {
     const N: usize = 300_000;
@@ -613,21 +632,32 @@ fn canonical_code_ascii_fuzz_upholds_the_twenty_symbol_contract() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 6. CLAIM-2 — the alphabet filter validates a truncated `char as u8`
+// 6. CLAIM-2 (REPAIRED) — the alphabet filter no longer validates a
+//    truncated `char as u8`
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Exhaustive over **every** non-ASCII scalar value in Unicode.
 ///
-/// `claim.rs:117` asks `ALPHABET.contains(&(c as u8))`. That cast keeps the
-/// low byte only, so the accepted set is exactly
-/// `{ c : (c as u32) % 256 ∈ ALPHABET }` — 138 976 code points, verified here
-/// with zero deviation from that model. Each is placed first in a 20-byte
-/// buffer (a leading multi-byte character cannot straddle byte 5, so this
-/// sweep measures acceptance without tripping CLAIM-1).
+/// `claim.rs` used to ask `ALPHABET.contains(&(c as u8))` alone. That cast
+/// keeps the low byte only, so the accepted set was exactly
+/// `{ c : (c as u32) % 256 ∈ ALPHABET }` — 138 976 code points, each of which
+/// was then pushed into the symbol buffer *as the original character*, so the
+/// function returned values violating its own contract (and, past CLAIM-1,
+/// panicked). The guard is now
+/// `if !c.is_ascii() || !ALPHABET.contains(&(c as u8)) { return None }`.
+///
+/// The sweep is unchanged — same corpus, same framing (each character placed
+/// first in a 20-byte buffer, where a leading multi-byte character cannot
+/// straddle byte 5, so acceptance was measurable without tripping CLAIM-1) —
+/// with the opposite expectation: **nothing** non-ASCII is accepted. The
+/// low-byte model is still computed and still asserted to describe 138 976
+/// code points, so the corpus cannot quietly stop exercising the vector this
+/// test guards.
 #[test]
-fn canonical_code_accepts_138976_non_ascii_code_points_via_truncating_cast() {
+fn canonical_code_refuses_the_138976_non_ascii_code_points_the_truncating_cast_accepted() {
     let mut accepted = 0usize;
-    let mut deviations = 0usize;
+    let mut first_accepted: Option<u32> = None;
+    let mut once_accepted = 0usize;
     for cp in 0x80u32..=0x10_FFFF {
         let Some(c) = char::from_u32(cp) else {
             continue;
@@ -635,49 +665,59 @@ fn canonical_code_accepts_138976_non_ascii_code_points_via_truncating_cast() {
         let input = format!("{c}{}", "A".repeat(20 - c.len_utf8()));
         assert_eq!(input.len(), 20);
 
-        let got = canonical_code(&input).is_some();
-        let low_byte_model = ALPHABET.contains(&(cp as u8));
-        if got != low_byte_model {
-            deviations += 1;
-        }
-        if got {
+        if canonical_code(&input).is_some() {
             accepted += 1;
+            first_accepted.get_or_insert(cp);
+        }
+        if ALPHABET.contains(&(cp as u8)) {
+            once_accepted += 1;
         }
     }
     assert_eq!(
-        deviations, 0,
-        "the accepted set is no longer exactly `low byte ∈ ALPHABET`"
+        once_accepted, 138_976,
+        "the low-byte model no longer describes 138 976 code points — this \
+         sweep has stopped covering the vector it exists to guard"
     );
     assert_eq!(
-        accepted, 138_976,
-        "CLAIM-2: the number of non-ASCII code points the Crockford filter \
-         accepts changed — if the truncating cast was repaired this is 0"
+        accepted,
+        0,
+        "CLAIM-2: the Crockford filter accepts non-ASCII code points again — \
+         {accepted} of them, first U+{:04X}",
+        first_accepted.unwrap_or(0)
     );
 
-    // The concrete consequence: `canonical_code` returns a "canonical code"
-    // that is 27 characters long, has a four-symbol group, and carries a
-    // character the function exists to reject. Cyrillic а (U+0430) → low byte
-    // 0x30 = ASCII '0'.
+    // The concrete consequence, gone: this input used to yield a "canonical
+    // code" 27 characters long, with a four-symbol group, carrying a character
+    // the function exists to reject — `Some("CCOS-аAAA-AAAAA-AAAAA-AAAAA")`.
+    // Cyrillic а (U+0430) → low byte 0x30 = ASCII '0'.
     let cyrillic = format!("\u{0430}{}", "A".repeat(18));
-    let out = canonical_code(&cyrillic).expect("CLAIM-2: accepted");
-    assert_eq!(out, "CCOS-\u{0430}AAA-AAAAA-AAAAA-AAAAA");
-    assert_eq!(out.chars().count(), 27, "not the canonical 28 characters");
-    assert_eq!(out.split('-').nth(1).map(str::len), Some(5)); // 5 bytes, 4 chars
-    assert!(
-        !out.is_ascii(),
-        "a non-alphabet symbol survived into the canonical form"
+    assert_eq!(
+        canonical_code(&cyrillic),
+        None,
+        "CLAIM-2: the Cyrillic homoglyph is a Crockford symbol again"
+    );
+    // And the malformed string the defect used to emit is not even accepted as
+    // *input*, so a value stored while the defect was live cannot round-trip
+    // back into the protocol.
+    let once_emitted = "CCOS-\u{0430}AAA-AAAAA-AAAAA-AAAAA";
+    assert_eq!(
+        once_emitted.chars().count(),
+        27,
+        "the historical shape: 27 chars"
     );
     assert!(
-        out.chars().any(|c| !is_symbol(c) && c != '-'),
-        "the canonical form should carry only alphabet symbols and dashes"
+        once_emitted.chars().any(|c| !is_symbol(c) && c != '-'),
+        "the historical shape carried a non-alphabet symbol"
     );
-    // It is a stable fixed point, so the malformed value propagates: it
-    // hashes, ships and keys a vault entry exactly like a real code.
-    assert_eq!(canonical_code(&out).as_deref(), Some(out.as_str()));
-    assert!(is_sha256_hex(&code_hash(&out)));
+    assert_eq!(
+        canonical_code(once_emitted),
+        None,
+        "CLAIM-2: the malformed canonical form is accepted as input again"
+    );
 
     // A representative sample of the lookalikes an operator can actually
-    // produce: each is accepted where the ASCII symbol it imitates would be.
+    // produce: each used to be accepted exactly where the ASCII symbol it
+    // imitates would be. Every one of them is refused now.
     for (c, low) in [
         ('\u{0430}', '0'),   // CYRILLIC SMALL A
         ('\u{0435}', '5'),   // CYRILLIC SMALL IE
@@ -691,60 +731,63 @@ fn canonical_code_accepts_138976_non_ascii_code_points_via_truncating_cast() {
             "test vector {c:?} maps to {low:?}"
         );
         let input = format!("{c}{}", "A".repeat(20 - c.len_utf8()));
-        assert!(
-            canonical_code(&input).is_some(),
-            "lookalike {c:?} (U+{:04X}) was refused",
+        assert_eq!(
+            canonical_code(&input),
+            None,
+            "lookalike {c:?} (U+{:04X}) was accepted as {low:?}",
             c as u32
         );
     }
 
-    // The operational damage: a homograph substitution is *accepted* and
-    // *hashed*, so the customer's failure surfaces at the counter as
-    // `UnknownCode` — indistinguishable from a revoked or fabricated code —
-    // instead of at the parser as "that is not a claim code". Two spellings
-    // that render nearly identically produce two different wire values, and
-    // both look equally valid to every caller of `canonical_code`.
+    // The operational damage, closed: a homograph substitution used to be
+    // *accepted* and *hashed*, so the customer's failure surfaced at the
+    // counter as `UnknownCode` — indistinguishable from a revoked or
+    // fabricated code — instead of at the parser as "that is not a claim
+    // code". The ASCII spelling still parses and still hashes; the Cyrillic
+    // one that renders nearly identically now produces no wire value at all,
+    // so there is no second, equally-valid-looking hash to confuse with it.
     let ascii_code = canonical_code(&"0".repeat(20)).expect("all-zero payload is valid");
-    let homograph = canonical_code(&format!("\u{0430}{}", "0".repeat(18)))
-        .expect("CLAIM-2: the Cyrillic spelling is accepted too");
     assert_eq!(ascii_code, "CCOS-00000-00000-00000-00000");
-    assert_eq!(homograph, "CCOS-\u{0430}000-00000-00000-00000");
-    assert_ne!(
-        code_hash(&ascii_code),
-        code_hash(&homograph),
-        "the two spellings must at least stay distinct on the wire"
+    assert!(is_sha256_hex(&code_hash(&ascii_code)));
+    assert!(is_sha256_hex(&vault_key(&code_hash(&ascii_code))));
+    assert_eq!(
+        canonical_code(&format!("\u{0430}{}", "0".repeat(18))),
+        None,
+        "CLAIM-2: the Cyrillic spelling of an all-zero payload is accepted again"
     );
-    assert!(is_sha256_hex(&code_hash(&homograph)));
-    // …and the counter cannot tell it was malformed: the request is
-    // structurally perfect, it simply names a code that was never minted.
-    assert!(is_sha256_hex(&vault_key(&code_hash(&homograph))));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 7. CLAIM-1 — canonical_code PANICS (critical)
+// 7. CLAIM-1 (REPAIRED) — canonical_code returns None instead of panicking
 // ─────────────────────────────────────────────────────────────────────────
 
-/// `claim.rs:129-135` slices `body` at byte offsets 5, 10 and 15. Once
-/// CLAIM-2 lets a multi-byte character into `body`, any character whose UTF-8
-/// span *strictly contains* one of those offsets makes the slice land inside a
-/// character and `canonical_code` panics.
-///
-/// Exhaustive over insertion position for a 2-, 3- and 4-byte accepted
-/// character, in both the bare-payload and branded framings. The panic set is
-/// asserted against the model `pos < k < pos + width` for `k ∈ {5, 10, 15}` —
-/// no sampling, no tolerance.
-///
-/// Reachable in-tree: `ccos-license-admin.rs:297` hands raw argv to
+/// `claim.rs` slices `body` at byte offsets 5, 10 and 15. While CLAIM-2 let
+/// multi-byte characters into `body`, any character whose UTF-8 span
+/// *strictly contained* one of those offsets made the slice land inside a
+/// character, and `canonical_code` panicked — `byte index 5 is not a char
+/// boundary` — instead of returning the `None` its doc comment promises. It
+/// was reachable in-tree: `ccos-license-admin.rs:297` hands raw argv to
 /// `canonical_code`, so `ccos-license-admin --vault v.json revoke '<string>'`
-/// aborts the revoke instead of refusing the input.
+/// aborted the revoke on an attacker-supplied string instead of refusing it,
+/// and the leaked code stayed live.
+///
+/// The guard now refuses non-ASCII before any symbol is buffered, so nothing
+/// multi-byte ever reaches the slicing. The corpus here is unchanged —
+/// exhaustive over insertion position for a 2-, 3- and 4-byte formerly
+/// accepted character, in both the bare-payload and branded framings — and the
+/// expectation is inverted: **no** position panics, and every position is
+/// *rejected*, so the totality is not being bought by returning a malformed
+/// `Some`. The once-fatal positions are still derived from the model
+/// `pos < k < pos + width` for `k ∈ {5, 10, 15}` and asserted non-empty, so
+/// the corpus cannot silently stop covering the straddling case.
 #[test]
-fn canonical_code_panics_when_a_multibyte_symbol_straddles_a_group_boundary() {
+fn canonical_code_no_longer_panics_when_a_multibyte_symbol_straddles_a_group_boundary() {
     let boundaries = [5usize, 10, 15];
     for c in ['\u{0430}', '\u{0130}', '\u{2030}', '\u{1_0330}'] {
         let width = c.len_utf8();
         let last = 20 - width;
 
-        // Bare payload: exactly 20 bytes of accepted symbols.
+        // Bare payload: exactly 20 bytes of once-accepted symbols.
         let bare: Vec<String> = (0..=last)
             .map(|pos| format!("{}{c}{}", "A".repeat(pos), "A".repeat(last - pos)))
             .collect();
@@ -753,35 +796,40 @@ fn canonical_code_panics_when_a_multibyte_symbol_straddles_a_group_boundary() {
             .map(|pos| format!("CCOS-{}{c}{}", "A".repeat(pos), "A".repeat(last - pos)))
             .collect();
 
-        let modelled: Vec<usize> = (0..=last)
+        // The positions that aborted the process before the repair.
+        let once_fatal: Vec<usize> = (0..=last)
             .filter(|pos| boundaries.iter().any(|k| *pos < *k && *k < pos + width))
             .collect();
+        assert!(
+            !once_fatal.is_empty(),
+            "U+{:04X} ({width} bytes): the corpus no longer contains a position \
+             whose character straddles a group boundary — this test would prove \
+             nothing",
+            c as u32
+        );
 
         for (framing, corpus) in [("bare", &bare), ("branded", &branded)] {
             let verdicts = probe_all(corpus);
-            let observed: Vec<usize> = verdicts
+            let panicked: Vec<usize> = verdicts
                 .iter()
                 .enumerate()
                 .filter(|(_, v)| **v == Parse::Panicked)
                 .map(|(pos, _)| pos)
                 .collect();
-            assert_eq!(
-                observed, modelled,
-                "CLAIM-1 ({framing}, U+{:04X}, {width} bytes): panic positions \
-                 changed. An empty set means the parser became total.",
+            assert!(
+                panicked.is_empty(),
+                "CLAIM-1 ({framing}, U+{:04X}, {width} bytes): canonical_code \
+                 panicked again at {panicked:?} — it used to at {once_fatal:?}",
                 c as u32
             );
-            assert!(
-                !observed.is_empty(),
-                "CLAIM-1 ({framing}): expected at least one panicking position"
-            );
-            // Everything that does NOT panic is accepted — never refused. A
-            // 20-byte buffer of accepted symbols always reaches the slicing.
+            // Total *and* sound: every position is refused. Never a panic, and
+            // never a malformed `Some` carrying a non-alphabet character.
             for (pos, verdict) in verdicts.iter().enumerate() {
-                assert_ne!(
+                assert_eq!(
                     *verdict,
                     Parse::Rejected,
-                    "{framing} U+{:04X} at {pos} was refused, not accepted or panicking",
+                    "{framing} U+{:04X} at {pos}: a non-ASCII symbol must be \
+                     refused, not accepted and not fatal",
                     c as u32
                 );
             }
@@ -790,18 +838,21 @@ fn canonical_code_panics_when_a_multibyte_symbol_straddles_a_group_boundary() {
 
     // The shape a human actually produces: a pasted code that lost one
     // character and gained one Cyrillic lookalike. The display form still
-    // reads like a claim code.
+    // reads like a claim code, and this exact string used to abort the process
+    // with `byte index 5 is not a char boundary`.
     assert_eq!(
         probe("CCOS-AAAA\u{0430}-AAAA-AAAAA-AAAAA"),
-        Parse::Panicked,
-        "CLAIM-1: the realistic pasted-code case no longer panics"
+        Parse::Rejected,
+        "CLAIM-1: the realistic pasted-code case must be refused — neither \
+         fatal nor accepted"
     );
     // The same string reaching the admin CLI's classifier: not 64-hex, so
-    // `ccos-license-admin revoke` routes it straight into the panic.
+    // `ccos-license-admin revoke` still routes it into `canonical_code`, which
+    // now refuses it and lets the revoke report a bad code instead of crashing.
     assert!(!is_sha256_hex("CCOS-AAAA\u{0430}-AAAA-AAAAA-AAAAA"));
 
-    // ASCII input, however hostile, never panics — the vector is exactly the
-    // multi-byte one.
+    // ASCII input, however hostile, never panicked — the vector was exactly
+    // the multi-byte one. Kept as the corpus that would catch a *new* one.
     let mut rng = Rng(0x0A11_C0DE_BADD_0001);
     const HOSTILE: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZILOUilou-_ \t\n\0";
     let ascii: Vec<String> = (0..60_000)
@@ -1258,7 +1309,8 @@ fn oversized_inputs_are_refused_without_aborting() {
         assert_eq!(canonical_code(&"CCOS-".repeat(size / 5)), None);
         // First byte invalid: the early return, no buffering at all.
         assert_eq!(canonical_code(&format!("U{}", "A".repeat(size))), None);
-        // Non-ASCII bulk (CLAIM-2 accepts it, the length check still refuses).
+        // Non-ASCII bulk: refused at the first character now. CLAIM-2 used to
+        // buffer the whole megabyte and leave the length check to refuse it.
         assert_eq!(canonical_code(&"\u{0430}".repeat(size / 2)), None);
         // NUL-filled.
         assert_eq!(canonical_code(&"\0".repeat(size)), None);

@@ -1209,10 +1209,19 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
                 "claude-opus",
                 None,
             ),
+            // Reaches `tool_not_governed`, which now requires a CANONICAL
+            // name: this case used to spell it "context.<emoji><RTL>not-
+            // governed", but the gateway's canonical-name rule refuses that
+            // shape outright, so the hostile spelling was being counted as a
+            // boundary refusal and this tag stopped being exercised at all.
+            // A tool has to clear the boundary before "nobody governed it"
+            // can be the answer. Hostile text still reaches the metric path
+            // through the actor, the tenant, the request id and the 1 MiB
+            // names below — that is what this test is measuring.
             3 => (
                 "acme",
                 "alice",
-                "context.\u{1f4a3}\u{202e}not-governed",
+                "context.not_governed",
                 AuthStrength::Strong,
                 "claude-opus",
                 None,

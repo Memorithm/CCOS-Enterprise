@@ -16,41 +16,84 @@
 //! > No input may ever produce `Disposition::Forward` for a tool that is,
 //! > after any plausible downstream normalization, a forbidden capability.
 //!
-//! ## VERDICT: the invariant is BROKEN, and broken end to end.
+//! ## VERDICT: the invariant HOLDS. This file is now its regression guard.
 //!
-//! `classify` checks `FORBIDDEN_PREFIXES` only against the **start** of the
-//! name, then admits anything that starts with an `ALLOWED_PREFIXES` entry.
-//! Prefixing a forbidden capability with an exposed namespace therefore turns
-//! a boundary violation into a `Forward`:
+//! It did not always. Every assertion below that once pinned a bypass now
+//! pins its closure, with the same inputs and the opposite expectation, so a
+//! reintroduction fails here loudly instead of silently reopening the
+//! security posture.
 //!
-//! | input                         | classify  | plausible downstream         |
-//! |-------------------------------|-----------|------------------------------|
-//! | `ccos.shell.exec`             | `Forward` | class strip → `shell.exec`   |
-//! | `memory.repository.modify`    | `Forward` | class strip → the exact tool |
-//! | `ccos.rsi.propose`            | `Forward` | class strip → `rsi.propose`  |
-//! | `memory.recall/../shell.exec` | `Forward` | path resolve → `shell.exec`  |
-//! | `policy.set;shell.exec`       | `Forward` | list split → `shell.exec`    |
-//! | `ccos.\u{200d}shell.exec`     | `Forward` | ZWJ strip, then class strip  |
+//! ## What was repaired
 //!
-//! "Class strip" is not hypothetical decoration — it is the gateway's own
-//! stated design. `ALLOWED_PREFIXES`' doc comment says the names are
-//! "*capability classes*", that "Core itself exposes bare `recall`/`ingest`
-//! over MCP, so the gateway is deliberately a translation boundary", and that
-//! "`ccos.` is kept as an accepted alias for the catalogue this crate shipped
-//! with". A downstream translation `memory.recall` → `recall` is therefore
-//! the documented behaviour; applied to `memory.shell.exec` it yields
-//! `shell.exec`.
+//! **The prefix-laundering class (critical).** `classify` used to test
+//! `FORBIDDEN_PREFIXES` only against the **start** of the name and then admit
+//! anything starting with an `ALLOWED_PREFIXES` entry, so prefixing a
+//! forbidden capability with an exposed namespace turned a boundary violation
+//! into a `Forward`:
 //!
-//! [`the_composed_path_forwards_and_bills_a_wrapped_shell_exec`] then shows
-//! the same names surviving the whole composed admission path — identity,
-//! tenant, boundary, RBAC, model, budget — and being **billed** to the
-//! tenant. `tests/boundary_contract.rs::no_privilege_reaches_past_the_boundary`
-//! only proves the *bare* spellings are stopped.
+//! | input                         | classify WAS | classify NOW      |
+//! |-------------------------------|--------------|-------------------|
+//! | `ccos.shell.exec`             | `Forward`    | outside boundary  |
+//! | `memory.repository.modify`    | `Forward`    | outside boundary  |
+//! | `ccos.rsi.propose`            | `Forward`    | outside boundary  |
+//! | `memory.recall/../shell.exec` | `Forward`    | not canonical     |
+//! | `policy.set;shell.exec`       | `Forward`    | not canonical     |
+//! | `ccos.\u{200d}shell.exec`     | `Forward`    | not canonical     |
+//!
+//! The cost was not theoretical: [`the_composed_path_can_no_longer_forward_or_bill_a_wrapped_shell_exec`]
+//! used to show those names traversing the *whole* admission pipeline —
+//! identity, tenant, boundary, RBAC, model, budget — as a read-only actor,
+//! being **billed** to the tenant, and landing in the journal as ordinary
+//! successes with no boundary counter moving.
+//! `tests/boundary_contract.rs::no_privilege_reaches_past_the_boundary` only
+//! ever proved the *bare* spellings were stopped.
+//!
+//! Two independent changes closed it, and both are guarded here:
+//!
+//! 1. **Forbidden matching is segment-wise.** Every suffix beginning at a
+//!    segment boundary is tested, so `ccos.shell.exec` matches on its
+//!    `shell.exec` suffix. `class_strip` — the gateway's *own documented*
+//!    downstream translation, see [`class_strip`] — can no longer reach a
+//!    forbidden capability from anything the boundary forwards.
+//! 2. **A name must be canonical before any matching happens**: non-empty,
+//!    at most 256 bytes, every dot-separated segment non-empty and made only
+//!    of `[A-Za-z0-9_]`. That refuses path and command separators, all
+//!    non-ASCII (homoglyphs, CJK, emoji, zero-width, RTL, combining marks),
+//!    control bytes, whitespace, NUL and leading/trailing/double dots.
+//!
+//! **Oversized names are refused by length, not scanned (high).** The 256-byte
+//! ceiling is checked first, so a 1 MiB or 8 MiB name costs `len()`, not a
+//! megabyte-scale lowercase-and-scan, and never reaches a refusal message.
+//!
+//! **Refusal messages are sanitized (low → closed).** They used to embed the
+//! caller's bytes verbatim — `format!("tool '{}' is not in the Enterprise
+//! catalogue", req.tool)` — so a 1 MiB name produced a >1 MiB message and a
+//! bidi override rendered the attacked name backwards in a terminal. The name
+//! now passes through `sanitize()`: at most 64 chars, every non-graphic char
+//! replaced by U+FFFD, ellipsis if truncated.
+//!
+//! ## What is still open
+//!
+//! - **Refusal taxonomy collapses on the composed path (medium, spec
+//!   violation).** The gateway distinguishes violation / omission /
+//!   malformed-name; `ccos_enterprise_conformance`'s `Deployment::decide`
+//!   folds all three into `Refusal::OutsideBoundary` and one counter. Pinned
+//!   by [`the_composed_path_collapses_three_refusals_into_one_boundary_label`].
+//! - **`gateway.refused.*` still cannot count boundary probes (medium).**
+//!   Canonicality is checked before the boundary, so appending `\0` to
+//!   `shell.exec` relabels the probe as malformed. Pinned by
+//!   [`canonicality_check_precedes_the_boundary_check`].
+//! - **The audit journal is uncapped and stores the untruncated tool name
+//!   (medium).** The >2x amplification is gone with the refusal message, but
+//!   one full copy of every rejected name is still retained per request, with
+//!   no cap on the `Vec`. Pinned by
+//!   [`a_refused_request_no_longer_retains_more_attacker_bytes_than_it_carries`].
+//! - **The boundary lowercases and the authorizer does not (low).**
+//!   `MEMORY.RECALL` clears the boundary and misses `governed_tools`; that
+//!   fails closed, but by accident. Pinned by
+//!   [`boundary_is_case_insensitive_but_authorization_is_not`].
 //!
 //! Everything asserted below is the product's **current, real** behaviour.
-//! Where that behaviour is a defect the assertion pins the defect and the
-//! comment names it, so a future repair fails loudly here instead of silently
-//! changing the security posture.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
@@ -81,6 +124,33 @@ fn why(tool: &str) -> String {
     }
 }
 
+/// The three refusal families the gateway documents as distinguishable, plus
+/// `Forward`. Shared by every table-driven test below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Verdict {
+    /// Traverses the boundary.
+    Forward,
+    /// *outside the Enterprise boundary* — a forbidden capability.
+    Violation,
+    /// *not in the Enterprise catalogue* — merely unlisted.
+    Omission,
+    /// *tool name is empty or not canonical* — refused before any matching.
+    NonCanonical,
+}
+
+fn verdict(tool: &str) -> Verdict {
+    match classify(&req(tool)) {
+        Disposition::Forward => Verdict::Forward,
+        Disposition::Reject(w) if w.contains("outside the Enterprise boundary") => {
+            Verdict::Violation
+        }
+        Disposition::Reject(w) if w.contains("not in the Enterprise catalogue") => {
+            Verdict::Omission
+        }
+        Disposition::Reject(_) => Verdict::NonCanonical,
+    }
+}
+
 /// The ground truth the boundary exists to enforce, restated independently of
 /// `classify` so the test cannot inherit `classify`'s own blind spots.
 fn is_forbidden_capability(name: &str) -> bool {
@@ -104,8 +174,9 @@ fn starts_with_exposed_prefix(name: &str) -> bool {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Default-ignorable / invisible code points a sanitizer typically drops.
-/// None of these are `char::is_control` or `char::is_whitespace`, so every
-/// one of them survives `classify`'s canonicality check.
+/// None of these are `char::is_control` or `char::is_whitespace`, which is
+/// exactly why the old canonicality check let every one of them through; the
+/// repaired check is an ASCII allow-list, so they are all refused now.
 const INVISIBLE: &[char] = &[
     '\u{00ad}', // SOFT HYPHEN
     '\u{200b}', // ZERO WIDTH SPACE
@@ -207,7 +278,10 @@ fn separator_tail(s: &str) -> String {
 /// alias for the catalogue this crate shipped with". Translating
 /// `memory.recall` → `recall` and `ccos.recall` → `recall` is therefore not a
 /// speculative downstream behaviour, it is the stated design — and applied to
-/// `memory.shell.exec` it yields `shell.exec`.
+/// `memory.shell.exec` it used to yield `shell.exec`. This is the exact fold
+/// segment-wise forbidden matching now covers: every prefix `class_strip` can
+/// remove ends in `.`, so every string it can produce is a segment suffix the
+/// repaired `classify` already tested.
 fn class_strip(s: &str) -> String {
     let mut cur = s.to_string();
     loop {
@@ -432,9 +506,16 @@ const CORPUS: usize = 120_000;
 /// 1. it never panics (any panic aborts the test with the offending input);
 /// 2. it is a pure function of the tool name — same corpus, same verdicts,
 ///    fingerprint pinned so debug and release agree;
-/// 3. every `Forward` it emits that reaches a forbidden capability under a
-///    plausible downstream normalization is a **boundary bypass** — and the
-///    fuzzer finds thousands of them.
+/// 3. **no** `Forward` it emits reaches a forbidden capability under any
+///    plausible downstream normalization.
+///
+/// Claim 3 used to read the other way round: the fuzzer found 322 bypasses at
+/// this seed, one in every 25 forwarded names, and the assertion pinned that
+/// count so a repair would surface here. The repair landed — segment-wise
+/// forbidden matching plus a canonical-name rule — and the count is now
+/// pinned at **zero**. The histogram below is re-derived from the repaired
+/// gateway, not edited by hand; it moved wholesale from `forwarded` into
+/// `noncanonical_rejects` and `boundary_rejects`.
 #[test]
 fn fuzz_120k_names_never_panics_and_is_deterministic() {
     let mut rng = SplitMix64(SEED);
@@ -485,13 +566,21 @@ fn fuzz_120k_names_never_panics_and_is_deterministic() {
         "every input got exactly one disposition"
     );
     assert!(boundary_rejects > 0 && catalogue_rejects > 0 && noncanonical_rejects > 0);
+    // The boundary is not an outage: the corpus still reaches `Forward`, so
+    // the zero-bypass claim below is about a live gate, not a closed door.
+    assert!(forwarded > 0, "the repaired boundary still forwards");
 
     // Pinned: identical in debug and release, and any change to the generator
     // invalidates the counts below loudly instead of quietly.
     assert_eq!(
-        fingerprint, 0xc135_dc44_df83_746a,
+        fingerprint, 0xcd0a_ca04_b975_3aa2,
         "corpus/verdict fingerprint drifted — regenerate the pinned counts"
     );
+    // Re-derived from the repaired gateway by running it, not by editing the
+    // old numbers. Before the repair this was
+    // `(7_764, 17_965, 42_809, 51_462)`; the canonical-name rule moved the
+    // bulk of the corpus into `noncanonical_rejects`, and segment-wise
+    // matching moved the laundered spellings out of `forwarded`.
     assert_eq!(
         (
             forwarded,
@@ -499,100 +588,137 @@ fn fuzz_120k_names_never_panics_and_is_deterministic() {
             catalogue_rejects,
             noncanonical_rejects
         ),
-        (7_764, 17_965, 42_809, 51_462),
+        (612, 1_887, 1_890, 115_611),
         "pinned disposition histogram at SEED {SEED:#x}"
     );
 
-    // ── DEFECT (critical) ────────────────────────────────────────────────
+    // ── REGRESSION GUARD (critical) ──────────────────────────────────────
     // The invariant is "no Forward ever reaches a forbidden capability under
-    // plausible downstream normalization". A clean gateway would score 0.
-    // It does not. This assertion pins the real number so a repair shows up
-    // as a failure here rather than as a silent posture change.
-    assert!(
-        violations > 0,
-        "expected the fuzzer to find boundary bypasses; if this now fails the \
-         gateway was repaired — replace this with assert_eq!(violations, 0)"
-    );
+    // plausible downstream normalization". A clean gateway scores 0, and it
+    // now does. This assertion used to pin 322; if it ever goes non-zero the
+    // prefix-laundering class has been reopened.
     assert_eq!(
-        violations, 322,
-        "pinned count of forwarded-but-forbidden names at SEED {SEED:#x}"
-    );
-    assert!(
-        violations * 25 > forwarded,
-        "and they are not a rounding error: {violations} of {forwarded} forwarded \
-         names ( > 1 in 25 ) reach a forbidden capability downstream"
+        violations, 0,
+        "the gateway forwarded {violations} of {forwarded} names that reach a \
+         forbidden capability downstream — the prefix-laundering class is open again"
     );
 }
 
-/// Root cause, isolated: **every** bypass the fuzzer finds is a forbidden
-/// capability wearing an `ALLOWED_PREFIXES` hat. `classify` anchors the
-/// forbidden check at the start of the string only, so an exposed namespace
-/// in front of `shell.exec` is a complete bypass of the boundary.
+/// Root cause, now closed: every bypass the fuzzer used to find was a
+/// forbidden capability wearing an `ALLOWED_PREFIXES` hat, because `classify`
+/// anchored the forbidden check at byte 0 only. This test still generates the
+/// full corpus, still isolates the names shaped like that attack, and asserts
+/// that **not one of them traverses**.
+///
+/// It is deliberately not a vacuous "found nothing": the attack-shape count
+/// is pinned too, so if the generator ever stops producing laundering
+/// candidates the test fails rather than passing for the wrong reason. The
+/// `by_normalizer` histogram — once "the shape of the hole" — is now the
+/// shape of the attack surface the repair has to keep covering.
 #[test]
-fn every_fuzz_bypass_is_a_forbidden_capability_behind_an_exposed_prefix() {
+fn no_fuzz_input_still_launders_a_forbidden_capability_behind_an_exposed_prefix() {
     let mut rng = SplitMix64(SEED);
-    let mut by_normalizer: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut examples: BTreeSet<String> = BTreeSet::new();
+    let mut attempts_by_normalizer: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut attempts: BTreeSet<String> = BTreeSet::new();
+    let mut bypasses: BTreeSet<String> = BTreeSet::new();
 
     for _ in 0..CORPUS {
         let name = generate(&mut rng);
-        if !forwards(&name) {
-            continue;
-        }
         let Some(via) = normalizes_to_forbidden(&name) else {
             continue;
         };
-        *by_normalizer.entry(via).or_default() += 1;
-        // The single structural fact behind every one of them.
-        assert!(
-            starts_with_exposed_prefix(&name),
-            "a bypass that is NOT an exposed-prefix wrap — new root cause: {name:?}"
-        );
-        assert!(
-            !is_forbidden_capability(&name),
-            "classify would have caught a bare forbidden name: {name:?}"
-        );
-        if examples.len() < 64 {
-            examples.insert(name);
+        // The exact shape that used to launder: an exposed namespace in front
+        // of something that reaches a forbidden capability downstream, and
+        // therefore *not* a bare forbidden name `classify` would have caught
+        // even before the repair.
+        if !starts_with_exposed_prefix(&name) || is_forbidden_capability(&name) {
+            continue;
+        }
+        *attempts_by_normalizer.entry(via).or_default() += 1;
+        if attempts.len() < 64 {
+            attempts.insert(name.clone());
+        }
+        if forwards(&name) {
+            bypasses.insert(name);
         }
     }
 
-    assert!(!examples.is_empty(), "the fuzzer must produce witnesses");
+    // Non-vacuity: the fuzzer must still be producing the attack.
+    assert!(
+        !attempts.is_empty(),
+        "the fuzzer must still generate exposed-prefix-wrapped forbidden names"
+    );
     // Four *independent* downstream normalizations each reach a forbidden
-    // capability, so "our router does not resolve `..`" is no defence.
-    // Pinned exactly: this is the shape of the hole, not merely its size.
+    // capability from one of these names, so "our router does not resolve
+    // `..`" was never a defence. Pinned exactly: this is the shape of the
+    // attack surface, and every route on it must stay refused.
+    //
+    // The counts are larger than the 322 bypasses this test used to pin
+    // because they now count every attack-shaped *name the fuzzer generates*
+    // — 484 of them — rather than only the ones that got through. Before the
+    // repair the split of the same routes among forwarded names was
+    // `class_strip 88 / full_pipeline 11 / path_resolve 1 / separator_tail 222`.
     assert_eq!(
-        by_normalizer,
+        attempts_by_normalizer,
         BTreeMap::from([
-            ("class_strip", 88),
-            ("full_pipeline", 11),
+            ("class_strip", 107),
+            ("full_pipeline", 16),
             ("path_resolve", 1),
-            ("separator_tail", 222),
+            ("separator_tail", 360),
         ]),
         "pinned normalization routes into the forbidden catalogue"
     );
-    // Witnesses worth reading aloud: `audit.forge.run`, `audit.patch.apply`,
-    // `audit.Shell.Exec`. The fuzzer needed no cleverness whatsoever.
-    assert!(examples.iter().any(|e| e.contains("forge.run")));
+
+    // ── REGRESSION GUARD (critical) ──────────────────────────────────────
+    // This set used to hold 322 witnesses — `audit.forge.run`,
+    // `audit.patch.apply`, `audit.Shell.Exec`. The fuzzer needed no
+    // cleverness whatsoever. It must now stay empty.
+    assert!(
+        bypasses.is_empty(),
+        "{} laundered names traversed the boundary: {:?}",
+        bypasses.len(),
+        bypasses.iter().take(16).collect::<Vec<_>>()
+    );
+
+    // And the named historical witnesses, refused with the boundary label —
+    // segment-wise matching sees `forge.run` inside `audit.forge.run`.
+    for witness in ["audit.forge.run", "audit.patch.apply", "audit.Shell.Exec"] {
+        assert_eq!(
+            verdict(witness),
+            Verdict::Violation,
+            "{witness:?}: {}",
+            why(witness)
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 2. Targeted bypasses — the headline defect, spelled out
+// 2. Targeted bypasses — the headline defect, now the headline guard
 // ─────────────────────────────────────────────────────────────────────────
 
-/// DEFECT (critical), `crates/ccos-enterprise-gateway/src/lib.rs:98`:
+/// REPAIRED (was critical), `crates/ccos-enterprise-gateway/src/lib.rs`:
 ///
 /// ```text
 /// let forbidden = FORBIDDEN_PREFIXES.iter().any(|p| lowered.starts_with(p))
 ///     || FORBIDDEN_TOOLS.contains(&lowered.as_str());
 /// ```
 ///
-/// `starts_with` anchors the forbidden check at byte 0. `ALLOWED_PREFIXES`
-/// then admits on the same anchor. Any forbidden capability prefixed with an
-/// exposed namespace is therefore forwarded. Every row below is a `Forward`
-/// today.
+/// `starts_with` anchored the forbidden check at byte 0; `ALLOWED_PREFIXES`
+/// then admitted on the same anchor, so any forbidden capability prefixed
+/// with an exposed namespace was forwarded. All 121 wrapper x forbidden
+/// spellings below were `Forward`.
+///
+/// They are now all refused, by two different halves of the repair, and this
+/// test pins **which half catches which family** so a partial revert cannot
+/// hide behind an aggregate count:
+///
+/// - the five dotted wrappers (`ccos.`, `memory.`, `context.`, `policy.`,
+///   `audit.`) produce canonical names, caught by segment-wise forbidden
+///   matching → *outside the Enterprise boundary*;
+/// - the six separator-bearing or non-ASCII wrappers never get that far →
+///   *tool name is empty or not canonical*.
 #[test]
-fn an_exposed_prefix_launders_every_forbidden_capability() {
+fn an_exposed_prefix_can_no_longer_launder_a_forbidden_capability() {
     let forbidden_entries = [
         "shell.exec",
         "shell.spawn",
@@ -606,23 +732,25 @@ fn an_exposed_prefix_launders_every_forbidden_capability() {
         "code.execute",
         "repository.modify",
     ];
-    // Wrappers built only from names the gateway itself calls exposed.
+    // Wrappers built only from names the gateway itself calls exposed, each
+    // paired with the refusal family that must catch it.
     let wrappers = [
-        "ccos.",                // the documented compatibility alias
-        "memory.",              // exposed class
-        "context.",             //
-        "policy.",              //
-        "audit.",               //
-        "memory.recall/../",    // path traversal
-        "memory.recall/",       // path join
-        "policy.set;",          // list/command separator
-        "ccos.\u{200d}",        // alias + zero-width joiner
-        "ccos.\u{feff}",        // alias + BOM
-        "audit.query/\u{202e}", // path join + right-to-left override
+        ("ccos.", Verdict::Violation),    // the documented compat alias
+        ("memory.", Verdict::Violation),  // exposed class
+        ("context.", Verdict::Violation), //
+        ("policy.", Verdict::Violation),  //
+        ("audit.", Verdict::Violation),   //
+        ("memory.recall/../", Verdict::NonCanonical), // path traversal
+        ("memory.recall/", Verdict::NonCanonical), // path join
+        ("policy.set;", Verdict::NonCanonical), // list/command separator
+        ("ccos.\u{200d}", Verdict::NonCanonical), // alias + zero-width joiner
+        ("ccos.\u{feff}", Verdict::NonCanonical), // alias + BOM
+        ("audit.query/\u{202e}", Verdict::NonCanonical), // path join + RTL override
     ];
 
     let mut laundered = Vec::new();
-    for w in wrappers {
+    let mut refused = 0usize;
+    for (w, expected) in wrappers {
         for f in forbidden_entries {
             let name = format!("{w}{f}");
             // Ground truth: this names a capability the product must never carry.
@@ -630,39 +758,55 @@ fn an_exposed_prefix_launders_every_forbidden_capability() {
                 normalizes_to_forbidden(&name).is_some(),
                 "test corpus error: {name:?} is not a laundered forbidden capability"
             );
-            if forwards(&name) {
+            let got = verdict(&name);
+            if got == Verdict::Forward {
                 laundered.push(name);
+                continue;
             }
+            assert_eq!(got, expected, "{name:?} caught by the wrong half: {got:?}");
+            refused += 1;
         }
     }
 
-    // 11 wrappers x 11 forbidden entries: the boundary stops none of them.
+    // 11 wrappers x 11 forbidden entries: the boundary now stops all of them.
+    assert!(
+        laundered.is_empty(),
+        "these laundered spellings still traverse: {laundered:?}"
+    );
     assert_eq!(
-        laundered.len(),
+        refused,
         wrappers.len() * forbidden_entries.len(),
-        "every laundered spelling is forwarded today; unforwarded: {:?}",
-        wrappers.len() * forbidden_entries.len() - laundered.len()
+        "all 121 laundered spellings are refused, each by its expected half"
     );
     // Spot-check the two the brief names explicitly, so the failure message
-    // is unambiguous if this ever changes.
-    assert!(forwards("memory.recall/../shell.exec"));
-    assert!(forwards("ccos.shell.exec"));
+    // is unambiguous if this ever regresses.
+    assert_eq!(
+        verdict("memory.recall/../shell.exec"),
+        Verdict::NonCanonical
+    );
+    assert_eq!(verdict("ccos.shell.exec"), Verdict::Violation);
 }
 
-/// DEFECT (critical), composed path: the same names traverse **the entire
-/// admission pipeline** and are billed to the tenant.
+/// REPAIRED (was critical), composed path: the same names used to traverse
+/// **the entire admission pipeline** and be billed to the tenant.
 ///
 /// `ccos_enterprise_conformance`'s module docs claim the boundary "is
 /// unreachable-around" and that no tenant-configurable gate can widen it.
-/// But `Deployment::govern_tool` is exactly such a knob: governing
+/// `Deployment::govern_tool` was exactly such a knob: governing
 /// `memory.recall/../shell.exec` under the everyday `memory.read` permission
-/// hands a plain **reader** a forwarded call to a capability charter §4.2
-/// forbids the profile from carrying at all.
+/// handed a plain **reader** a forwarded, billed call to a capability charter
+/// §4.2 forbids the profile from carrying at all — three calls, 21 tokens,
+/// three journal entries reading as ordinary successes and not one boundary
+/// counter moving.
+///
+/// The boundary is evaluated before authorization, so the repair reaches the
+/// composed path unchanged: the same operator action now refuses all three,
+/// bills nothing and moves the boundary counter every time.
 #[test]
-fn the_composed_path_forwards_and_bills_a_wrapped_shell_exec() {
+fn the_composed_path_can_no_longer_forward_or_bill_a_wrapped_shell_exec() {
     let mut d = two_tenant_deployment();
     // Nothing privileged happens here: an operator adds two tools under the
-    // *lowest* permission in the deployment.
+    // *lowest* permission in the deployment. It is no longer enough.
     d.govern_tool("memory.recall/../shell.exec", "memory.read")
         .govern_tool("ccos.shell.exec", "memory.read")
         .govern_tool("ccos.rsi.propose", "memory.read");
@@ -685,32 +829,31 @@ fn the_composed_path_forwards_and_bills_a_wrapped_shell_exec() {
             cost_tokens: 7,
             variant: None,
         });
-        assert_eq!(
-            outcome,
-            Outcome::Forwarded,
-            "DEFECT: {tool:?} traverses the whole governed path as a read-only actor"
+        assert!(
+            matches!(outcome.refusal(), Some(Refusal::OutsideBoundary(_))),
+            "{tool:?} must be stopped at the boundary even when governed: {outcome:?}"
         );
     }
 
-    // …and it costs the tenant real budget, i.e. it was a live call.
-    assert_eq!(d.spent("acme"), 21, "three forwarded calls were billed");
+    // …and none of it costs the tenant budget, i.e. no call went live.
+    assert_eq!(d.spent("acme"), 0, "nothing was forwarded, nothing billed");
 
-    // The audit trail records them as ordinary successes: nothing in the
-    // journal marks a boundary event, so this is invisible to review.
+    // The audit trail records three refusals, not three ordinary successes.
     let journal = d.audit_of("acme");
     assert_eq!(journal.len(), 3);
-    assert!(journal.iter().all(|r| r.outcome.is_forwarded()));
+    assert!(journal.iter().all(|r| !r.outcome.is_forwarded()));
     let metrics: BTreeMap<String, u64> = d.metrics().into_iter().collect();
-    assert_eq!(metrics.get("gateway.forwarded"), Some(&3));
+    assert_eq!(metrics.get("gateway.forwarded"), None);
     assert_eq!(
         metrics.get("gateway.refused.outside_boundary"),
-        None,
-        "DEFECT: three forbidden capabilities traversed without a single \
-         boundary counter moving"
+        Some(&3),
+        "three forbidden capabilities, three boundary counter increments — \
+         the events are visible to review now"
     );
 
-    // Contrast: the *bare* spelling is stopped, which is all
-    // `boundary_contract.rs::no_privilege_reaches_past_the_boundary` proves.
+    // The *bare* spelling is still stopped, which is all
+    // `boundary_contract.rs::no_privilege_reaches_past_the_boundary` proves;
+    // the wrapped spellings above are what this file adds.
     d.govern_tool("shell.exec", "memory.read");
     let r = request("acme", "bob", "shell.exec", "r-bare");
     let outcome = d.admit(Call {
@@ -724,15 +867,17 @@ fn the_composed_path_forwards_and_bills_a_wrapped_shell_exec() {
         outcome.refusal(),
         Some(Refusal::OutsideBoundary(_))
     ));
-    assert_eq!(d.spent("acme"), 21, "the refusal was not billed");
+    assert_eq!(d.spent("acme"), 0, "the refusal was not billed");
 }
 
-/// DEFECT (high): the exposed prefixes forward a *bare namespace* with no
-/// tool component at all, and forward arbitrarily deep sub-namespaces. The
-/// catalogue is documented as a list of "capability classes"; in practice
-/// `memory.` alone, `ccos.` alone and `memory.......` all traverse.
+/// REPAIRED (was high): the exposed prefixes used to forward a *bare
+/// namespace* with no tool component at all, and arbitrarily deep degenerate
+/// sub-namespaces — `memory.` alone, `ccos.` alone and `memory.......` all
+/// traversed, because `starts_with("memory.")` is satisfied by `memory.`
+/// itself. The canonical-name rule forbids an empty segment, so a trailing or
+/// doubled dot is now refused before any matching.
 #[test]
-fn bare_and_degenerate_namespaces_traverse() {
+fn bare_and_degenerate_namespaces_no_longer_traverse() {
     for tool in [
         "memory.",
         "context.",
@@ -745,15 +890,23 @@ fn bare_and_degenerate_namespaces_traverse() {
         "memory./",
         "memory.\u{feff}",
     ] {
-        assert!(
-            forwards(tool),
-            "DEFECT pinned: {tool:?} names no tool yet traverses the boundary"
+        assert_eq!(
+            verdict(tool),
+            Verdict::NonCanonical,
+            "{tool:?} names no tool and must not be classifiable: {}",
+            why(tool)
         );
     }
-    // The nearest miss is correctly refused, which is what makes the above a
-    // boundary bug rather than a deliberate design.
+    // The nearest miss was always correctly refused; it stays refused, as an
+    // omission rather than a malformed name, because it *is* a well-formed
+    // name that simply is not in the catalogue.
     for tool in ["memory", "ccos", "audit", "system", "system.healthz"] {
-        assert!(!forwards(tool), "{tool:?}");
+        assert_eq!(verdict(tool), Verdict::Omission, "{tool:?}");
+    }
+    // …and the real thing still forwards, so this is a boundary fix and not
+    // an outage of the namespace.
+    for tool in ["memory.recall", "ccos.recall", "audit.query", "policy.set"] {
+        assert!(forwards(tool), "{tool:?}");
     }
 }
 
@@ -761,18 +914,25 @@ fn bare_and_degenerate_namespaces_traverse() {
 // 3. Homoglyph / normalization / case-folding attacks
 // ─────────────────────────────────────────────────────────────────────────
 
-/// What HELD: every homoglyph and compatibility spelling of a forbidden name
-/// is refused. `classify` fails closed because deny-by-default catches what
-/// the forbidden list misses.
+/// What always HELD: every homoglyph and compatibility spelling of a
+/// forbidden name is refused. `classify` failed closed because deny-by-default
+/// caught what the forbidden list missed.
 ///
-/// What is nonetheless WRONG (medium, detection): each one is reported as
-/// *"not in the Enterprise catalogue"* — an **omission** — when it is in fact
-/// a deliberate boundary attack. `crates/ccos-enterprise-gateway/src/lib.rs:74`
-/// promises the two refusals are distinguishable so "an operator reading the
-/// audit trail should be able to tell the two apart". For homoglyph attacks
-/// the audit trail says "someone typo'd", not "someone tried `shell.exec`".
+/// What was WRONG (medium, detection) and is now repaired: each one was
+/// reported as *"not in the Enterprise catalogue"* — an **omission** — when it
+/// was in fact a deliberate boundary attack, so an operator reading the audit
+/// trail saw "someone typo'd", not "someone tried `shell.exec`". The
+/// canonical-name rule is an ASCII allow-list, so every one of these is now
+/// refused as a **malformed name**, before any matching. That is still not the
+/// *boundary* label, but it is no longer the label for an honest typo either:
+/// `memry.recall` is an omission, `\u{0455}hell.exec` is not.
+///
+/// Also repaired (low, log spoofing): the refusal used to echo the attacker's
+/// raw bytes, bidi overrides included, straight into whatever reads the audit
+/// trail. Non-canonical refusals no longer name the tool at all, and the two
+/// refusals that do name it pass it through `sanitize()`.
 #[test]
-fn homoglyph_and_compatibility_spellings_fail_closed_but_are_logged_as_typos() {
+fn homoglyph_and_compatibility_spellings_are_refused_as_non_canonical() {
     let attacks = [
         ("\u{0455}hell.exec", "Cyrillic ѕ (U+0455)"),
         ("\u{ff53}hell.exec", "fullwidth ｓ (U+FF53)"),
@@ -806,39 +966,66 @@ fn homoglyph_and_compatibility_spellings_fail_closed_but_are_logged_as_typos() {
         );
         // HELD: fail closed.
         let reason = why(tool);
-        // DEFECT pinned: mislabelled as an omission, never as a violation.
-        assert!(
-            reason.contains("not in the Enterprise catalogue"),
-            "{note}: expected the (wrong) omission label, got {reason:?}"
+        // REPAIRED: no longer mislabelled as a catalogue omission.
+        assert_eq!(
+            reason, "tool name is empty or not canonical",
+            "{note}: a non-ASCII spelling must be refused as malformed, got {reason:?}"
         );
-        assert!(
-            !reason.contains("outside the Enterprise boundary"),
-            "{note}: if this now reports a boundary violation the detection gap \
-             was repaired — flip this assertion"
-        );
+        // REPAIRED: the message never carries the attacker's bytes back out.
+        for c in tool.chars().filter(|c| !c.is_ascii_graphic()) {
+            assert!(
+                !reason.contains(c),
+                "{note}: refusal message echoes {c:?} from the attacked name"
+            );
+        }
     }
 
-    // And the refusal message echoes the raw, attacker-controlled bytes,
-    // including bidi overrides, straight into whatever reads the audit trail.
+    // The bidi-override spoof specifically: the message used to contain
+    // U+202E verbatim, so a terminal rendered the attacked name backwards.
     let spoof = "\u{202e}shell.exec";
     assert!(
-        why(spoof).contains('\u{202e}'),
-        "DEFECT (low, log spoofing): the rejection message embeds unescaped \
-         bidi overrides, so a terminal renders the attacked name backwards"
+        !why(spoof).contains('\u{202e}'),
+        "the rejection message must not embed unescaped bidi overrides"
+    );
+    assert!(why(spoof).is_ascii(), "{:?}", why(spoof));
+
+    // The two refusals that *do* name the tool only ever see canonical ASCII,
+    // and `sanitize()` still caps what they echo at 64 chars plus an ellipsis.
+    let long = format!("zz.{}", "y".repeat(200));
+    assert_eq!(
+        long.len(),
+        203,
+        "a canonical name under the 256-byte ceiling"
+    );
+    let reason = why(&long);
+    assert_eq!(verdict(&long), Verdict::Omission);
+    assert!(
+        reason.contains('\u{2026}') && reason.chars().count() < 120,
+        "a 203-char name must be truncated in the message, got {} chars: {reason:?}",
+        reason.chars().count()
+    );
+    assert!(
+        !reason.contains(&"y".repeat(80)),
+        "the message must not replay the whole name: {reason:?}"
     );
 }
 
-/// The ASCII-vs-Unicode case-folding gap, measured rather than assumed.
+/// The ASCII-vs-Unicode case-folding gap, measured rather than assumed —
+/// and now closed by construction rather than by luck.
 ///
 /// `classify` documents its lowering as the defence against "a case-
-/// normalizing router downstream", but uses `to_ascii_lowercase`. The gap is
-/// real — Turkish dotless ı, dotted İ and the Kelvin sign all survive it —
-/// though deny-by-default still catches every case, so the gap costs
-/// classification quality, not containment.
+/// normalizing router downstream", but uses `to_ascii_lowercase`. The gap was
+/// real — Turkish dotless ı, dotted İ and the Kelvin sign all survived it —
+/// and cost classification quality: every such name was reported as a
+/// catalogue omission. It no longer matters, because a name containing any
+/// non-ASCII character is refused as malformed before the lowering is even
+/// reached. The Rust facts below still hold and still document *why* an
+/// ASCII-only rule is the right shape for this gate.
 #[test]
-fn ascii_lowercasing_leaves_a_unicode_case_folding_gap() {
+fn the_unicode_case_folding_gap_is_closed_by_refusing_non_ascii_names() {
     // A locale-aware or Unicode-aware downstream maps these onto forbidden
-    // names; `to_ascii_lowercase` does not.
+    // names; `to_ascii_lowercase` does not — which is why they must never be
+    // classified at all.
     assert_eq!(
         '\u{0131}'.to_uppercase().to_string(),
         "I",
@@ -856,10 +1043,10 @@ fn ascii_lowercasing_leaves_a_unicode_case_folding_gap() {
         "she\u{212a}.exec",  // Kelvin sign, NFKC → k (not in a forbidden name, but
                              // proves the fold is unimplemented)
     ] {
-        let reason = why(tool);
-        assert!(
-            reason.contains("not in the Enterprise catalogue"),
-            "{tool:?}: {reason}"
+        assert_eq!(
+            why(tool),
+            "tool name is empty or not canonical",
+            "{tool:?} must be refused for shape, not measured against the catalogue"
         );
     }
     // The ASCII half of the promise does hold, exactly and for every entry.
@@ -897,84 +1084,105 @@ fn ascii_lowercasing_leaves_a_unicode_case_folding_gap() {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// The prefix-boundary matrix from the brief, each row asserting the real
-/// disposition and the real *reason*. What HELD: `.`-anchoring is exact —
-/// `shell` is not `shell.`, `.shell.exec` and `x/shell.exec` do not start a
-/// forbidden namespace, and every whitespace/control decoration fails closed
-/// before any matching happens.
+/// disposition and the real *reason*.
+///
+/// What always HELD: `.`-anchoring is exact — `shell` is not `shell.` — and
+/// every whitespace/control decoration fails closed before any matching.
+///
+/// What changed, and why each row moved:
+///
+/// - the seven `Forward` rows at the bottom are gone. Five separator- or
+///   invisible-bearing spellings are now `NonCanonical`; `ccos.shell.exec`,
+///   `ccos.code.execute` and `memory.repository.modify` are `Violation`,
+///   because forbidden matching runs at every segment boundary;
+/// - `.shell.exec`, `x/shell.exec`, `code.execute.`, `repository.modify/`
+///   and `shell.` moved from `Omission`/`Violation` to `NonCanonical`: an
+///   empty segment or a `/` is not a name the boundary will read;
+/// - `shell.exec\u{feff}` and `shell.exec\u{200d}` moved from `Violation` to
+///   `NonCanonical`. The invisible code points used to be neither
+///   `is_control` nor `is_whitespace` and so survived the old check; the
+///   ASCII allow-list refuses them.
+///
+/// The `Forward` rows are now real catalogue names, and the guard on them is
+/// inverted: a forwarded name must **not** reach a forbidden capability under
+/// any modelled downstream normalization.
 #[test]
 fn prefix_boundary_matrix() {
-    #[derive(Debug, PartialEq, Eq)]
-    enum Verdict {
-        Forward,
-        Violation,
-        Omission,
-        NonCanonical,
-    }
     use Verdict::*;
 
     let cases: &[(&str, Verdict)] = &[
-        ("shell", Omission),   // no dot: not the namespace
-        ("shell.", Violation), // bare forbidden namespace
-        ("shell..", Violation),
+        ("shell", Omission),      // no dot: not the namespace
+        ("shell.", NonCanonical), // trailing dot: empty final segment
+        ("shell..", NonCanonical),
         ("shell.exec", Violation),
         ("SHELL.EXEC", Violation),
         ("sHeLl.ExEc", Violation),
-        (".shell.exec", Omission),         // leading dot breaks the anchor
-        ("x/shell.exec", Omission),        // and so does any non-exposed prefix
+        (".shell.exec", NonCanonical), // leading dot: empty first segment
+        ("x/shell.exec", NonCanonical), // `/` is not a canonical byte
         ("shell.exec\u{0}", NonCanonical), // NUL is a control byte
-        ("shell.exec ", NonCanonical),     // trailing space
+        ("shell.exec ", NonCanonical), // trailing space
         (" shell.exec", NonCanonical),
         ("shell.exec\t", NonCanonical),
         ("shell.exec\n", NonCanonical),
-        ("shell.exec\u{a0}", NonCanonical), // NBSP is White_Space
+        ("shell.exec\u{a0}", NonCanonical),   // NBSP
         ("shell.exec\u{3000}", NonCanonical), // ideographic space
         ("shell.exec\u{2028}", NonCanonical), // line separator
         ("", NonCanonical),
         ("   ", NonCanonical),
         ("\u{0}", NonCanonical),
-        // …but the invisible, non-`is_control`, non-`is_whitespace` code
-        // points are NOT non-canonical, and they do not break the anchor:
-        ("shell.exec\u{feff}", Violation),
-        ("shell.exec\u{200d}", Violation),
-        // Exact-match forbidden tools lose their label to any decoration.
+        // …and the invisible, non-`is_control`, non-`is_whitespace` code
+        // points that used to survive the old canonicality check are refused
+        // by the ASCII allow-list now:
+        ("shell.exec\u{feff}", NonCanonical),
+        ("shell.exec\u{200d}", NonCanonical),
+        // Exact-match forbidden tools no longer lose their label to a
+        // decoration by being silently reclassified as a mere omission.
         ("code.execute", Violation),
-        ("code.execute.", Omission),
-        ("code.execute\u{feff}", Omission),
-        ("repository.modify/", Omission),
-        // And every laundered form traverses.
-        ("memory.recall/../shell.exec", Forward),
-        ("ccos.shell.exec", Forward),
-        ("memory.recall/shell.exec", Forward),
-        ("policy.set;shell.exec", Forward),
-        ("ccos.\u{200d}shell.exec", Forward),
-        ("ccos.code.execute", Forward),
-        ("memory.repository.modify", Forward),
+        ("code.execute.", NonCanonical),
+        ("code.execute\u{feff}", NonCanonical),
+        ("repository.modify/", NonCanonical),
+        // And every formerly laundered form is refused — by shape…
+        ("memory.recall/../shell.exec", NonCanonical),
+        ("memory.recall/shell.exec", NonCanonical),
+        ("policy.set;shell.exec", NonCanonical),
+        ("ccos.\u{200d}shell.exec", NonCanonical),
+        // …or by the boundary itself, matched at a segment boundary.
+        ("ccos.shell.exec", Violation),
+        ("ccos.code.execute", Violation),
+        ("memory.repository.modify", Violation),
+        ("audit.query.shell.spawn", Violation),
+        ("memory.recall.self.rewrite", Violation),
+        // The catalogue still traverses — the repair is not an outage.
+        ("memory.recall", Forward),
+        ("ccos.recall", Forward),
+        ("ccos.qpage.read", Forward),
+        ("policy.set", Forward),
+        ("audit.query", Forward),
+        ("system.health", Forward),
+        ("MEMORY.RECALL", Forward),
     ];
 
     for (tool, expected) in cases {
         if *expected == Forward {
-            // Each Forward row above really does reach a forbidden capability
-            // downstream — the matrix is not just cataloguing odd spellings.
-            assert!(
-                normalizes_to_forbidden(tool).is_some(),
-                "matrix error: {tool:?} is listed as a laundered bypass"
+            // The inverted guard: nothing the boundary forwards may reach a
+            // forbidden capability under any downstream normalization we model.
+            assert_eq!(
+                normalizes_to_forbidden(tool),
+                None,
+                "matrix error: {tool:?} is forwarded and still reaches a forbidden capability"
             );
         }
-        let got = match classify(&req(tool)) {
-            Disposition::Forward => Forward,
-            Disposition::Reject(w) if w.contains("outside the Enterprise boundary") => Violation,
-            Disposition::Reject(w) if w.contains("not in the Enterprise catalogue") => Omission,
-            Disposition::Reject(_) => NonCanonical,
-        };
-        assert_eq!(&got, expected, "{tool:?}");
+        assert_eq!(&verdict(tool), expected, "{tool:?}");
     }
 }
 
-/// Every canonicality rejection happens *before* any matching, so a
-/// forbidden name with a control byte is refused as "not canonical" rather
-/// than as a boundary violation. That is fail-closed and fine — but it means
-/// `gateway.refused.*` cannot be used to count boundary probes, since the
-/// cheapest evasion (append `\0`) changes the label.
+/// STILL OPEN (medium): every canonicality rejection happens *before* any
+/// matching, so a forbidden name with a control byte is refused as "not
+/// canonical" rather than as a boundary violation. That is fail-closed and
+/// fine for containment — but it means `gateway.refused.*` cannot be used to
+/// count boundary probes, since the cheapest evasion (append `\0`) changes
+/// the label. The repair did not change this, and it is pinned deliberately:
+/// the order is correct, the *observability* consequence is the open finding.
 #[test]
 fn canonicality_check_precedes_the_boundary_check() {
     for entry in FORBIDDEN_PREFIXES {
@@ -993,8 +1201,8 @@ fn canonicality_check_precedes_the_boundary_check() {
 // 5. Refusal taxonomy in the composed path
 // ─────────────────────────────────────────────────────────────────────────
 
-/// DEFECT (medium, spec violation) —
-/// `tests/ccos-enterprise-conformance/src/lib.rs:295`:
+/// STILL OPEN (medium, spec violation) —
+/// `tests/ccos-enterprise-conformance/src/lib.rs`:
 ///
 /// ```text
 /// if let Disposition::Reject(why) = classify(call.request) {
@@ -1011,7 +1219,8 @@ fn canonicality_check_precedes_the_boundary_check() {
 /// `Refusal::OutsideBoundary` variant and the single
 /// `gateway.refused.outside_boundary` counter. A typo and an attempted
 /// `shell.exec` are indistinguishable in the journal's structured fields and
-/// in every metric; only the free-text string still differs.
+/// in every metric; only the free-text string still differs. Untouched by the
+/// gateway repair, and still an open finding.
 #[test]
 fn the_composed_path_collapses_three_refusals_into_one_boundary_label() {
     let mut d = two_tenant_deployment();
@@ -1067,12 +1276,14 @@ fn the_composed_path_collapses_three_refusals_into_one_boundary_label() {
     assert!(texts[2].contains("not canonical"));
 }
 
-/// What HELD: the gateway's case-insensitivity is *not* carried into the
-/// governance map, and that asymmetry fails closed. `MEMORY.RECALL` clears
-/// the boundary but misses `governed_tools`, so it is refused. Worth pinning:
-/// it means a deployment cannot be tricked into authorizing a case variant,
-/// but it also means the boundary and the authorizer key on different
-/// strings, and only luck (a `BTreeMap` miss) makes that safe.
+/// STILL OPEN (low). What HELD: the gateway's case-insensitivity is *not*
+/// carried into the governance map, and that asymmetry fails closed.
+/// `MEMORY.RECALL` clears the boundary but misses `governed_tools`, so it is
+/// refused. Worth pinning: it means a deployment cannot be tricked into
+/// authorizing a case variant, but it also means the boundary and the
+/// authorizer key on different strings, and only luck (a `BTreeMap` miss)
+/// makes that safe. The canonical-name rule permits `[A-Za-z0-9_]`, so
+/// uppercase names are still classifiable and the asymmetry survives.
 #[test]
 fn boundary_is_case_insensitive_but_authorization_is_not() {
     let mut d = two_tenant_deployment();
@@ -1099,49 +1310,80 @@ fn boundary_is_case_insensitive_but_authorization_is_not() {
 // 6. Size, time and memory
 // ─────────────────────────────────────────────────────────────────────────
 
-/// A 1 MiB tool name must not panic and must not cost superlinear time.
+/// REPAIRED (was high): a 1 MiB tool name used to be **forwarded**. It was at
+/// least linear rather than quadratic — one `to_ascii_lowercase` allocation
+/// plus a `chars()` scan — but the gateway allocated and scanned a megabyte
+/// per request, and then embedded the whole thing in a refusal message and an
+/// audit record.
 ///
-/// HELD: `classify` is linear — one `to_ascii_lowercase` allocation plus a
-/// `chars()` scan plus prefix compares. Both checks below are one-sided
-/// ceilings measured back to back on the same machine, so they cannot flake
-/// into a false failure the way an equality on a duration would; a quadratic
-/// scan of 1 MiB would miss them by many orders of magnitude.
+/// A 256-byte ceiling is now checked before anything else, so an oversized
+/// name costs `len()` and never reaches the lowercase, the scan, the matching
+/// or the message. This test pins the ceiling *exactly* — 256 bytes forwards,
+/// 257 does not — and keeps one-sided timing ceilings measured back to back
+/// on the same machine, so they cannot flake into a false failure the way an
+/// equality on a duration would.
 #[test]
-fn a_one_megabyte_name_is_linear_and_never_panics() {
+fn an_oversized_name_is_refused_by_length_not_scanned() {
     const MIB: usize = 1 << 20;
     let small = format!("memory.{}", "a".repeat(64 * 1024 - 7));
     let large = format!("memory.{}", "a".repeat(MIB - 7));
     assert_eq!(small.len(), 64 * 1024);
     assert_eq!(large.len(), MIB);
 
-    let bench = |name: &str| -> u128 {
+    // The ceiling, to the byte. Both names are otherwise perfectly canonical
+    // and in the exposed catalogue, so only the length decides.
+    let at_limit = format!("memory.{}", "a".repeat(256 - 7));
+    let over_limit = format!("memory.{}", "a".repeat(257 - 7));
+    assert_eq!(at_limit.len(), 256);
+    assert_eq!(over_limit.len(), 257);
+    assert_eq!(verdict(&at_limit), Verdict::Forward, "256 bytes is allowed");
+    assert_eq!(
+        verdict(&over_limit),
+        Verdict::NonCanonical,
+        "257 bytes is refused by length"
+    );
+
+    let bench = |name: &str, expected: Disposition| -> u128 {
         let r = req(name);
         let mut best = u128::MAX;
-        for _ in 0..5 {
+        for _ in 0..64 {
             let t0 = Instant::now();
             let d = classify(&r);
             let ns = t0.elapsed().as_nanos();
-            assert_eq!(d, Disposition::Forward);
+            assert_eq!(d, expected);
             best = best.min(ns);
         }
         best.max(1)
     };
 
-    let t_small = bench(&small);
-    let t_large = bench(&large);
+    let rejected = Disposition::Reject("tool name is empty or not canonical".into());
+    let t_at_limit = bench(&at_limit, Disposition::Forward);
+    let t_small = bench(&small, rejected.clone());
+    let t_large = bench(&large, rejected);
 
-    // 16x the bytes must not cost anywhere near 16^2 the time.
+    // 16x the bytes must not cost 16x the time: the length check is O(1), so
+    // the two refusals are indistinguishable in cost. Both are the minimum of
+    // 64 back-to-back samples, so this is a one-sided ceiling on the best
+    // case and cannot flake the way an equality on a duration would.
     let ratio = t_large as f64 / t_small as f64;
     assert!(
-        ratio < 16.0 * 12.0,
-        "16x input cost {ratio:.1}x the time — superlinear (small {t_small} ns, \
-         large {t_large} ns)"
+        ratio < 16.0,
+        "16x input cost {ratio:.1}x the time — the length check is being \
+         preceded by a scan (small {t_small} ns, large {t_large} ns)"
     );
-    // Absolute ceiling: quadratic behaviour on 1 MiB would take minutes.
-    assert!(t_large < 5_000_000_000, "1 MiB classify took {t_large} ns");
+    // The actual point of the repair, stated absolutely. `classify` used to
+    // allocate a lowercased megabyte and scan it; no allocation-plus-scan of
+    // 1 MiB fits in 50 µs on any machine this suite runs on, so coming in
+    // under that is proof the length check ran first. Measured around 60 ns
+    // in debug, against ~3.5 µs for the 256-byte name that does traverse.
+    assert!(
+        t_large < 50_000,
+        "1 MiB refusal took {t_large} ns (a 256-byte forwarded name takes \
+         {t_at_limit} ns) — the megabyte is being scanned again"
+    );
 
-    // Bigger, weirder, still no panic — and note that a 1 MiB *forwarded*
-    // name is perfectly acceptable to the boundary.
+    // Bigger, weirder, still no panic — and every one of them is now refused
+    // rather than forwarded.
     for name in [
         format!("memory.{}", "\u{1f600}".repeat(64 * 1024)), // 256 KiB of emoji
         format!("ccos.{}", "\u{4e2d}".repeat(64 * 1024)),    // CJK
@@ -1149,21 +1391,36 @@ fn a_one_megabyte_name_is_linear_and_never_panics() {
         "\u{200d}".repeat(200_000),
         "\u{0}".repeat(MIB),
     ] {
-        let _ = classify(&req(&name));
+        assert_eq!(
+            verdict(&name),
+            Verdict::NonCanonical,
+            "an oversized hostile name must be refused, not classified"
+        );
     }
-    assert!(forwards(&large), "a 1 MiB tool name traverses the boundary");
+    assert!(
+        !forwards(&large),
+        "a 1 MiB tool name no longer traverses the boundary"
+    );
 }
 
-/// EXHAUSTION VECTOR (high): every rejected request stores the attacker's
-/// entire tool name **twice** — once in `AuditRecord::tool`, once inside the
-/// `Refusal::OutsideBoundary` message that `classify` builds with
-/// `format!("tool '{}' is not in the Enterprise catalogue", req.tool)`
-/// (`crates/ccos-enterprise-gateway/src/lib.rs:109`). The audit `Vec` has no
-/// cap and nothing truncates the name, so an unauthenticated-adjacent caller
-/// converts N bytes of request into >2N bytes of permanently retained heap,
-/// with no counter or quota reacting.
+/// REPAIRED (was high, exhaustion): every rejected request used to store the
+/// attacker's entire tool name **twice** — once in `AuditRecord::tool`, once
+/// inside the `Refusal::OutsideBoundary` message `classify` built with
+/// `format!("tool '{}' is not in the Enterprise catalogue", req.tool)`. N
+/// bytes of request became >2N bytes of permanently retained heap.
+///
+/// The second copy is gone: names over 256 bytes are refused before any
+/// message is formatted, and the two messages that do name a tool truncate it
+/// to 64 chars via `sanitize()`. Amplification is now ~1.0x.
+///
+/// STILL OPEN (medium): the audit `Vec` has no cap and `AuditRecord::tool`
+/// still holds the caller's untruncated name, so a flood still converts N
+/// bytes of request into ~N bytes of permanently retained heap, linear in
+/// request count, with no counter or quota reacting. Both halves are pinned
+/// below — the closed one so it stays closed, the open one so it is not
+/// mistaken for fixed.
 #[test]
-fn refused_requests_retain_more_attacker_bytes_than_they_carry() {
+fn a_refused_request_no_longer_retains_more_attacker_bytes_than_it_carries() {
     const MIB: usize = 1 << 20;
     let mut d = two_tenant_deployment();
     let bob = actor("memorithm", "bob", AuthStrength::Token);
@@ -1181,16 +1438,22 @@ fn refused_requests_retain_more_attacker_bytes_than_they_carry() {
     let Some(Refusal::OutsideBoundary(message)) = outcome.refusal() else {
         panic!("expected a boundary-labelled refusal, got {outcome:?}");
     };
+    // REPAIRED: the message is a constant, not a copy of the 1 MiB name.
+    assert_eq!(
+        message, "tool name is empty or not canonical",
+        "the refusal message must not embed the attacker's name"
+    );
     assert!(
-        message.len() > MIB,
-        "the refusal message embeds the whole 1 MiB name ({} bytes)",
+        message.len() < 256,
+        "refusal messages are bounded ({} bytes)",
         message.len()
     );
     let record = &d.audit()[0];
+    // STILL OPEN: the journal keeps the one untruncated copy.
     assert_eq!(
         record.tool.len(),
         MIB,
-        "and the journal keeps a second copy"
+        "the journal still stores the untruncated name"
     );
     let retained = record.tool.len()
         + match &record.outcome {
@@ -1198,13 +1461,18 @@ fn refused_requests_retain_more_attacker_bytes_than_they_carry() {
             other => panic!("{other:?}"),
         };
     assert!(
-        retained > 2 * MIB,
-        "amplification factor {:.2}x per refused request",
+        retained < MIB + 256,
+        "amplification factor {:.3}x per refused request — must stay ~1.0x",
         retained as f64 / MIB as f64
     );
+    assert!(
+        retained >= MIB,
+        "STILL OPEN: one full copy of the name is retained ({retained} bytes)"
+    );
 
-    // Growth is unbounded and linear in request count: nothing folds, caps or
-    // truncates. 24 x 128 KiB keeps the test cheap while proving the shape.
+    // Growth is still linear in request count: nothing folds or caps the
+    // journal, only the second copy is gone. 24 x 128 KiB keeps the test
+    // cheap while proving the shape.
     let mut d = two_tenant_deployment();
     let chunk = "q".repeat(128 * 1024);
     for i in 0..24 {
@@ -1228,10 +1496,15 @@ fn refused_requests_retain_more_attacker_bytes_than_they_carry() {
                 }
         })
         .sum();
-    assert_eq!(d.audit().len(), 24, "no journal cap");
+    assert_eq!(d.audit().len(), 24, "STILL OPEN: no journal cap");
     assert!(
-        total > 24 * 2 * 128 * 1024,
-        "24 refused 128 KiB requests retained {total} bytes — >2x amplification, \
+        total < 24 * (128 * 1024 + 256),
+        "24 refused 128 KiB requests retained {total} bytes — the >2x \
+         amplification through the refusal message is back"
+    );
+    assert!(
+        total >= 24 * 128 * 1024,
+        "STILL OPEN: {total} bytes retained, one full copy per request, \
          unbounded in request count"
     );
     // And none of it was billed, so the budget gate never notices.
@@ -1246,8 +1519,9 @@ fn refused_requests_retain_more_attacker_bytes_than_they_carry() {
 
 /// What HELD: the tool name never leaks into a metric series name, so the
 /// 120k-name corpus cannot blow past `CounterRegistry::MAX_SERIES`. This is
-/// the exhaustion vector that was *closed*, and it is worth a regression pin
-/// because `Deployment::admit` builds a series name with `format!`.
+/// the exhaustion vector that was *always* closed, and it is worth a
+/// regression pin because `Deployment::admit` builds a series name with
+/// `format!`.
 #[test]
 fn hostile_tool_names_cannot_explode_metric_cardinality() {
     let mut d = two_tenant_deployment();
@@ -1280,6 +1554,10 @@ fn hostile_tool_names_cannot_explode_metric_cardinality() {
 
 /// One million generated names plus an 8 MiB name.
 ///
+/// This used to assert `violations > 0` — "the bypass reproduces at 1M
+/// scale". It now asserts the opposite at the same scale, and the 8 MiB names
+/// are refused by length instead of forwarded.
+///
 /// Run with:
 /// `cargo test -p ccos-enterprise-conformance --test stress_gateway_fuzz \
 ///  --release -- --ignored --nocapture`
@@ -1287,30 +1565,41 @@ fn hostile_tool_names_cannot_explode_metric_cardinality() {
 #[ignore = "1M names + 8 MiB inputs; see the doc comment for the command"]
 fn heavy_million_name_sweep() {
     let mut rng = SplitMix64(SEED ^ 0xdead_beef);
-    let mut violations = 0usize;
+    let mut violations: Vec<String> = Vec::new();
+    let mut attempts = 0usize;
     for _ in 0..1_000_000 {
         let name = generate(&mut rng);
+        if normalizes_to_forbidden(&name).is_some() && !is_forbidden_capability(&name) {
+            attempts += 1;
+        }
         if classify(&req(&name)) == Disposition::Forward && normalizes_to_forbidden(&name).is_some()
         {
-            violations += 1;
-            assert!(
-                starts_with_exposed_prefix(&name),
-                "new root cause: {name:?}"
-            );
+            violations.push(name);
         }
     }
-    assert!(violations > 0, "the bypass reproduces at 1M scale");
+    assert!(attempts > 0, "the fuzzer must still generate the attack");
+    assert!(
+        violations.is_empty(),
+        "the bypass reproduced at 1M scale: {:?}",
+        violations.iter().take(16).collect::<Vec<_>>()
+    );
 
     for bytes in [1 << 21, 1 << 22, 1 << 23] {
         let name = format!("memory.{}", "a".repeat(bytes - 7));
         let t0 = Instant::now();
-        assert!(forwards(&name));
+        assert_eq!(
+            verdict(&name),
+            Verdict::NonCanonical,
+            "{bytes} bytes must be refused by length"
+        );
         println!("{bytes} bytes → {:?}", t0.elapsed());
     }
 }
 
-/// Sanity: the exposed catalogue still works. A boundary that refused
-/// everything would make every assertion above vacuous.
+/// Sanity, and the outage guard for the repair: the exposed catalogue still
+/// works. A boundary that refused everything would make every assertion above
+/// vacuous, and the canonical-name rule plus segment-wise forbidden matching
+/// are exactly the kind of change that could over-refuse.
 #[test]
 fn the_exposed_catalogue_is_not_collaterally_broken() {
     for tool in ALLOWED_TOOLS {
@@ -1318,6 +1607,29 @@ fn the_exposed_catalogue_is_not_collaterally_broken() {
     }
     for prefix in ALLOWED_PREFIXES {
         assert!(forwards(&format!("{prefix}recall")), "{prefix}recall");
+    }
+    // Real, multi-segment catalogue spellings — the shapes an installed
+    // deployment actually sends, including the `ccos.` compatibility alias
+    // and mixed case, which the canonical-name rule must keep accepting.
+    for tool in [
+        "memory.recall",
+        "memory.ingest",
+        "memory.search",
+        "context.get",
+        "context.window.read",
+        "policy.set",
+        "policy.budget.read",
+        "audit.query",
+        "audit.record.export",
+        "ccos.recall",
+        "ccos.qpage.read",
+        "ccos.memory.recall",
+        "system.health",
+        "memory.recall_v2",
+        "memory.recall2",
+        "MEMORY.Recall",
+    ] {
+        assert!(forwards(tool), "{tool:?}: {}", why(tool));
     }
     for entry in FORBIDDEN_PREFIXES {
         assert!(!forwards(&format!("{entry}anything")), "{entry}");

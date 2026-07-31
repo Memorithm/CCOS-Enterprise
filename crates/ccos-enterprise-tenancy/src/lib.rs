@@ -11,6 +11,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TenantId(pub String);
 
+/// Look a tenant up by name without owning one.
+///
+/// This exists for a measured reason. A `BTreeMap` keyed by `TenantId` can only
+/// be probed with a `TenantId`, so every lookup used to build one — allocating
+/// and copying the caller's string before discovering the key was absent. On a
+/// store keyed by `(TenantId, String)` that cost the caller's whole key on a
+/// pure miss: 4 MiB allocated to answer "no". With `Borrow<str>` the map takes
+/// a `&str` and a miss costs nothing.
+impl std::borrow::Borrow<str> for TenantId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A tenant-scoped key: every store lookup in Enterprise carries the tenant
 /// explicitly so a missing scope is a compile-time absence, not a runtime bug.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -39,6 +39,19 @@ impl TokenBudget {
         self.spent = self.spent.saturating_add(tokens);
         PolicyDecision::Allow
     }
+
+    /// Give back tokens charged for an effect that did not happen.
+    ///
+    /// Saturating, so a refund can never take the ledger below zero and hand a
+    /// tenant capacity nobody granted — the one direction a quota must not
+    /// fail. This is deliberately not a general "credit" operation: it exists
+    /// for the caller that charged, discovered its effect was refused
+    /// downstream, and must leave the meter as if the call had never been
+    /// admitted. Refunding more than was charged is therefore a caller bug,
+    /// and clamping at zero is the safe reading of it.
+    pub fn refund(&mut self, tokens: u64) {
+        self.spent = self.spent.saturating_sub(tokens);
+    }
 }
 
 /// Model governance: an explicit allowlist — anything not listed is denied.

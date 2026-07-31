@@ -456,6 +456,7 @@ enum Kind {
     VariantNotActivated,
     BudgetExhausted,
     JustificationRequired,
+    StorageExhausted,
 }
 
 /// Every refusal the composed path can produce. Kept exhaustive on purpose: a
@@ -477,6 +478,17 @@ const ALL_KINDS: &[Kind] = &[
     Kind::JustificationRequired,
 ];
 
+/// The one refusal `admit` cannot produce, so it is deliberately absent from
+/// `ALL_KINDS` above.
+///
+/// [`Refusal::StorageExhausted`] comes from the governed **cell** path
+/// (`put_cell`), which runs `admit` first and then its own effect; the storm
+/// drives `admit` directly, so demanding it here would be demanding a refusal
+/// this harness structurally cannot reach. It is classified in `kind_of` all
+/// the same, so a future storm that does drive `put_cell` gets it for free —
+/// and `stress_tenancy_fuzz` covers it, under concurrency included.
+const NOT_REACHABLE_THROUGH_ADMIT: &[Kind] = &[Kind::StorageExhausted];
+
 fn kind_of(o: &Outcome) -> Kind {
     match o {
         Outcome::Forwarded => Kind::Forwarded,
@@ -492,6 +504,7 @@ fn kind_of(o: &Outcome) -> Kind {
         Outcome::Refused(Refusal::VariantNotActivated) => Kind::VariantNotActivated,
         Outcome::Refused(Refusal::BudgetExhausted) => Kind::BudgetExhausted,
         Outcome::Refused(Refusal::JustificationRequired) => Kind::JustificationRequired,
+        Outcome::Refused(Refusal::StorageExhausted) => Kind::StorageExhausted,
     }
 }
 
@@ -811,7 +824,16 @@ fn run_thread(deployment: &Mutex<Deployment>, ops: &[Op], start: &Barrier) -> Th
                     }
                 }
             }
-            Op::Put { tenant, key, value } => guard(deployment).put(&scope(tenant, key), value),
+            Op::Put { tenant, key, value } => {
+                // `put` now reports whether the cell landed. Every tenant in
+                // the storm exists and every key is short, so a refusal here
+                // is a real defect rather than a bound being hit.
+                if !guard(deployment).put(&scope(tenant, key), value) {
+                    report
+                        .problems
+                        .push(format!("{tenant}/{key} was refused by the store"));
+                }
+            }
             Op::Get { tenant, key } => {
                 let d = guard(deployment);
                 if let Some(v) = d.get(&scope(tenant, key)) {
@@ -1168,6 +1190,13 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
         assert!(
             seen_kinds.contains(kind),
             "the storm never produced {kind:?}"
+        );
+    }
+    for kind in NOT_REACHABLE_THROUGH_ADMIT {
+        assert!(
+            !seen_kinds.contains(kind),
+            "{kind:?} is documented as unreachable through `admit` and the \
+             storm just produced it — the classification above is stale"
         );
     }
     // REGRESSION GUARD: the three hostile probes. Every thread issued

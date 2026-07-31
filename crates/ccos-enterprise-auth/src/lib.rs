@@ -81,6 +81,7 @@
 //!   different change from this one.
 //! * **Certificate chain verification**, deliberately: see [`mtls`].
 
+#[cfg(feature = "token-auth")]
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -198,6 +199,7 @@ impl AuthenticatedActor {
     /// finished proving something, and is naming what it proved — which is why
     /// `strength` is a parameter here and never a field of anything a client
     /// sends.
+    #[cfg(any(feature = "token-auth", feature = "mtls-auth", feature = "oidc-auth"))]
     pub(crate) fn proved(org: OrgId, actor: ActorId, strength: AuthStrength) -> Self {
         Self {
             org,
@@ -602,12 +604,8 @@ impl Authenticator for TokenAuthenticator {
             guard.witness(&claims.jti, claims.expires_at, now)?;
         }
 
-        Ok(AuthenticatedActor {
-            org,
-            actor,
-            // The verifier's, never the payload's.
-            strength: self.attests,
-        })
+        // The strength is the verifier's, never the payload's.
+        Ok(AuthenticatedActor::proved(org, actor, self.attests))
     }
 }
 

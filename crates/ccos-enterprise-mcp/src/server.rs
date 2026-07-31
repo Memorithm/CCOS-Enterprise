@@ -108,6 +108,13 @@ impl<B: Backend> GovernedMcp<B> {
         &self.backend
     }
 
+    /// The backend, mutably — for lifecycle calls a deployment owns, such as
+    /// checkpointing sessions on a clean shutdown. Not a governance surface:
+    /// nothing reached through here goes past `admit`.
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+
     /// The `tools/list` answer: Enterprise names only.
     ///
     /// Note what is absent — Core's bare names, and the one excluded tool. A

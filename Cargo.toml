@@ -1,6 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
+    # ── CCOS Core ────────────────────────────────────────────────────────
+    # CCOS Enterprise now carries the Core kernel it is built on, brought in
+    # with its full history (`git subtree`), not copied. One authoritative Core
+    # in one workspace: `cargo test` covers Core and Enterprise in a single
+    # command, and a change that spans the boundary is one commit rather than
+    # two repositories and a version bump.
+    "core",
+    "core/crates/ccos-memory-runtime",
+
+    # ── CCOS Enterprise ──────────────────────────────────────────────────
     "crates/ccos-enterprise-auth",
     "crates/ccos-enterprise-rbac",
     "crates/ccos-enterprise-tenancy",
@@ -26,9 +36,12 @@ license = "LicenseRef-TarekZekriti-Dual"
 repository = "https://github.com/Memorithm/CCOS-Enterprise"
 
 [workspace.dependencies]
-# TEMPORARY during local development (charter §29): replaced by an exact
-# git rev dependency before any release. Never `branch = "main"`.
-ccos-core = { path = "../CCOS-Core", default-features = false }
+# One workspace, one Core. This was a `path = "../CCOS-Core"` sibling
+# dependency marked TEMPORARY, resolved in CI by checking out a second
+# repository and symlinking it into place. It is now an ordinary path to a
+# member of this workspace: no sibling checkout, no symlink, no second
+# lockfile, and a Core change plus its Enterprise consequence are one commit.
+ccos-core = { path = "core", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

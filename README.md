@@ -5,10 +5,22 @@
 
 CCOS Enterprise adds the organizational layer around the stable cognitive
 kernel — authentication, RBAC, multi-tenancy with memory isolation, quotas and
-budgets, model governance, encryption, backup/restore, observability, and
-vendor licensing — **without ever duplicating Core**: it depends on an exact
-`ccos-core` revision (currently a development path dependency, pinned to a
-git `rev` before any release; never `branch = "main"`).
+budgets, model governance, backup/restore, observability, and vendor licensing
+— **without ever duplicating Core**.
+
+Core lives here too, under `core/`, as one member of one workspace. That is
+co-location, not duplication: there is exactly **one** `ccos-core` in the
+tree, and CI asserts the count rather than grepping for copied function names.
+Before this, Enterprise reached Core through a `../CCOS-Core` sibling
+dependency the manifest itself marked temporary, which CI had to satisfy by
+checking out a second repository and symlinking it into place — two histories,
+two lockfiles, and no way to land a change that spanned the boundary in one
+commit. One workspace means `cargo test` covers both, and a Core change and
+its Enterprise consequence are reviewed together or not at all.
+
+The product boundary below is unchanged, and is now enforced on the
+**dependency graph** rather than by repository separation — a stronger check,
+since a crate cannot satisfy it merely by living somewhere else.
 
 ## Product boundary
 

@@ -201,12 +201,10 @@ required-features = ["octasoma"]
 # pulls no `scirust`, so making CCOS a workspace adds no external dependency and
 # leaves the default `ccos` build behaviorally unchanged — SLHAv2 enters only
 # through the opt-in `slhav2` feature above.
-[workspace]
-members = ["crates/ccos-memory-runtime"]
-
-[workspace.package]
-rust-version = "1.89"
-license = "LicenseRef-TarekZekriti-Dual"
+# Core is a *member* of the CCOS Enterprise workspace rooted one level up, not
+# a workspace of its own: two nested workspaces cannot see each other, which is
+# precisely the split that bringing Core in was meant to remove. `crates/ccos-memory-runtime`
+# is listed in the root manifest's members alongside it.
 
 # Model-provider integration tests (§36): compiled only with `llm`, every
 # test #[ignore]d — they run only on explicit request (see the file header).

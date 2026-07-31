@@ -16,13 +16,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Sibling CCOS-Core checkout (dev path dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: Memorithm/CCOS-Core
-          path: .ccos-core-sibling
-      - name: Link the sibling where ../CCOS-Core resolves
-        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@stable
       - name: gateway namespace contract (Hermes/OpenClaw surface)
         run: cargo test -p ccos-enterprise-gateway --release
@@ -49,29 +42,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Core is an exact dependency (never a copy, never a branch)
+      - name: Exactly one Core in the tree (never a copy)
         run: |
-          # Only non-comment occurrences count: the manifest legitimately
-          # *documents* the "never `branch = …`" rule in a comment, and a
-          # naive grep would trip on its own guardrail.
-          ! grep -rnE '^[^#]*branch\s*=' Cargo.toml crates/*/Cargo.toml tools/*/Cargo.toml
-          grep -rn 'ccos-core' Cargo.toml | head -3
-      - name: no duplicated Core sources
+          # The rule is "Enterprise never carries a *second* copy of Core"
+          # (README). Before Core moved in it was two repositories kept in
+          # step by a grep; now it is one workspace member, so the check is
+          # that nothing has re-introduced a second one. A structural fact
+          # beats a grep for a function name.
+          test "$(cargo metadata --no-deps --format-version 1 \
+                  | python3 -c 'import json,sys; print(sum(1 for p in json.load(sys.stdin)["packages"] if p["name"]=="ccos-core"))')" = 1
+          # …and Enterprise still reaches it as a dependency, not by copying
+          # sources into its own crates.
+          ! find crates tools -name '*.rs' | xargs grep -l 'pub fn qbelief' | grep -v target
+          echo "one Core, referenced not duplicated"
+      - name: "Enterprise boundary (§4.2): no Research-Lab in the product graph"
         run: |
-          ! find crates -name '*.rs' | xargs grep -l 'pub fn qbelief' | grep -v target
-          echo "no Core code duplication"
+          # The boundary used to be enforced by repository separation. Living
+          # in the same tree is not depending, so the boundary becomes a
+          # property of the dependency *graph* — which is stronger, because it
+          # cannot be satisfied by a crate that merely lives elsewhere.
+          for p in $(cargo metadata --no-deps --format-version 1 \
+                     | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"] if p["name"].startswith("ccos-enterprise")]'); do
+            cargo tree -p "$p" --edges normal --prefix none 2>/dev/null \
+              | grep -qiE 'research-lab|ccos-forge|ccos-rsi' \
+              && { echo "BOUNDARY VIOLATION: $p reaches a forbidden crate"; exit 1; }
+          done
+          echo "no Enterprise crate reaches Research-Lab, Forge or RSI"
 
   msrv:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Sibling CCOS-Core checkout (dev path dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: Memorithm/CCOS-Core
-          path: .ccos-core-sibling
-      - name: Link the sibling where ../CCOS-Core resolves
-        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@1.89.0
       - run: cargo check --workspace --all-features
 

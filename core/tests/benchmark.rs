@@ -23,7 +23,26 @@ fn stress_100k_cycles_stays_bounded() {
         "node drift {} indicates a leak",
         report.node_drift
     );
-    assert!(report.cycles_per_second > 1_000.0, "unexpectedly slow");
+    // A throughput floor measures the code in release and the *absence of the
+    // optimiser* in debug: the same run is 14 s optimised and 107 s not, so one
+    // number cannot serve both. Surfaced when Core moved into CCOS Enterprise —
+    // Core's suite now runs under Enterprise's CI, which tests debug as well as
+    // release, and this assertion had only ever met a release build.
+    //
+    // The floor is kept in both profiles because its job is to catch a
+    // catastrophic regression (an accidental O(n^2), a lock held across the
+    // loop), and that shows up at any optimisation level. Only the number
+    // changes with what the profile can honestly promise.
+    let floor = if cfg!(debug_assertions) {
+        100.0
+    } else {
+        1_000.0
+    };
+    assert!(
+        report.cycles_per_second > floor,
+        "unexpectedly slow: {:.0} cycles/s, floor {floor:.0}",
+        report.cycles_per_second
+    );
 }
 
 #[test]

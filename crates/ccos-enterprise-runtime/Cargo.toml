@@ -1,0 +1,18 @@
+[package]
+name = "ccos-enterprise-runtime"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The composed Enterprise admission path: identity, tenancy, authorization, policy, Q-Page activation and the namespace boundary, wired into the single decision docs/ENTERPRISE_SECURITY_MODEL.md describes."
+
+[dependencies]
+ccos-enterprise-auth = { path = "../ccos-enterprise-auth" }
+ccos-enterprise-rbac = { path = "../ccos-enterprise-rbac" }
+ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
+ccos-enterprise-policy = { path = "../ccos-enterprise-policy" }
+ccos-enterprise-gateway = { path = "../ccos-enterprise-gateway" }
+ccos-enterprise-observability = { path = "../ccos-enterprise-observability" }
+ccos-enterprise-qpages = { path = "../ccos-enterprise-qpages" }
+serde.workspace = true

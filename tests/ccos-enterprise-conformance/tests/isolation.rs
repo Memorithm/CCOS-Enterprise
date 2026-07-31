@@ -122,8 +122,8 @@ fn exhausting_one_tenants_budget_leaves_the_other_untouched() {
         }),
         Outcome::Forwarded
     );
-    assert_eq!(d.spent("acme"), 1_000);
-    assert_eq!(d.spent("globex"), 400);
+    assert_eq!(d.spent("acme"), Some(1_000));
+    assert_eq!(d.spent("globex"), Some(400));
 }
 
 /// Model governance is per tenant: the model acme allows is not the model
@@ -175,7 +175,7 @@ fn concurrent_tenants_do_not_contaminate_each_other() {
     for i in 0..TENANTS {
         let mut t = TenantState::new(CALLS * COST);
         t.allow_model("claude-opus");
-        d.add_tenant(&format!("tenant-{i}"), t);
+        d.add_tenant("memorithm", &format!("tenant-{i}"), t);
         d.assign(&format!("agent-{i}"), "writer");
     }
     let deployment = Arc::new(Mutex::new(d));
@@ -213,7 +213,7 @@ fn concurrent_tenants_do_not_contaminate_each_other() {
         let tenant = format!("tenant-{i}");
         assert_eq!(
             d.spent(&tenant),
-            CALLS * COST,
+            Some(CALLS * COST),
             "{tenant} was billed exactly its own calls"
         );
         let trail = d.audit_of(&tenant);
@@ -228,7 +228,7 @@ fn concurrent_tenants_do_not_contaminate_each_other() {
         );
     }
     assert_eq!(
-        d.audit().len() as u64,
+        d.audit().count() as u64,
         TENANTS as u64 * CALLS,
         "no record lost"
     );

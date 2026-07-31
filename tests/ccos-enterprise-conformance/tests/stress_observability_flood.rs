@@ -1159,9 +1159,9 @@ fn a_flooded_registry_permanently_blocks_every_later_legitimate_series() {
 ///
 /// `Deployment::admit` never lets caller-controlled text into a metric name:
 /// refusals go through `tag()`, which returns a `&'static str` from a closed
-/// set of eight. 3 000 hostile calls — 1 MiB tool names, unicode tenants,
+/// set of eleven. 3 000 hostile calls — 1 MiB tool names, unicode tenants,
 /// attacker-chosen actors and request ids, every refusal class — produce
-/// exactly 11 series, never `overflow`, and `requests == forwarded + refused`
+/// exactly 14 series, never `overflow`, and `requests == forwarded + refused`
 /// holds throughout.
 ///
 /// It is the *only* thing standing between the registry and the flood proven
@@ -1183,9 +1183,18 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
         // silently starved three of the eight arms on the first run of this
         // test. Mixing errors in a fuzz harness are indistinguishable from
         // coverage, so the arm coverage is asserted at the end.
-        let pick = (lcg(&mut seed) >> 40) % 8;
-        let (tenant, who, tool, strength, model, variant) = match pick {
+        let pick = (lcg(&mut seed) >> 40) % 11;
+        // Each arm targets ONE gate. The credential now BINDS the request, so
+        // an arm that wants to reach a deep gate must present a consistent
+        // pair: this file used to build every credential with a hostile org
+        // (`"org\u{202e}"`), which after the repair is refused at the binding
+        // gate, so eight of the eleven tags stopped being exercised at all.
+        // The hostile text now lives where it is the thing under test — arms
+        // 7, 8 and 9 — and in the request ids and 1 MiB tool names below.
+        let (org, cred_actor, tenant, req_actor, tool, strength, model, variant) = match pick {
             0 => (
+                "memorithm",
+                "alice",
                 "acme",
                 "alice",
                 "memory.recall",
@@ -1194,6 +1203,8 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
                 None,
             ),
             1 => (
+                "memorithm",
+                "alice",
                 "does-not-exist\u{1f4a3}",
                 "alice",
                 "memory.recall",
@@ -1202,6 +1213,8 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
                 None,
             ),
             2 => (
+                "memorithm",
+                "alice",
                 "acme",
                 "alice",
                 "shell.exec",
@@ -1209,16 +1222,16 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
                 "claude-opus",
                 None,
             ),
-            // Reaches `tool_not_governed`, which now requires a CANONICAL
-            // name: this case used to spell it "context.<emoji><RTL>not-
-            // governed", but the gateway's canonical-name rule refuses that
-            // shape outright, so the hostile spelling was being counted as a
-            // boundary refusal and this tag stopped being exercised at all.
-            // A tool has to clear the boundary before "nobody governed it"
-            // can be the answer. Hostile text still reaches the metric path
-            // through the actor, the tenant, the request id and the 1 MiB
-            // names below — that is what this test is measuring.
+            // Reaches `tool_not_governed`, which requires a CANONICAL name:
+            // this case used to spell it "context.<emoji><RTL>not-governed",
+            // but the gateway's canonical-name rule refuses that shape
+            // outright, so the hostile spelling was counted as a boundary
+            // refusal and this tag stopped being exercised. A tool has to
+            // clear the boundary before "nobody governed it" can be the
+            // answer.
             3 => (
+                "memorithm",
+                "alice",
                 "acme",
                 "alice",
                 "context.not_governed",
@@ -1227,6 +1240,8 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
                 None,
             ),
             4 => (
+                "memorithm",
+                "bob",
                 "acme",
                 "bob",
                 "memory.ingest",
@@ -1235,6 +1250,8 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
                 None,
             ),
             5 => (
+                "memorithm",
+                "alice",
                 "acme",
                 "alice",
                 "memory.recall",
@@ -1243,6 +1260,8 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
                 None,
             ),
             6 => (
+                "memorithm",
+                "alice",
                 "acme",
                 "alice",
                 "memory.recall",
@@ -1250,7 +1269,42 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
                 "claude-opus",
                 Some(AdvancedQPageVariant::CausalChain),
             ),
+            // The three gates the credential binding added. Hostile text is
+            // deliberate here: a rejected org must not reach a metric label
+            // any more than a rejected tool name does.
+            7 => (
+                "memorithm",
+                "alice",
+                "acme",
+                "mallory",
+                "memory.recall",
+                AuthStrength::Token,
+                "claude-opus",
+                None,
+            ),
+            8 => (
+                "initech\u{202e}\u{1f600}",
+                "alice",
+                "acme",
+                "alice",
+                "memory.recall",
+                AuthStrength::Token,
+                "claude-opus",
+                None,
+            ),
+            9 => (
+                "memorithm",
+                "alice",
+                "acme",
+                "",
+                "memory.recall",
+                AuthStrength::Token,
+                "claude-opus",
+                None,
+            ),
             _ => (
+                "memorithm",
+                "alice",
                 "acme",
                 "alice",
                 "memory.recall",
@@ -1259,8 +1313,8 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
                 None,
             ),
         };
-        let a = actor("org\u{202e}", who, strength);
-        let req = request(tenant, who, tool, &format!("rid-{i:09}-\u{1f600}"));
+        let a = actor(org, cred_actor, strength);
+        let req = request(tenant, req_actor, tool, &format!("rid-{i:09}-\u{1f600}"));
         let _ = d.admit(Call {
             actor: &a,
             request: &req,
@@ -1276,7 +1330,7 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
     // the point here is only that a megabyte of caller text cannot become a
     // metric label. Both a boundary-violating and a catalogue-missing giant
     // are exercised, since they take different `format!` paths in `classify`.
-    let a = actor("org", "alice", AuthStrength::Strong);
+    let a = actor("memorithm", "alice", AuthStrength::Strong);
     for (i, prefix) in ["memory.", "shell.", "wat."].iter().enumerate() {
         let huge_tool = format!("{prefix}{}", "T".repeat(MIB));
         for k in 0..HUGE_CALLS_EACH {
@@ -1295,7 +1349,7 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
     let names: Vec<&str> = m.iter().map(|(n, _)| n.as_str()).collect();
 
     assert!(
-        names.len() <= 11,
+        names.len() <= 14,
         "the composed path must stay at fixed cardinality; got {names:?}"
     );
     assert!(
@@ -1335,10 +1389,10 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
         val("gateway.refused"),
         "refusal reasons partition the refusals"
     );
-    assert_eq!(d.audit().len(), calls as usize);
+    assert_eq!(d.audit().count(), calls as usize);
 
-    // All eight refusal tags plus requests/forwarded/refused: the closed set
-    // is fully exercised, so `names.len() == 11` is this design's *saturated*
+    // All eleven refusal tags plus requests/forwarded/refused: the closed set
+    // is fully exercised, so `names.len() == 14` is this design's *saturated*
     // cardinality and not an artefact of thin coverage.
     let tags: Vec<&str> = names
         .iter()
@@ -1347,10 +1401,13 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
     assert_eq!(
         tags,
         [
+            "actor_mismatch",
             "budget_exhausted",
+            "malformed_request",
             "model_not_allowed",
             "outside_boundary",
             "permission_denied",
+            "tenant_not_owned",
             "tool_not_governed",
             "unauthenticated",
             "unknown_tenant",
@@ -1360,8 +1417,8 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
     );
     assert_eq!(
         names.len(),
-        11,
-        "the composed path's metric cardinality is exactly 11, saturated"
+        14,
+        "the composed path's metric cardinality is exactly 14, saturated"
     );
     eprintln!(
         "[composed] {calls} hostile calls => {} series: {names:?}",

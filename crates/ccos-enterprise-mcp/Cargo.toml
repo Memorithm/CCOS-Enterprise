@@ -1,0 +1,19 @@
+[package]
+name = "ccos-enterprise-mcp"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The governed MCP front door: Core's bare tool catalogue, translated into Enterprise capability classes and served only through the composed admission path."
+
+[dependencies]
+ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }
+ccos-enterprise-gateway = { path = "../ccos-enterprise-gateway" }
+ccos-enterprise-auth = { path = "../ccos-enterprise-auth" }
+ccos-enterprise-qpages = { path = "../ccos-enterprise-qpages" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+ccos-core.workspace = true

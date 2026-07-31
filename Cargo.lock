@@ -98,6 +98,7 @@ dependencies = [
  "ccos-enterprise-policy",
  "ccos-enterprise-qpages",
  "ccos-enterprise-rbac",
+ "ccos-enterprise-runtime",
  "ccos-enterprise-tenancy",
  "ccos-license-server",
  "ed25519-dalek",
@@ -121,6 +122,19 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "ccos-enterprise-mcp"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-core",
+ "ccos-enterprise-auth",
+ "ccos-enterprise-gateway",
+ "ccos-enterprise-qpages",
+ "ccos-enterprise-runtime",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -151,6 +165,31 @@ dependencies = [
 name = "ccos-enterprise-rbac"
 version = "0.1.0-pre"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ccos-enterprise-runtime"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-auth",
+ "ccos-enterprise-gateway",
+ "ccos-enterprise-observability",
+ "ccos-enterprise-policy",
+ "ccos-enterprise-qpages",
+ "ccos-enterprise-rbac",
+ "ccos-enterprise-tenancy",
+ "serde",
+]
+
+[[package]]
+name = "ccos-enterprise-store"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-core",
+ "ccos-enterprise-auth",
+ "ccos-enterprise-runtime",
  "serde",
  "serde_json",
 ]

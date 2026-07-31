@@ -8,12 +8,35 @@
 //! > `system.health` class. Forbidden: `rsi.*`, `forge.*`, `patch.*`,
 //! > `shell.*`, `code.execute`, `repository.modify`, `self.*`.
 //!
-//! Before this suite existed, five of those seven forbidden entries were
-//! forwarded by the gateway — including `shell.exec` and `code.execute`,
-//! which charter §4.2 forbids the Enterprise profile from carrying at all.
+//! ## What was repaired
+//!
+//! - **The catalogue leaked.** Before this suite existed, five of those seven
+//!   forbidden entries were forwarded by the gateway — including `shell.exec`
+//!   and `code.execute`, which charter §4.2 forbids the Enterprise profile
+//!   from carrying at all. Each documented entry is pinned below, one
+//!   assertion apiece, so a regression names itself.
+//! - **The composed path was not shipped.** "No privilege reaches past the
+//!   boundary" is a property of the *composition*, and the composition lived
+//!   in this `publish = false` harness, so the property held for the harness
+//!   and for nothing a customer runs. It now lives in
+//!   `ccos-enterprise-runtime` and the harness only re-exports it: the last
+//!   two tests here compile against shipped code.
+//! - **The composed path authorized a caller-supplied identity.** It proved
+//!   one actor and authorized whichever actor the *request* named. A request
+//!   must now name the actor its credential proves, and a tenant that actor's
+//!   organization owns — and that gate runs *before* the boundary check, so a
+//!   privileged-caller test only proves anything if its credential is
+//!   genuinely consistent. See [`no_privilege_reaches_past_the_boundary`].
+//! - **`spent` could not tell an unbilled tenant from a nonexistent one.** It
+//!   answered a bare `0` either way, so "none of it was billed" also passed
+//!   for a tenant nobody had provisioned. It returns `Option<u64>` now.
+//!
+//! Still open: the audit journal these decisions land in is an in-memory
+//! bounded buffer, not durable storage — a boundary violation is only
+//! forensically available until the buffer wraps.
 
 use ccos_enterprise_auth::AuthStrength;
-use ccos_enterprise_conformance::{actor, request, two_tenant_deployment, Call, Refusal};
+use ccos_enterprise_conformance::{actor, request, two_tenant_deployment, Call, Outcome, Refusal};
 use ccos_enterprise_gateway::{classify, Disposition, GatewayRequest};
 
 fn req(tool: &str) -> GatewayRequest {
@@ -160,6 +183,20 @@ fn unlisted_tools_are_refused_as_omissions_not_violations() {
 /// The boundary is not a permission. No role, no strength, no allowlist and
 /// no budget lets a caller through it — this is the property that makes it a
 /// *product* boundary rather than an access-control default.
+///
+/// Two repairs are guarded here too. The composed path used to authorize
+/// whatever actor the *request* named rather than the one its credential
+/// proved, so "a maximally-privileged caller" was a claim any request could
+/// simply assert; the credential now binds the request, and that gate is
+/// evaluated *before* the boundary. That makes a consistent credential
+/// load-bearing for this test rather than incidental: root really is
+/// authenticated as root, in org `memorithm`, against `acme`, which
+/// `memorithm` owns. Weaken any one of those and every call below would be
+/// refused at an earlier gate and this test would quietly stop exercising the
+/// boundary at all — which is what the control call at the end proves it
+/// still does. And `spent` used to answer a bare `0` for a tenant that did
+/// not exist, so "none of it was billed" also passed for a misspelt tenant;
+/// `Some(0)` says the tenant is real *and* was charged nothing.
 #[test]
 fn no_privilege_reaches_past_the_boundary() {
     let mut d = two_tenant_deployment();
@@ -169,7 +206,7 @@ fn no_privilege_reaches_past_the_boundary() {
         "superuser",
         &["memory.read", "memory.write", "policy.admin", "root"],
     );
-    d.assign("root", "superuser");
+    assert!(d.assign("root", "superuser"), "the grant really was made");
     for tool in [
         "rsi.status",
         "forge.run",
@@ -181,14 +218,19 @@ fn no_privilege_reaches_past_the_boundary() {
     }
     let root = actor("memorithm", "root", AuthStrength::Strong);
 
-    for tool in [
+    for (i, tool) in [
         "rsi.status",
         "forge.run",
         "shell.exec",
         "code.execute",
         "self.rewrite",
-    ] {
-        let request = request("acme", "root", tool, "r-root");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Distinct ids: a decided `request_id` is now suppressed as a replay,
+        // and this test bills nothing it wants suppressed.
+        let request = request("acme", "root", tool, &format!("r-root-{i}"));
         let outcome = d.admit(Call {
             actor: &root,
             request: &request,
@@ -201,7 +243,66 @@ fn no_privilege_reaches_past_the_boundary() {
             "'{tool}' must stay outside the boundary for a superuser too, got {outcome:?}"
         );
     }
-    assert_eq!(d.spent("acme"), 0, "and none of it was billed");
+    assert_eq!(d.spent("acme"), Some(0), "and none of it was billed");
+
+    // The control. Same credential, same tenant, an exposed tool: it is
+    // forwarded and charged, so the refusals above were the boundary's doing
+    // and not an identity the deployment had already thrown out.
+    let exposed = request("acme", "root", "memory.recall", "r-root-control");
+    assert_eq!(
+        d.admit(Call {
+            actor: &root,
+            request: &exposed,
+            model: "claude-opus",
+            cost_tokens: 7,
+            variant: None,
+        }),
+        Outcome::Forwarded,
+        "this credential is genuinely admitted; only the boundary refused it"
+    );
+    assert_eq!(d.spent("acme"), Some(7), "only the exposed call was billed");
+}
+
+/// Replay suppression is a short-circuit the composed path did not have: a
+/// `(tenant, request_id)` already decided is forwarded without being charged
+/// again, which repaired retries being billed twice. It must not also become
+/// a way *around* the boundary. A forbidden tool presented under a
+/// `request_id` whose earlier, exposed call was forwarded is still refused at
+/// the boundary — the boundary is evaluated before the replay check, and
+/// only a charged decision is ever remembered — and it still costs nothing.
+#[test]
+fn a_decided_request_id_does_not_carry_a_forbidden_tool_past_the_boundary() {
+    let mut d = two_tenant_deployment();
+    let alice = actor("memorithm", "alice", AuthStrength::Token);
+
+    let exposed = request("acme", "alice", "memory.ingest", "r-replay");
+    assert_eq!(
+        d.admit(Call {
+            actor: &alice,
+            request: &exposed,
+            model: "claude-opus",
+            cost_tokens: 25,
+            variant: None,
+        }),
+        Outcome::Forwarded
+    );
+    assert_eq!(d.spent("acme"), Some(25));
+
+    for tool in ["shell.exec", "code.execute", "rsi.status"] {
+        let replayed = request("acme", "alice", tool, "r-replay");
+        let outcome = d.admit(Call {
+            actor: &alice,
+            request: &replayed,
+            model: "claude-opus",
+            cost_tokens: 25,
+            variant: None,
+        });
+        assert!(
+            matches!(outcome.refusal(), Some(Refusal::OutsideBoundary(_))),
+            "'{tool}' must not ride a decided request_id past the boundary, got {outcome:?}"
+        );
+    }
+    assert_eq!(d.spent("acme"), Some(25), "and nothing further was billed");
 }
 
 /// The forbidden list is a published constant, so a future edit to the

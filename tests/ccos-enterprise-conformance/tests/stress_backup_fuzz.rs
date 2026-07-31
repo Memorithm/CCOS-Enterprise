@@ -1087,11 +1087,11 @@ fn restore_gate_never_consults_the_tenant_and_is_outside_the_governed_path() {
     // The problem is that restore therefore happens somewhere the gateway
     // never sees, guarded only by a 64-character string test.
     assert_eq!(
-        d.audit().len(),
+        d.audit().count(),
         3,
         "the *attempts* are journaled; a real restore would not be"
     );
-    assert_eq!(d.spent("acme"), 0);
+    assert_eq!(d.spent("acme"), Some(0));
 }
 
 /// **BROKE 3.** The documented disaster-recovery procedure, executed
@@ -1486,7 +1486,7 @@ fn no_deployment_state_can_influence_a_restore_verdict() {
             variant: None,
         });
     }
-    assert_eq!(d.spent("acme"), 1_000, "budget exhausted");
+    assert_eq!(d.spent("acme"), Some(1_000), "budget exhausted");
 
     let mut verdicts: BTreeMap<&str, bool> = BTreeMap::new();
     for tenant in ["acme", "globex", "nonexistent"] {
@@ -1505,7 +1505,7 @@ fn no_deployment_state_can_influence_a_restore_verdict() {
     // there is no audit record and no counter for restore, because the
     // backup crate has no way to reach either.
     assert!(
-        d.audit().iter().all(|r| !r.tool.contains("restore")),
+        d.audit().all(|r| !r.tool.contains("restore")),
         "nothing about restore is journaled"
     );
     assert!(

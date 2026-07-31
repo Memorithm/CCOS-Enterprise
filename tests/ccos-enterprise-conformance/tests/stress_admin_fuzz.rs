@@ -1110,7 +1110,13 @@ fn the_approval_policy_lists_categories_the_gate_does_not_cover() {
 #[test]
 fn the_composed_path_administers_with_no_justification_at_all() {
     let mut d = two_tenant_deployment();
-    let root = actor("acme", "root", AuthStrength::Token);
+    // `memorithm` is the org that OWNS the `acme` tenant. The credential now
+    // binds the request, so an `acme`-org credential would be refused at the
+    // ownership gate — and that refusal has nothing to do with what this test
+    // pins. The impersonation cases live in `stress_rbac_scale.rs` and
+    // `stress_tenancy_fuzz.rs`; here the caller is deliberately legitimate, so
+    // that the *only* thing missing from the admitted act is the justification.
+    let root = actor("memorithm", "root", AuthStrength::Token);
     let req = request("acme", "root", "policy.set", "r-admin-1");
 
     let outcome = d.admit(Call {

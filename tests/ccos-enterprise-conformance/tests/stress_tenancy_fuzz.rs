@@ -7,16 +7,26 @@
 //! dedicated separator-confusion corpus, 1 000 tenants x 100 keys, and a
 //! counting allocator pointed at the store.
 //!
+//! The composed admission path this file attacks used to live in the test
+//! harness next door. It now ships in `ccos-enterprise-runtime` and the
+//! harness merely re-exports it, so every assertion below is aimed at shipped
+//! code; a bare `src/lib.rs:NNN` reference means
+//! `crates/ccos-enterprise-runtime/src/lib.rs`.
+//!
 //! Everything asserted below is the product's **current, real** behaviour.
-//! Where that behaviour is a defect the assertion pins the defect and the
-//! comment names it, so a repair fails loudly here instead of silently
-//! changing the security posture.
+//! Where that behaviour is still a defect the assertion pins the defect and
+//! the comment names it, so a repair fails loudly here instead of silently
+//! changing the security posture. Where a defect has been repaired, the test
+//! that pinned it kept its inputs and flipped its expectation: it is now a
+//! regression guard, and its comment says in the past tense what the hole was
+//! and what it cost.
 //!
 //! ## What HELD (and why)
 //!
 //! * **Tuple keying genuinely defeats key confusion.** `Deployment`'s store is
-//!   `BTreeMap<(TenantId, String), String>` (`src/lib.rs:152`, `:161`), and
-//!   tuple equality is componentwise: `("a", "b:c")` and `("a:b", "c")` are two
+//!   `BTreeMap<(TenantId, String), String>` (`src/lib.rs:223`, type alias at
+//!   `:210`), and tuple equality is componentwise: `("a", "b:c")` and
+//!   `("a:b", "c")` are two
 //!   different keys no matter what the separator is. The flattened
 //!   `format!("{tenant}{sep}{key}")` form a naive store would use aliases 8 of
 //!   the 27 corpus pairs with no separator, 5 with `:`, 3 with `::` and 1 each
@@ -39,16 +49,99 @@
 //!   The order is strictly ascending raw byte order, identical across repeated
 //!   calls and across a deployment built in reverse insertion order, and it
 //!   survives empty, NUL-bearing, astral and prefix-related keys.
-//! * **`rescope` never reads through.** Crossing to a tenant that does not hold
-//!   the inner key is a miss, in both directions, for every hostile key tried.
+//! * **`rescope` never reads through, and the governed path now refuses the
+//!   crossing outright.** Crossing to a tenant that does not hold the inner key
+//!   is a miss, in both directions, for every hostile key tried — and the same
+//!   crossing presented at `admit` by an identity from another organization is
+//!   refused with `Refusal::TenantNotOwnedByOrg` at gate 3, before the boundary
+//!   check, before RBAC, before the model allowlist and before the budget.
+//!   Two independent guards, and the second is the load-bearing one: it refuses
+//!   *identically* whether the target cell exists or not, and whatever tool,
+//!   model, variant, cost or role the foreigner brings, so it cannot be
+//!   differenced into an oracle for another tenant's key space or configuration
+//!   the way a bare empty result can. (It is *not* invariant in whether the
+//!   tenant exists at all — see finding 11.)
 //! * **No truncation, hashing or prefix comparison of keys.** 1 MiB keys are
 //!   stored and compared in full: two that differ only in their final byte are
 //!   two cells, and the same 1 MiB key under two tenants is two cells.
 //!
-//! ## What BROKE
+//! ## What was REPAIRED (same inputs, opposite expectation)
+//!
+//! Four of the eleven findings in this file have been closed in
+//! `ccos-enterprise-runtime`. The tests that proved them were not deleted or
+//! relaxed: each kept its scenario and now asserts the repair, so a revert
+//! fails here. Where a repair closed only part of a finding, the residue is
+//! spelled out under it and is still pinned by the same test.
+//!
+//! 6. **`cells_of` used to scan the entire store instead of the tenant's
+//!    range.** It was `.iter().filter(...)` over a map whose key *begins* with
+//!    the tenant, so every listing was O(n) in the whole store: listing a
+//!    one-cell tenant went 591.8 us -> 5.85 ms (9.9x) when *other* tenants
+//!    grew the store 8x, for a byte-identical result. That is cross-tenant
+//!    performance coupling — a noisy neighbour degrading everyone's reads — in
+//!    a product whose selling point is isolation. It is now
+//!    `range((t, String::new())..).take_while(...)`, O(log n + k) in the
+//!    tenant's own cell count. The test now grows the store **16x** between
+//!    the two measurements and fails above 4x, and additionally pins the
+//!    range's *correctness* — neighbours on both sides, and a tenant name that
+//!    is a proper prefix of another — which is what a fast wrong answer would
+//!    otherwise get away with.
+//!    -> [`cells_of_cost_does_not_scale_with_the_rest_of_the_store`]
+//!
+//! 7. **EXHAUSTION VECTOR — refused calls used to retain an unbounded,
+//!    caller-controlled audit record.** `admit` journaled *every* decision into
+//!    a `Vec<AuditRecord>` with no cap, cloning four caller-supplied strings. A
+//!    call refused at gate 1 (unauthenticated) costs zero tokens by design —
+//!    and permanently retained 4 321 B when the caller padded its `request_id`
+//!    to 4 KiB; 20 000 such refusals retained 86 421 480 B. The metric registry
+//!    beside it was bounded at `MAX_SERIES = 4096` precisely against this; the
+//!    journal was not. It is now a `VecDeque` capped at
+//!    `DEFAULT_AUDIT_CAPACITY`, every identifier is clamped to
+//!    `MAX_IDENTIFIER_BYTES` before it is stored, and every eviction is counted
+//!    by `audit_dropped()` so a reader is never silently handed a partial trail.
+//!    **Still open:** bounding turned an unbounded leak into a bounded
+//!    *displacement*. An unauthenticated stranger who names `acme` still fills
+//!    `acme`'s audit view, and can now evict the genuine record that justifies
+//!    a charge — the meter still says 42 with no surviving record of why, and
+//!    only `audit_dropped()` reveals the loss. Both halves are asserted.
+//!    -> [`refused_calls_fill_a_bounded_journal_and_displace_a_real_tenants_trail`]
+//!
+//! 8. **The credential used to be believed for its strength and nothing else.**
+//!    `decide` read `call.actor.strength` and then keyed RBAC on
+//!    `request.actor` — a plain client string — and resolved the tenant from
+//!    `request.tenant`. `AuthenticatedActor::org` was compared with nothing. So
+//!    an identity issued for `globex` spent `acme`'s budget and landed in
+//!    `acme`'s audit trail (measured: 250 tokens), and any caller could name
+//!    any actor and inherit that actor's roles. The credential now binds the
+//!    request on both axes — `Refusal::ActorMismatch` and
+//!    `Refusal::TenantNotOwnedByOrg`, both evaluated before any tenant-
+//!    configurable gate, so neither costs the tenant a token.
+//!    **Still open:** `AuditRecord` has no org field, so a trail still cannot
+//!    answer "which organization was this authenticated for?".
+//!    -> [`the_credential_binds_both_the_actor_and_the_tenants_owning_org`]
+//!
+//! 10. **Re-adding a tenant used to reset its budget and hand its memory to the
+//!     new occupant.** `add_tenant` was an unconditional `BTreeMap::insert`
+//!     returning nothing, and there is no `remove_tenant`, so re-provisioning a
+//!     name was the product's only tenant-lifecycle operation. It silently
+//!     zeroed the spend ledger — an exhausted tenant was refilled by re-adding
+//!     it — and silently dropped the model allowlist and the Q-Page
+//!     activations. It now takes the owning org, returns `bool`, and changes
+//!     nothing when the tenant already exists, for another org as much as for
+//!     its own.
+//!     **Still open:** the cell store is keyed independently of the tenant
+//!     table, so cells outlive every decision made about the tenant record and
+//!     no API can clear them. The refusal keeps that latent — until a
+//!     `remove_tenant` arrives, which the product now needs, since refusing to
+//!     re-provision leaves *no* tenant-lifecycle operation at all. And no
+//!     lifecycle event is journaled: a refused re-provisioning is exactly the
+//!     operator error an audit trail exists to record, and it leaves no trace.
+//!     -> [`re_provisioning_is_refused_but_the_store_still_outlives_the_tenant_record`]
+//!
+//! ## What is still BROKEN
 //!
 //! 1. **The tenant-scoped store is completely ungoverned.** `put`/`get`/
-//!    `cells_of` (`src/lib.rs:228-252`) are reachable with no identity, no
+//!    `cells_of` (`src/lib.rs:328-352`) are reachable with no identity, no
 //!    RBAC, no boundary check, no budget and — decisively — **no audit record
 //!    and no metric**. A write to a tenant that does not exist in the
 //!    deployment is accepted and readable, so `Refusal::UnknownTenant` guards
@@ -82,47 +175,18 @@
 //!
 //! 4. **The tenant name is copied into every cell key, so one long tenant name
 //!    is amplified by its cell count.** `put` stores
-//!    `(scope.tenant.clone(), scope.inner.clone())` (`src/lib.rs:229-232`): a
+//!    `(scope.tenant.clone(), scope.inner.clone())` (`src/lib.rs:328-333`): a
 //!    64 KiB tenant name written to 256 keys retains 16 810 950 B from 256
 //!    calls — 256x the name. Nothing validates or bounds a tenant identifier.
 //!    -> [`a_long_tenant_name_is_copied_into_every_one_of_its_cells`]
 //!
 //! 5. **`get` allocates a full copy of the caller's key on every read,
-//!    including a miss.** `src/lib.rs:238-240` builds an owned
+//!    including a miss.** `src/lib.rs:337-341` builds an owned
 //!    `(TenantId, String)` before looking anything up, so a 4 MiB key costs a
 //!    4 MiB allocation + memcpy even when the tenant does not exist and the
 //!    lookup cannot possibly hit — measured peak +4 194 318 B for one missing
 //!    `get`. A read-only caller controls that size.
 //!    -> [`get_clones_the_whole_key_on_every_read_including_a_pure_miss`]
-//!
-//! 6. **`cells_of` scans the entire store, not the tenant's range.**
-//!    `src/lib.rs:245-252` uses `.iter().filter(...)` over a map whose key
-//!    *begins* with the tenant, so the range is contiguous and a
-//!    `range((t,"")..)` would be O(log n + k). As written it is O(n): listing
-//!    a one-cell tenant went 591.8 us -> 5.85 ms (9.9x) when *other* tenants
-//!    grew the store 8x, for a byte-identical result. Cross-tenant performance
-//!    coupling — a noisy neighbour degrades everyone's reads, in a product
-//!    whose selling point is isolation.
-//!    -> [`cells_of_cost_scales_with_the_whole_store_not_with_the_tenant`]
-//!
-//! 7. **EXHAUSTION VECTOR — refused calls retain an unbounded, caller-controlled
-//!    audit record.** `admit` journals *every* decision (`src/lib.rs:271-277`)
-//!    into a `Vec<AuditRecord>` with no cap, cloning four caller-supplied
-//!    strings. A call refused at gate 1 (unauthenticated) costs zero tokens by
-//!    design — and permanently retains 4 321 B when the caller pads its
-//!    `request_id` to 4 KiB. 20 000 such refusals retained 86 421 480 B, and
-//!    all 20 000 land in `audit_of("acme")`: a stranger who cannot authenticate
-//!    still fills a named tenant's audit view. The metric registry is bounded
-//!    at `MAX_SERIES = 4096` precisely against this; the journal is not.
-//!    -> [`refused_calls_retain_unbounded_caller_controlled_audit_records`]
-//!
-//! 8. **The authenticated actor's `org` is never bound to the tenant it
-//!    addresses.** `decide` (`src/lib.rs:281-327`) reads `call.actor.strength`
-//!    and nothing else off the identity; `call.actor.org` is dead weight. An
-//!    actor authenticated for `globex` spends `acme`'s budget and writes into
-//!    `acme`'s audit trail. Tenancy is asserted by the request, not proven by
-//!    the identity.
-//!    -> [`an_actors_org_is_never_bound_to_the_tenant_it_addresses`]
 //!
 //! 9. **Tenant identifiers are raw `String`s with no canonicalisation.**
 //!    `"acme"`, `"Acme"`, `"acme "`, `"\u{0430}cme"` (Cyrillic a) and the NFC/NFD
@@ -132,19 +196,24 @@
 //!    tenants is the bad news, and `add_tenant` accepts all of them.
 //!    -> [`visually_identical_tenant_names_are_distinct_silent_namespaces`]
 //!
-//! 10. **Re-adding a tenant resets its budget and hands its memory to the new
-//!     occupant.** `add_tenant` is an unconditional insert
-//!     (`src/lib.rs:190-193`) and there is no `remove_tenant`, so
-//!     re-provisioning a name is the product's only tenant-lifecycle
-//!     operation. It silently zeroes the spend ledger (an exhausted tenant is
-//!     refilled by re-adding it), silently drops the model allowlist and the
-//!     Q-Page activations, returns nothing a caller could check, and journals
-//!     nothing. Worse, the cell store is keyed independently of the tenant
-//!     table, so the new occupant of the name reads every cell the previous
-//!     one wrote — and no API can clear them.
-//!     -> [`re_adding_a_tenant_resets_its_budget_and_hands_over_its_memory`]
+//! 11. **NEW — the ownership refusal makes tenant names enumerable.** The
+//!     credential binding added in finding 8 answers `UnknownTenant` for a name
+//!     no organization has claimed and `TenantNotOwnedByOrg` for one another
+//!     organization owns (`src/lib.rs:429-436`). Any caller who can present a
+//!     token-strength credential for *any* org can therefore difference the two
+//!     and read off the deployment's tenant table one name at a time, at zero
+//!     cost, from outside every tenant. The comment at `src/lib.rs:425` says
+//!     this ordering exists "so a probe cannot enumerate tenants by their
+//!     refusal" — which holds for the actor check above it, not for this pair.
+//!     Collapsing both to one refusal would close it; the refusal is otherwise
+//!     invariant, which is what makes this the only channel left.
+//!     -> [`rescope_can_never_silently_read_the_source_tenants_data`], last
+//!     assertion
 //!
-//! Run the whole file (~14 s in debug, ~2 s in release; nothing is
+//! (Findings 6, 7, 8 and 10 are repaired; see the section above. The residual
+//! halves of 7 and 10 are still open and still pinned by the same tests.)
+//!
+//! Run the whole file (~7 s in debug, ~2 s in release; nothing is
 //! `#[ignore]`d):
 //! `cargo test -p ccos-enterprise-conformance --test stress_tenancy_fuzz`
 //! (add `-- --nocapture` for the measured growth tables).
@@ -158,6 +227,7 @@ use std::time::{Duration, Instant};
 use ccos_enterprise_auth::AuthStrength;
 use ccos_enterprise_conformance::{
     actor, request, two_tenant_deployment, Call, Deployment, Outcome, Refusal, TenantState,
+    DEFAULT_AUDIT_CAPACITY, MAX_IDENTIFIER_BYTES,
 };
 use ccos_enterprise_qpages::AdvancedQPageVariant;
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
@@ -333,7 +403,7 @@ fn scope_owned(tenant: String, key: String) -> TenantScope<String> {
 /// **HELD.** The headline claim, tested rather than trusted.
 ///
 /// `Deployment`'s store is `BTreeMap<(TenantId, String), String>`
-/// (`src/lib.rs:152`, type alias at `:161`). Tuple `Eq`/`Ord` is
+/// (`src/lib.rs:223`, type alias at `:210`). Tuple `Eq`/`Ord` is
 /// componentwise, so the tenant is a *structurally* separate field — there is
 /// no separator to smuggle, and no length prefix to get wrong. This test
 /// asserts both directions:
@@ -637,11 +707,12 @@ fn expected_cells(i: usize, cells: usize) -> Vec<(String, String)> {
 /// order.
 ///
 /// Exhaustive: **every** one of the 1 000 tenants is checked against its
-/// expected 100 cells — 10^8 key comparisons, because `cells_of` rescans the
-/// whole store per call (defect 6). Order-independence is additionally
-/// cross-checked against a deployment built in reverse insertion order on a
-/// deterministic 44-tenant sample, which keeps the file inside its runtime
-/// budget without weakening the exactness claim.
+/// expected 100 cells. This used to be 10^8 key comparisons, because
+/// `cells_of` rescanned the whole store on every call (defect 6); now that it
+/// is a range scan the same exhaustive check costs O(log n + 100) per tenant.
+/// Order-independence is additionally cross-checked against a deployment built
+/// in reverse insertion order on a deterministic 44-tenant sample, which keeps
+/// the file inside its runtime budget without weakening the exactness claim.
 #[test]
 fn cells_of_is_exact_and_deterministically_ordered_at_a_thousand_tenants() {
     let _guard = serialized();
@@ -755,9 +826,27 @@ fn cells_of_order_is_byte_order_even_for_nul_and_astral_keys() {
 // 4. rescope
 // ─────────────────────────────────────────────────────────────────────────
 
-/// **HELD.** `rescope` never reads through to the source tenant's data, in
-/// either direction, for any hostile key — the crossed scope names a cell in
-/// the *target* namespace, which is empty unless the target itself wrote it.
+/// **HELD, AND NOW DOUBLY GUARDED.** `rescope` never reads through to the
+/// source tenant's data, in either direction, for any hostile key — the crossed
+/// scope names a cell in the *target* namespace, which is empty unless the
+/// target itself wrote it.
+///
+/// That was the whole of the assertion when the admission path had no
+/// credential binding: reaching another tenant produced an empty result, and
+/// nothing else stood in the way. It now has a second, stronger guard in front
+/// of it. An identity from another organization is refused with
+/// [`Refusal::TenantNotOwnedByOrg`] at gate 3 — *before* the boundary check,
+/// before RBAC, before the model allowlist, before the Q-Page registry and
+/// before the budget — so the foreign caller never reaches a gate whose answer
+/// depends on the target tenant's configuration, and the tenant is charged
+/// nothing. An empty result says "there is nothing here for you"; the refusal
+/// says "you were never entitled to ask", which is the claim
+/// `ccos_enterprise_tenancy` actually makes.
+///
+/// The second half below asserts that, and asserts it is *invariant*: the same
+/// refusal arrives whatever tool, model, variant, cost or role the foreign
+/// caller brings, so it cannot be differenced into an oracle for the target's
+/// configuration. One thing it does still leak is pinned at the end.
 #[test]
 fn rescope_can_never_silently_read_the_source_tenants_data() {
     let _guard = serialized();
@@ -797,6 +886,210 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
     }
     assert!(d.cells_of("globex").is_empty());
     assert!(d.cells_of("third").is_empty());
+
+    // ── The second guard ────────────────────────────────────────────────
+    //
+    // The crossings above are refused by the *shape* of the key. On the
+    // governed path the crossing is refused by the *credential*, and it is
+    // refused earlier: before the store, before every tenant-configurable
+    // gate, and without costing the target a token.
+    let mut governed = two_tenant_deployment();
+    // Both fixture tenants hold real data, so an empty result could not be
+    // mistaken for the guard doing its job here.
+    governed.put(&scope("acme", "memory-root"), "ACME CONFIDENTIAL");
+    governed.put(&scope("globex", "memory-root"), "GLOBEX CONFIDENTIAL");
+
+    // mallory is genuinely authenticated and genuinely privileged — `assign`
+    // is keyed on the actor name alone, so she really does hold `writer`'s
+    // permissions. She is simply in the wrong organization, and that alone is
+    // enough. `initech` owns no tenant in this deployment.
+    governed.assign("mallory", "writer");
+    let mallory = actor("initech", "mallory", AuthStrength::Token);
+
+    // Every axis a foreign caller could vary. The last element of each row is
+    // what the *same* probe answers for an actor whose org does own the tenant
+    // — seven different gates between them, which is what makes the uniformity
+    // below a statement about precedence rather than a coincidence.
+    let probes: Vec<(&str, &str, Option<AdvancedQPageVariant>, u64, Outcome)> = vec![
+        ("memory.recall", "claude-opus", None, 1, Outcome::Forwarded),
+        ("memory.ingest", "claude-opus", None, 1, Outcome::Forwarded),
+        (
+            "shell.exec", // forbidden namespace: gate 4
+            "claude-opus",
+            None,
+            1,
+            Outcome::Refused(Refusal::OutsideBoundary(String::new())),
+        ),
+        (
+            "code.execute", // forbidden tool: gate 4
+            "claude-opus",
+            None,
+            1,
+            Outcome::Refused(Refusal::OutsideBoundary(String::new())),
+        ),
+        (
+            "context.summarize", // in the catalogue, no permission declared: gate 5
+            "claude-opus",
+            None,
+            1,
+            Outcome::Refused(Refusal::ToolNotGoverned),
+        ),
+        (
+            "policy.set", // governed, but alice is only a writer: gate 5
+            "claude-opus",
+            None,
+            1,
+            Outcome::Refused(Refusal::PermissionDenied),
+        ),
+        (
+            "memory.recall", // off every allowlist: gate 6
+            "no-such-model",
+            None,
+            1,
+            Outcome::Refused(Refusal::ModelNotAllowed),
+        ),
+        (
+            "memory.recall", // globex's model, not acme's: gate 6
+            "gpt-5",
+            None,
+            1,
+            Outcome::Refused(Refusal::ModelNotAllowed),
+        ),
+        (
+            "memory.recall",
+            "claude-opus",
+            Some(AdvancedQPageVariant::Hierarchical), // acme has this one
+            1,
+            Outcome::Forwarded,
+        ),
+        (
+            "memory.recall",
+            "claude-opus",
+            Some(AdvancedQPageVariant::TemporalWindowed), // …but not this one: gate 6
+            1,
+            Outcome::Refused(Refusal::VariantNotActivated),
+        ),
+        (
+            "memory.recall", // more than the whole budget: gate 8
+            "claude-opus",
+            None,
+            1_000_000,
+            Outcome::Refused(Refusal::BudgetExhausted),
+        ),
+    ];
+
+    // The control: same probes, same tenant, an actor whose org owns it. Each
+    // row lands on the gate its comment names, so all eleven answers differ.
+    // (`OutsideBoundary` carries a message, so shapes are compared by variant.)
+    let mut owned = two_tenant_deployment();
+    let alice = actor("memorithm", "alice", AuthStrength::Token);
+    for (i, (tool, model, variant, cost, expected)) in probes.iter().enumerate() {
+        let req = request("acme", "alice", tool, &format!("r-owned-{i}"));
+        let got = owned.admit(Call {
+            actor: &alice,
+            request: &req,
+            model,
+            cost_tokens: *cost,
+            variant: *variant,
+        });
+        assert_eq!(
+            std::mem::discriminant(&got),
+            std::mem::discriminant(expected),
+            "control row {i} ({tool:?}, {model:?}): expected {expected:?}, got {got:?}"
+        );
+        if let (Outcome::Refused(g), Outcome::Refused(e)) = (&got, expected) {
+            assert_eq!(
+                std::mem::discriminant(g),
+                std::mem::discriminant(e),
+                "control row {i} ({tool:?}, {model:?}) reached the wrong gate: {got:?}"
+            );
+        }
+    }
+
+    // …and the guard: from the wrong organization, against either tenant,
+    // every one of those eleven distinct answers collapses to the same
+    // refusal. Not one gate downstream of ownership was reached, so nothing
+    // about acme's or globex's roles, catalogue, allowlist, activations or
+    // budget is observable through it.
+    for tenant in ["acme", "globex"] {
+        for (i, (tool, model, variant, cost, _)) in probes.iter().enumerate() {
+            let req = request(tenant, "mallory", tool, &format!("r-foreign-{tenant}-{i}"));
+            assert_eq!(
+                governed
+                    .admit(Call {
+                        actor: &mallory,
+                        request: &req,
+                        model,
+                        cost_tokens: *cost,
+                        variant: *variant,
+                    })
+                    .refusal(),
+                Some(&Refusal::TenantNotOwnedByOrg),
+                "a foreign org must be refused on ownership alone, before the gate that would \
+                 have answered for tool {tool:?} / model {model:?} on {tenant}"
+            );
+        }
+    }
+
+    // Nothing was charged, nothing was read, and the cells are untouched:
+    // the refusal landed before the store could have been consulted even if
+    // the store were on the `admit` path at all (it is not — defect 1).
+    assert_eq!(governed.spent("acme"), Some(0), "a refusal costs nothing");
+    assert_eq!(governed.spent("globex"), Some(0));
+    assert_eq!(
+        governed.get(&scope("acme", "memory-root")),
+        Some("ACME CONFIDENTIAL"),
+        "the target's cell is neither returned to the foreigner nor disturbed"
+    );
+
+    // Every one of those attempts is journaled against the tenant it named,
+    // at zero cost — the refusal is announced, not silent.
+    for tenant in ["acme", "globex"] {
+        let trail = governed.audit_of(tenant);
+        assert_eq!(
+            trail.len(),
+            probes.len(),
+            "{tenant}: every attempt is filed"
+        );
+        assert!(
+            trail
+                .iter()
+                .all(|r| !r.outcome.is_forwarded() && r.cost == 0),
+            "{tenant}: a refused crossing must never be billed"
+        );
+    }
+    let metrics: BTreeMap<String, u64> = governed.metrics().into_iter().collect();
+    assert_eq!(
+        metrics.get("gateway.refused.tenant_not_owned"),
+        Some(&((2 * probes.len()) as u64)),
+        "and it moves its own low-cardinality counter"
+    );
+    assert_eq!(metrics.get("gateway.forwarded"), None);
+
+    // STILL OPEN, pinned rather than papered over: the refusal is invariant in
+    // everything *except* whether the tenant exists. `src/lib.rs:429-436`
+    // answers `UnknownTenant` for a name no org has claimed and
+    // `TenantNotOwnedByOrg` for one another org owns, so any authenticated
+    // caller can enumerate the deployment's tenant names by differencing the
+    // two refusals — which is exactly what the comment at `src/lib.rs:425`
+    // ("checked before tenant resolution so a probe cannot enumerate tenants
+    // by their refusal") says the ordering prevents. It prevents it for the
+    // actor check, not for this one. If the two are ever unified, tighten this
+    // assertion instead of deleting it.
+    let req = request("no-such-tenant", "mallory", "memory.recall", "r-probe");
+    assert_eq!(
+        governed
+            .admit(Call {
+                actor: &mallory,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 1,
+                variant: None,
+            })
+            .refusal(),
+        Some(&Refusal::UnknownTenant),
+        "DEFECT: a distinguishable refusal makes tenant names enumerable"
+    );
 }
 
 /// **DEFECT 2.** `crates/ccos-enterprise-tenancy/src/lib.rs:27-28` calls
@@ -813,6 +1106,14 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
 ///   the scope crossed a boundary;
 /// * `audit()` is empty and `metrics()` is empty afterwards, because the store
 ///   is not on the `admit` path at all (defect 1).
+///
+/// The last section shows precisely how narrow the remaining hole is, and it
+/// is the reason this finding is still worth its own test. Presented at the
+/// governed path, the very same crossing is now refused with
+/// [`Refusal::TenantNotOwnedByOrg`] before any tenant state is consulted — and
+/// journaled, and counted. The silent substitution survives *only* on the
+/// ungoverned `get`, so defect 2 is now entirely a consequence of defect 1:
+/// close the store's path into `admit` and it closes with it.
 #[test]
 fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
     let _guard = serialized();
@@ -844,20 +1145,65 @@ fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
 
     // And the deployment recorded nothing whatsoever.
     assert!(
-        d.audit().is_empty(),
+        d.audit().next().is_none(),
         "DEFECT: a cross-tenant read is journaled nowhere"
     );
     assert!(
         d.metrics().is_empty(),
         "DEFECT: not even a counter moves for tenant memory traffic"
     );
+
+    // A separate deployment, so the emptiness asserted above stays exactly
+    // what it claims: nothing the *store* did produced a record.
+    //
+    // Here `globex` is a real tenant owned by `memorithm`, holding the same
+    // cell under the same inner key. The crossing that succeeds silently above
+    // is refused on the governed path — and refused on ownership, at gate 3,
+    // so the target's roles, allowlist, activations and budget are never
+    // consulted and never charged.
+    let mut governed = two_tenant_deployment();
+    governed.put(&scope("globex", "memory-root"), "GLOBEX CONFIDENTIAL");
+    governed.assign("mallory", "reader");
+    let mallory = actor("initech", "mallory", AuthStrength::Token);
+    let req = request("globex", "mallory", "memory.recall", "r-crossed");
+    assert_eq!(
+        governed
+            .admit(Call {
+                actor: &mallory,
+                request: &req,
+                model: "gpt-5", // globex's own allowlisted model
+                cost_tokens: 1,
+                variant: None,
+            })
+            .refusal(),
+        Some(&Refusal::TenantNotOwnedByOrg),
+        "the governed path refuses the crossing the store performs silently"
+    );
+    assert_eq!(governed.spent("globex"), Some(0), "and bills nobody for it");
+    assert_eq!(
+        governed.get(&scope("globex", "memory-root")),
+        Some("GLOBEX CONFIDENTIAL"),
+        "the cell the foreigner was after is untouched, and was never reached"
+    );
+
+    // Unlike the store crossing, this one leaves a record and moves a counter.
+    let trail = governed.audit_of("globex");
+    assert_eq!(trail.len(), 1, "the attempt is journaled");
+    assert_eq!(trail[0].actor, "mallory", "under the *verified* actor");
+    assert_eq!(trail[0].cost, 0, "at zero cost, as every refusal is");
+    assert_eq!(
+        trail[0].outcome,
+        Outcome::Refused(Refusal::TenantNotOwnedByOrg)
+    );
+    let metrics: BTreeMap<String, u64> = governed.metrics().into_iter().collect();
+    assert_eq!(metrics.get("gateway.refused.tenant_not_owned"), Some(&1));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // 5. The store is off the governed path entirely
 // ─────────────────────────────────────────────────────────────────────────
 
-/// **DEFECT 1.** `put`/`get`/`cells_of` (`src/lib.rs:228-252`) take no actor,
+/// **DEFECT 1.** `put`/`get`/`cells_of` (`src/lib.rs:328-352`) take no actor,
 /// consult no `RoleBook`, call no `classify`, charge no `TokenBudget` and
 /// write no `AuditRecord`. This test pins every consequence at once:
 ///
@@ -879,7 +1225,7 @@ fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
     // A tenant that exists, but is allowed to spend nothing at all.
     let mut broke = TenantState::new(0);
     broke.allow_model("claude-opus");
-    d.add_tenant("broke", broke);
+    d.add_tenant("memorithm", "broke", broke);
 
     // 1. Writes to a tenant nobody provisioned are accepted and readable.
     d.put(&scope("ghost-tenant", "memory-root"), "written by nobody");
@@ -925,7 +1271,11 @@ fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
         d.put(&scope("broke", &format!("cell-{i}")), &"x".repeat(64));
     }
     assert_eq!(d.cells_of("broke").len(), 1_000);
-    assert_eq!(d.spent("broke"), 0, "not one token was charged for 64 KiB");
+    assert_eq!(
+        d.spent("broke"),
+        Some(0),
+        "not one token was charged for 64 KiB"
+    );
 
     // 3. Overwrites are silent destruction.
     d.put(&scope("ghost-tenant", "memory-root"), "clobbered");
@@ -938,7 +1288,7 @@ fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
     // 4. Nothing above produced a single audit record or metric sample. The
     //    only journaled events are the two refused `admit` calls.
     assert_eq!(
-        d.audit().len(),
+        d.audit().count(),
         2,
         "DEFECT: 1 002 writes and 3 reads are journaled nowhere; only `admit` writes audit"
     );
@@ -1117,7 +1467,7 @@ fn megabyte_keys_and_tenant_names_are_accepted_and_still_isolated() {
 }
 
 /// **DEFECT 4.** `put` clones the tenant name into every cell key
-/// (`src/lib.rs:229-232`), so a long tenant identifier is amplified by that
+/// (`src/lib.rs:328-333`), so a long tenant identifier is amplified by that
 /// tenant's cell count: A tenants x K cells retain A x K copies of the name.
 /// Nothing validates a tenant identifier's length, charset or shape — 64 KiB
 /// of tenant name is as acceptable as `acme`.
@@ -1147,7 +1497,7 @@ fn a_long_tenant_name_is_copied_into_every_one_of_its_cells() {
 }
 
 /// **DEFECT 5.** `get` builds an owned `(TenantId, String)` *before* the
-/// lookup (`src/lib.rs:238-240`), so the read path allocates and memcpys the
+/// lookup (`src/lib.rs:337-341`), so the read path allocates and memcpys the
 /// caller's whole key even when the tenant does not exist and the lookup
 /// cannot possibly hit. Reads are supposed to be the cheap side.
 ///
@@ -1178,17 +1528,30 @@ fn get_clones_the_whole_key_on_every_read_including_a_pure_miss() {
     let _ = peak_bytes() - before;
 }
 
-/// **DEFECT 7 — EXHAUSTION VECTOR.** `admit` journals every decision into an
-/// uncapped `Vec<AuditRecord>` (`src/lib.rs:271-277`), cloning four
-/// caller-supplied strings. A call refused at the *first* gate — no identity,
-/// no tenant, no permission, zero tokens charged, deliberately free by the
-/// product's own "a refusal costs the tenant nothing" rule — still buys
-/// permanent memory, sized by the caller's `request_id`.
+/// **DEFECT 7 — REPAIRED, AND PINNED HERE.** `admit` used to journal every
+/// decision into an *uncapped* `Vec<AuditRecord>`, cloning four caller-supplied
+/// strings. A call refused at the first gate — no identity, no tenant, no
+/// permission, zero tokens charged, deliberately free by the product's own
+/// "a refusal costs the tenant nothing" rule — bought permanent memory, sized
+/// by the caller's `request_id`. The counter registry beside it caps at
+/// `MAX_SERIES = 4096` for exactly this reason; the journal had no cap.
 ///
-/// The counter registry beside it caps at `MAX_SERIES = 4096` for exactly this
-/// reason; the journal has no cap, no rotation and no eviction API.
+/// It is now a `VecDeque` bounded by `DEFAULT_AUDIT_CAPACITY`, and every
+/// evicted record is counted in `audit_dropped()`. Three things are asserted
+/// here, and the first two are what the repair is *for*:
+///
+/// * the retained set never exceeds the cap, whatever the caller sends;
+/// * what is dropped is *reported*, so a reader is never silently handed a
+///   partial trail (the same journal is the billing evidence);
+/// * identifiers are clamped, so one 4 KiB `request_id` cannot cost 4 KiB of
+///   permanent memory per refusal.
+///
+/// What the repair does **not** fix, and is still pinned below: an
+/// unauthenticated stranger who names `acme` still fills `acme`'s audit view.
+/// Bounding the buffer turned an unbounded leak into a bounded eviction —
+/// which is now a *displacement* attack on a real tenant's trail.
 #[test]
-fn refused_calls_retain_unbounded_caller_controlled_audit_records() {
+fn refused_calls_fill_a_bounded_journal_and_displace_a_real_tenants_trail() {
     let _guard = serialized();
     const CALLS: usize = 20_000;
     const PAD: usize = 4 * 1024;
@@ -1225,20 +1588,38 @@ fn refused_calls_retain_unbounded_caller_controlled_audit_records() {
 
     assert_eq!(
         d.spent("acme"),
-        0,
+        Some(0),
         "the tenant was correctly charged nothing"
     );
-    assert_eq!(d.audit().len(), CALLS, "every refusal is retained forever");
+    assert!(
+        d.audit().count() <= DEFAULT_AUDIT_CAPACITY,
+        "the journal is bounded; got {}",
+        d.audit().count()
+    );
+    // Below the cap, so nothing was dropped and the count is exact — the
+    // bound is a ceiling, not a truncation that fires early.
+    assert_eq!(d.audit().count(), CALLS);
+    assert_eq!(d.audit_dropped(), 0, "nothing dropped below the cap");
     assert_eq!(
         d.audit_of("acme").len(),
         CALLS,
-        "DEFECT: an unauthenticated stranger fills a named tenant's audit view"
+        "STILL TRUE: an unauthenticated stranger fills a named tenant's audit view"
+    );
+
+    // The 4 KiB `request_id` is clamped to `MAX_IDENTIFIER_BYTES` before it is
+    // stored, so a refusal costs a bounded number of bytes rather than
+    // whatever the caller chose to send.
+    assert!(
+        d.audit()
+            .all(|r| r.request_id.len() <= MAX_IDENTIFIER_BYTES),
+        "a caller-sized identifier reached the journal verbatim"
     );
     assert!(
-        retained >= CALLS * PAD,
-        "expected >= {} B retained, saw {retained}",
+        retained < CALLS * PAD / 4,
+        "expected the clamp to cut retention well below {} B, saw {retained}",
         CALLS * PAD
     );
+
     // The metric side of the same traffic is bounded, as designed.
     let metrics: BTreeMap<String, u64> = d.metrics().into_iter().collect();
     assert_eq!(
@@ -1246,23 +1627,71 @@ fn refused_calls_retain_unbounded_caller_controlled_audit_records() {
         Some(&(CALLS as u64))
     );
     assert!(metrics.len() < 16, "counters stay low-cardinality");
+
+    // Now the displacement the bound introduced. A small-capacity deployment
+    // makes it cheap to demonstrate what a 100 000-record one would need
+    // 100 000 hostile calls to show: `acme`'s genuine, billed record is
+    // pushed out by a stranger's refusals, and only `audit_dropped` says so.
+    let mut small = two_tenant_deployment().with_audit_capacity(4);
+    let alice = actor("memorithm", "alice", AuthStrength::Token);
+    let real = request("acme", "alice", "memory.ingest", "the-billed-one");
+    small.admit(Call {
+        actor: &alice,
+        request: &real,
+        model: "claude-opus",
+        cost_tokens: 42,
+        variant: None,
+    });
+    assert_eq!(small.spent("acme"), Some(42));
+    assert!(small.audit().any(|r| r.request_id == "the-billed-one"));
+
+    small.require_strength(AuthStrength::Strong);
+    for i in 0..50 {
+        let junk = request("acme", "nobody", "memory.recall", &format!("junk-{i}"));
+        small.admit(Call {
+            actor: &anon,
+            request: &junk,
+            model: "claude-opus",
+            cost_tokens: 0,
+            variant: None,
+        });
+    }
+    assert_eq!(small.audit().count(), 4, "the cap holds");
+    assert!(
+        !small.audit().any(|r| r.request_id == "the-billed-one"),
+        "DEFECT: a stranger's free refusals evicted the record that justifies a charge"
+    );
+    assert_eq!(
+        small.spent("acme"),
+        Some(42),
+        "the meter still says 42 with no surviving record of why"
+    );
+    assert_eq!(
+        small.audit_dropped(),
+        47,
+        "the loss is at least *counted* — a reader can tell the trail is partial"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // 7. Cross-tenant coupling
 // ─────────────────────────────────────────────────────────────────────────
 
-/// **DEFECT 6.** `cells_of` filters the whole store (`src/lib.rs:245-252`)
-/// even though the map's key *starts* with the tenant, so every tenant's
-/// listing is contiguous and `range((t, String::new())..)` would be
-/// O(log n + k). As written, one tenant's writes slow down every other
-/// tenant's reads — isolation that does not extend to the clock.
+/// **DEFECT 6 — REPAIRED, AND GUARDED HERE.** `cells_of` used to `filter` the
+/// whole store even though the map's key *starts* with the tenant, so one
+/// tenant's writes slowed down every other tenant's reads: isolation that did
+/// not extend to the clock. It is now
+/// `range((t, String::new())..).take_while(|((t2, _), _)| t2 == t)`, which is
+/// O(log n + k) in the tenant's own cell count.
 ///
-/// The assertion is deliberately loose (>= 2x for an 8x store) and takes the
-/// minimum of several runs, so it measures the algorithm rather than the
-/// machine: the real ratio is ~6-8x in both debug and release.
+/// This is a timing test, so it is built to fail only on an *algorithmic*
+/// regression and never on a busy machine: it takes the minimum of several
+/// runs, and the store grows **16x** between the two measurements while the
+/// bound allows 4x. A full scan measured ~6-8x for an 8x store before the
+/// repair, so a reverted `filter` lands far outside the bound; scheduler noise
+/// on a one-cell listing does not.
 #[test]
-fn cells_of_cost_scales_with_the_whole_store_not_with_the_tenant() {
+fn cells_of_cost_does_not_scale_with_the_rest_of_the_store() {
     let _guard = serialized();
 
     fn victim_listing_cost(neighbour_cells: usize) -> (Duration, usize) {
@@ -1284,7 +1713,7 @@ fn cells_of_cost_scales_with_the_whole_store_not_with_the_tenant() {
     }
 
     let (small, n_small) = victim_listing_cost(10_000);
-    let (large, n_large) = victim_listing_cost(80_000);
+    let (large, n_large) = victim_listing_cost(160_000);
 
     // The result the victim gets is identical either way: one cell.
     assert_eq!(n_small, 1);
@@ -1292,76 +1721,169 @@ fn cells_of_cost_scales_with_the_whole_store_not_with_the_tenant() {
 
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
     println!(
-        "cells_of(victim) -> 1 cell: {small:?} with 10k neighbour cells, {large:?} with 80k \
-         ({ratio:.1}x for 8x store)"
+        "cells_of(victim) -> 1 cell: {small:?} with 10k neighbour cells, {large:?} with 160k \
+         ({ratio:.1}x for a 16x store)"
     );
     assert!(
-        ratio >= 2.0,
-        "DEFECT expected: listing a one-cell tenant should not scale with the store, but the \
-         8x store was only {ratio:.2}x slower — has `cells_of` become a range scan?"
+        ratio < 4.0,
+        "REGRESSION: listing a one-cell tenant must not scale with the store, but a 16x store \
+         was {ratio:.2}x slower — has `cells_of` gone back to scanning every key?"
     );
+
+    // …and the range is still *correct*, which is the part a fast wrong answer
+    // would get away with. `victim` sorts in the middle of the `noisy-*` keys,
+    // so `take_while` has neighbours on both sides to stop at.
+    let mut d = Deployment::new();
+    for t in ["a-before", "victim", "z-after"] {
+        for i in 0..50 {
+            d.put(&scope(t, &format!("k{i:03}")), t);
+        }
+    }
+    let cells = d.cells_of("victim");
+    assert_eq!(cells.len(), 50, "the whole tenant, and nothing either side");
+    assert!(
+        cells.iter().all(|(_, v)| *v == "victim"),
+        "a neighbour's cell leaked into the listing"
+    );
+    assert!(
+        cells.windows(2).all(|w| w[0].0 < w[1].0),
+        "the listing is ordered, as a range scan must be"
+    );
+    assert!(d.cells_of("nobody").is_empty());
+    // A tenant name that is a *prefix* of another must not swallow it.
+    d.put(&scope("victimX", "k000"), "victimX");
+    assert_eq!(
+        d.cells_of("victim").len(),
+        50,
+        "`victimX` is a different tenant, not more of `victim`"
+    );
+    assert_eq!(d.cells_of("victimX").len(), 1);
 }
 
-/// **DEFECT 8.** `decide` (`src/lib.rs:281-327`) reads exactly one field off
-/// the authenticated identity — `strength` — and takes the tenant from the
-/// *request*. `AuthenticatedActor::org` is never compared with anything, so an
-/// identity issued for `globex` spends `acme`'s budget and lands in `acme`'s
-/// audit trail under `acme`'s name.
+/// **DEFECT 8 — REPAIRED.** `decide` used to read exactly one field off the
+/// authenticated identity — `strength` — and take both the tenant *and the
+/// actor* from the request. `AuthenticatedActor::org` was compared with
+/// nothing, so an identity issued for one organization spent another's budget
+/// and landed in its audit trail; and `request.actor` was believed on sight,
+/// so any caller could name any actor and inherit that actor's roles.
+///
+/// The credential now binds the request on both axes. This test pins both
+/// halves shut, and keeps pinning the one thing that is still missing: the
+/// journal records the (now verified) actor, but never the org.
 #[test]
-fn an_actors_org_is_never_bound_to_the_tenant_it_addresses() {
+fn the_credential_binds_both_the_actor_and_the_tenants_owning_org() {
     let _guard = serialized();
     let mut d = two_tenant_deployment();
 
-    // alice is authenticated for globex. She addresses acme.
+    // 1. alice is authenticated for an organization called "globex" — which is
+    //    also the name of a *tenant* that `memorithm` owns. The two namespaces
+    //    must not bridge just because the strings match.
     let alice_of_globex = actor("globex", "alice", AuthStrength::Token);
     assert!(
         !alice_of_globex.is_strongly_authenticated(),
-        "and she is not even strongly authenticated — token strength is enough"
+        "token strength clears gate 1, so the refusal below is the binding, not the strength"
     );
-    let req = request("acme", "alice", "memory.recall", "r-cross-org");
-    let outcome = d.admit(Call {
-        actor: &alice_of_globex,
-        request: &req,
-        model: "claude-opus", // acme's allowlist, not globex's
-        cost_tokens: 250,
-        variant: None,
-    });
+    for tenant in ["acme", "globex"] {
+        let req = request(
+            tenant,
+            "alice",
+            "memory.recall",
+            &format!("r-cross-{tenant}"),
+        );
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice_of_globex,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 250,
+                variant: None,
+            })
+            .refusal(),
+            Some(&Refusal::TenantNotOwnedByOrg),
+            "an identity from another org must not reach {tenant}"
+        );
+    }
+    assert_eq!(d.spent("acme"), Some(0), "and acme pays nothing");
+    assert_eq!(d.spent("globex"), Some(0), "nor does the like-named tenant");
 
+    // 2. The actor half: bob, correctly in `memorithm`, claims to be alice —
+    //    who can write where he cannot.
+    let bob = actor("memorithm", "bob", AuthStrength::Token);
+    let req = request("acme", "alice", "memory.ingest", "r-impersonation");
     assert_eq!(
-        outcome,
-        Outcome::Forwarded,
-        "DEFECT: a globex identity is admitted against acme"
+        d.admit(Call {
+            actor: &bob,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 250,
+            variant: None,
+        })
+        .refusal(),
+        Some(&Refusal::ActorMismatch),
+        "the request's copy of the actor is never believed over the credential"
     );
-    assert_eq!(d.spent("acme"), 250, "and acme pays for it");
-    assert_eq!(d.spent("globex"), 0, "while globex's books stay clean");
+    assert_eq!(d.spent("acme"), Some(0));
 
+    // 3. The legitimate call, for contrast: same tenant, same tool, an actor
+    //    the credential actually proves.
+    let alice = actor("memorithm", "alice", AuthStrength::Token);
+    let req = request("acme", "alice", "memory.ingest", "r-legit");
+    assert_eq!(
+        d.admit(Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 250,
+            variant: None,
+        }),
+        Outcome::Forwarded
+    );
+    assert_eq!(d.spent("acme"), Some(250));
+
+    // Every one of the four decisions is journaled — refusals included.
     let trail = d.audit_of("acme");
-    assert_eq!(trail.len(), 1);
+    assert_eq!(trail.len(), 3, "two refusals and the admitted call");
+    assert_eq!(trail.iter().filter(|r| r.outcome.is_forwarded()).count(), 1);
     assert_eq!(
-        trail[0].actor, "alice",
-        "DEFECT: the record names the request's actor string; the org that authenticated her is \
-         nowhere in the journal"
+        trail[2].actor, "alice",
+        "the record names the actor, and it is now the *verified* one"
     );
     assert!(
-        d.audit_of("globex").is_empty(),
-        "nothing ties the call back to the org it was authenticated for"
+        d.audit_of("globex").len() == 1,
+        "the refusal against the like-named tenant is filed under that tenant"
+    );
+
+    // STILL MISSING: `AuditRecord` has no org field, so a trail cannot answer
+    // "which organization was this authenticated for?" — only the tenant's
+    // owner, indirectly, and only while the tenant table still exists.
+    let record = format!("{:?}", trail[2]);
+    assert!(
+        !record.contains("memorithm"),
+        "if the org has reached the journal, tighten this test instead of deleting it: {record}"
     );
 }
 
-/// **DEFECT 10.** `add_tenant` is an unconditional `BTreeMap::insert`
-/// (`src/lib.rs:190-193`), so re-adding an existing tenant **replaces** its
-/// `TenantState` — and there is no `remove_tenant` anywhere, which makes this
-/// the only tenant-lifecycle operation the product has. Two things follow, and
-/// both are silent:
+/// **DEFECT 10 — HALF REPAIRED.** `add_tenant` used to be an unconditional
+/// `BTreeMap::insert`, so re-adding an existing tenant **replaced** its
+/// `TenantState`: the spend ledger reset to zero and the allowlist and Q-Page
+/// activations were replaced, silently, with no return value and no refusal.
+/// An exhausted tenant was refilled by re-provisioning it.
 ///
-/// * the spend ledger is reset to zero and the allowlist/Q-Page activations
-///   are replaced, with no return value, no refusal and no audit record — an
-///   exhausted tenant is refilled by re-provisioning it;
-/// * the **store is keyed independently of the tenant table**, so the new
-///   occupant of the name inherits every cell the old one wrote. Tenant name
-///   reuse is a data hand-over, and nothing in the API can clear the cells.
+/// It now returns `bool` and refuses to overwrite a live tenant, so the first
+/// half is closed and this test pins it shut. The second half is untouched
+/// and is the more interesting one:
+///
+/// * the **store is keyed independently of the tenant table**, so cells
+///   survive anything done to the tenant record. Today the refusal keeps that
+///   latent; the moment a `remove_tenant` is added — and the product needs one,
+///   because refusing to re-provision means there is now *no* tenant-lifecycle
+///   operation at all — name reuse becomes a data hand-over unless removal
+///   clears the cells in the same step;
+/// * no tenant-lifecycle event of any kind is journaled. A refused
+///   re-provisioning is exactly the operator error an audit trail exists to
+///   record, and it leaves no trace.
 #[test]
-fn re_adding_a_tenant_resets_its_budget_and_hands_over_its_memory() {
+fn re_provisioning_is_refused_but_the_store_still_outlives_the_tenant_record() {
     let _guard = serialized();
     let mut d = two_tenant_deployment();
     let alice = actor("memorithm", "alice", AuthStrength::Token);
@@ -1378,18 +1900,21 @@ fn re_adding_a_tenant_resets_its_budget_and_hands_over_its_memory() {
         }),
         Outcome::Forwarded
     );
-    assert_eq!(d.spent("acme"), 900);
+    assert_eq!(d.spent("acme"), Some(900));
     d.put(&scope("acme", "secret"), "ACME CONFIDENTIAL");
 
-    // The only lifecycle lever there is: re-provision the same name.
+    // Re-provisioning the same name is now refused, and says so.
     let mut fresh = TenantState::new(1_000);
     fresh.allow_model("claude-opus");
-    d.add_tenant("acme", fresh);
+    assert!(
+        !d.add_tenant("memorithm", "acme", fresh),
+        "a live tenant is not silently replaced"
+    );
 
     assert_eq!(
         d.spent("acme"),
-        0,
-        "DEFECT: re-provisioning silently zeroes the spend ledger"
+        Some(900),
+        "the spend ledger survived the attempt"
     );
     let req = request("acme", "alice", "memory.recall", "r-refilled");
     assert_eq!(
@@ -1399,13 +1924,14 @@ fn re_adding_a_tenant_resets_its_budget_and_hands_over_its_memory() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
-        }),
-        Outcome::Forwarded,
-        "DEFECT: a full budget is available again immediately"
+        })
+        .refusal(),
+        Some(&Refusal::BudgetExhausted),
+        "the budget cannot be refilled by re-provisioning"
     );
 
-    // Governance was replaced too — the Q-Page activation acme had is gone,
-    // and the refusal arrives at gate 5, before the (now exhausted) budget.
+    // Governance survived too: the Q-Page activation acme had is still there,
+    // so the same call that used to be refused at gate 6 now gets through.
     let req = request("acme", "alice", "memory.recall", "r-variant");
     assert_eq!(
         d.admit(Call {
@@ -1414,26 +1940,38 @@ fn re_adding_a_tenant_resets_its_budget_and_hands_over_its_memory() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: Some(AdvancedQPageVariant::Hierarchical),
-        })
-        .refusal(),
-        Some(&Refusal::VariantNotActivated),
-        "activations are silently dropped by re-provisioning"
+        }),
+        Outcome::Forwarded,
+        "activations are not dropped by a refused re-provisioning"
     );
 
-    // …and the decisive one: the new occupant reads the old one's memory.
+    // A different org cannot take the name either — the refusal is not a
+    // same-org courtesy, it is ownership.
+    let mut hostile = TenantState::new(1_000);
+    hostile.allow_model("claude-opus");
+    assert!(
+        !d.add_tenant("initech", "acme", hostile),
+        "another org cannot seize an existing tenant name"
+    );
+    assert_eq!(d.spent("acme"), Some(900));
+
+    // …and the part that is NOT repaired: the store is keyed independently of
+    // the tenant table, so the cells outlive every decision made about the
+    // tenant record. Nothing in the API can clear them.
     assert_eq!(
         d.get(&scope("acme", "secret")),
         Some("ACME CONFIDENTIAL"),
-        "DEFECT: tenant name reuse hands the previous occupant's cells to the new one"
+        "the store is unaffected by tenant-table operations"
     );
     assert_eq!(d.cells_of("acme").len(), 1);
 
-    // Nothing about the re-provisioning is journaled: the trail holds only
-    // the three `admit` calls.
+    // Nothing about either refused re-provisioning is journaled: the trail
+    // holds only the three `admit` calls.
     assert_eq!(d.audit_of("acme").len(), 3);
     assert!(
         d.audit_of("acme").iter().all(|r| r.tool == "memory.recall"),
-        "there is no audit record shape for a tenant lifecycle event at all"
+        "DEFECT: there is no audit record shape for a tenant lifecycle event at all, \
+         so a refused re-provisioning attempt leaves no trace"
     );
 }
 
@@ -1466,7 +2004,7 @@ fn visually_identical_tenant_names_are_distinct_silent_namespaces() {
     for (i, t) in twins.iter().enumerate() {
         let mut state = TenantState::new(10);
         state.allow_model("claude-opus");
-        d.add_tenant(t, state); // every spelling is accepted
+        d.add_tenant("memorithm", t, state); // every spelling is accepted
         d.put(&scope(t, "memory-root"), &format!("secret of #{i}"));
     }
 
@@ -1510,6 +2048,6 @@ fn visually_identical_tenant_names_are_distinct_silent_namespaces() {
     }
     // Three separate budgets were debited — one per spelling.
     for t in ["acme", "Acme", "\u{0430}cme"] {
-        assert_eq!(d.spent(t), 1, "{t:?} keeps its own books");
+        assert_eq!(d.spent(t), Some(1), "{t:?} keeps its own books");
     }
 }

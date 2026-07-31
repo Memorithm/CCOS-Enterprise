@@ -61,9 +61,10 @@
 //!    Worse than the memory: `allows()` is an O(assignments) scan that a
 //!    denied check cannot short-circuit, so after that one admin burst
 //!    **every** admission decision for the victim walks all 500 000 entries.
-//!    Measured: ~600 ns → ~570 ms per denied check, a ~10^6 slowdown on
-//!    `Deployment::admit`'s hot path, inflicted by an admin call and paid by
-//!    the request path forever.
+//!    Measured per denied check: 319 ns → 80.1 ms in **release**
+//!    (251 130x), 1.96 us → 553 ms in debug. 80 ms of CPU per request caps
+//!    that actor at ~12 requests/second/core — a durable denial of service
+//!    installed by one admin call and paid by the request path forever.
 //!    → [`rolebook_has_no_cap_one_actor_absorbs_half_a_million_roles`]
 //!
 //! 4. **Quadratic memory amplification per admin call.** `assign` stores a
@@ -73,8 +74,8 @@
 //!    400 retain 43 628 376 B — 3.93x for 2x calls, i.e. quadratic, at
 //!    109 070 B *per admin call*. A single 1 MiB role name assigned to 64
 //!    actors retains 69 233 569 B (33x the stored role).
-//!    → [`assignment_storage_is_quadratic_in_admin_calls`],
-//!      [`megabyte_names_are_accepted_and_every_assignment_copies_them_whole`]
+//!    → [`assignment_storage_is_quadratic_in_admin_calls`] and
+//!    [`megabyte_names_are_accepted_and_every_assignment_copies_them_whole`]
 //!
 //! 5. **Grants are deployment-global, not tenant-scoped.** `RoleBook`'s API
 //!    has no `TenantId` anywhere, so one namespace of role names is shared by
@@ -1397,9 +1398,10 @@ fn admission_stays_exact_with_fifty_thousand_roles_and_tools() {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// The exhaustion vector has no ceiling other than the machine's: two million
-/// roles on one actor behave exactly like five hundred thousand. Ignored by
-/// default because it costs minutes and gigabytes, not because it is
-/// speculative.
+/// roles on one actor behave exactly like five hundred thousand. Verified —
+/// 995 809 703 B (~1 GB of process memory) retained from one admin loop, zero
+/// refusals, 10.2 s in release. Ignored by default because of the gigabyte,
+/// not because it is speculative.
 ///
 /// Run it explicitly:
 /// `cargo test -p ccos-enterprise-conformance --test stress_rbac_scale --release -- --ignored --nocapture`

@@ -25,12 +25,12 @@ jobs:
       - name: full gates
         run: |
           cargo fmt --all -- --check
-          cargo clippy --workspace --all-features -- -D warnings
-          cargo test --workspace --all-features --release
+          cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
+          cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
           scripts/check-author-policy.sh main
       - name: Core compatibility matrix (artifact)
         run: |
-          cargo tree --workspace --all-features > core-compat-matrix.txt
+          cargo tree --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features > core-compat-matrix.txt
       - uses: actions/upload-artifact@v4
         with:
           name: release-gates

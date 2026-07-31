@@ -15,17 +15,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Sibling CCOS-Core checkout (dev path dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: Memorithm/CCOS-Core
-          path: .ccos-core-sibling
-      - name: Link the sibling where ../CCOS-Core resolves
-        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@stable
       - name: full workspace tests
-        run: cargo test --workspace --all-features --release
+        run: cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
       - name: author policy over full history
         run: scripts/check-author-policy.sh main
       - name: docs build
-        run: cargo doc --workspace --no-deps --all-features
+        run: cargo doc --workspace --exclude ccos-core --exclude ccos-memory-runtime --no-deps --all-features

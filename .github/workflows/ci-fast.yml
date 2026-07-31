@@ -20,15 +20,6 @@ jobs:
         with:
           fetch-depth: 0
       # The workspace depends on ccos-core by PATH during development
-      # (charter §29) — materialize the sibling checkout the manifest
-      # expects, exactly like a local clone pair.
-      - name: Sibling CCOS-Core checkout (dev path dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: Memorithm/CCOS-Core
-          path: .ccos-core-sibling
-      - name: Link the sibling where ../CCOS-Core resolves
-        run: ln -sfn "$GITHUB_WORKSPACE/.ccos-core-sibling" ../CCOS-Core
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -47,8 +38,21 @@ jobs:
         run: |
           ! grep -RniE 'ccos-rsi|forge-core|ccos-forge|ccos-research-lab|self_improvement|self_modify' \
             --include='Cargo.toml' crates tools Cargo.toml
-          ! cargo tree --workspace --all-features 2>/dev/null | grep -iE 'ccos-rsi|forge|research-lab|scirust|octacore'
+          ! cargo tree --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features 2>/dev/null | grep -iE 'ccos-rsi|forge|research-lab|scirust|octacore|octasoma'
       - run: cargo fmt --all -- --check
-      - run: cargo check --workspace --all-features
-      - run: cargo clippy --workspace --all-features -- -D warnings
-      - run: cargo test --workspace --all-features --release
+      # NOT `--all-features` across the whole workspace. Core is a member now,
+      # and it carries opt-in Pro features of its own — `octasoma` pulls a
+      # premium engine over git. Turning every feature on would build exactly
+      # what §4.2 forbids. Core packages are excluded from *selection*, so they
+      # still build as dependencies with precisely the features Enterprise asks
+      # for (`default-features = false`); only Enterprise's own feature matrix
+      # is swept, which is the one this gate exists to cover.
+      - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
+      - run: cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
+      - run: cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
+      # Excluding Core from the feature sweep must not mean Core stops being
+      # tested — that would trade a boundary risk for a coverage hole. Its own
+      # suite runs at default features, which is what Enterprise ships. This
+      # covers Core and Enterprise in one command, the thing two repositories
+      # could never do.
+      - run: cargo test --workspace

@@ -991,6 +991,7 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
             model,
             cost_tokens: *cost,
             variant: *variant,
+            justification: None,
         });
         assert_eq!(
             std::mem::discriminant(&got),
@@ -1022,6 +1023,7 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
                         model,
                         cost_tokens: *cost,
                         variant: *variant,
+                        justification: None,
                     })
                     .refusal(),
                 Some(&Refusal::TenantNotOwnedByOrg),
@@ -1085,6 +1087,7 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
                 model: "claude-opus",
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             })
             .refusal(),
         Some(&Refusal::UnknownTenant),
@@ -1174,6 +1177,7 @@ fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
                 model: "gpt-5", // globex's own allowlisted model
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             })
             .refusal(),
         Some(&Refusal::TenantNotOwnedByOrg),
@@ -1246,6 +1250,7 @@ fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::UnknownTenant),
@@ -1261,6 +1266,7 @@ fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::BudgetExhausted)
@@ -1572,6 +1578,7 @@ fn refused_calls_fill_a_bounded_journal_and_displace_a_real_tenants_trail() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: None,
+            justification: None,
         });
         assert_eq!(
             outcome,
@@ -1641,6 +1648,7 @@ fn refused_calls_fill_a_bounded_journal_and_displace_a_real_tenants_trail() {
         model: "claude-opus",
         cost_tokens: 42,
         variant: None,
+        justification: None,
     });
     assert_eq!(small.spent("acme"), Some(42));
     assert!(small.audit().any(|r| r.request_id == "the-billed-one"));
@@ -1654,6 +1662,7 @@ fn refused_calls_fill_a_bounded_journal_and_displace_a_real_tenants_trail() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: None,
+            justification: None,
         });
     }
     assert_eq!(small.audit().count(), 4, "the cap holds");
@@ -1797,6 +1806,7 @@ fn the_credential_binds_both_the_actor_and_the_tenants_owning_org() {
                 model: "claude-opus",
                 cost_tokens: 250,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::TenantNotOwnedByOrg),
@@ -1817,6 +1827,7 @@ fn the_credential_binds_both_the_actor_and_the_tenants_owning_org() {
             model: "claude-opus",
             cost_tokens: 250,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ActorMismatch),
@@ -1835,6 +1846,7 @@ fn the_credential_binds_both_the_actor_and_the_tenants_owning_org() {
             model: "claude-opus",
             cost_tokens: 250,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -1897,6 +1909,7 @@ fn re_provisioning_is_refused_but_the_store_still_outlives_the_tenant_record() {
             model: "claude-opus",
             cost_tokens: 900,
             variant: Some(AdvancedQPageVariant::Hierarchical),
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -1924,6 +1937,7 @@ fn re_provisioning_is_refused_but_the_store_still_outlives_the_tenant_record() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::BudgetExhausted),
@@ -1940,6 +1954,7 @@ fn re_provisioning_is_refused_but_the_store_still_outlives_the_tenant_record() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: Some(AdvancedQPageVariant::Hierarchical),
+            justification: None,
         }),
         Outcome::Forwarded,
         "activations are not dropped by a refused re-provisioning"
@@ -1975,16 +1990,29 @@ fn re_provisioning_is_refused_but_the_store_still_outlives_the_tenant_record() {
     );
 }
 
-/// **DEFECT 9.** Tenant identifiers are raw `String`s: `add_tenant` and the
-/// store accept anything, with no canonicalisation, case folding, Unicode
-/// normalisation, confusable-script check or length bound.
+/// **DEFECT 9 — REPAIRED at the provisioning door.**
 ///
-/// Isolation between them **holds** — which is why this test asserts the
-/// isolation *and* the provisioning hazard: five visually identical tenants
-/// coexist silently, and an operator reading a console cannot tell which one
-/// holds the data.
+/// Tenant identifiers were raw `String`s: `add_tenant` accepted anything, with
+/// no canonicalisation, case folding, Unicode normalisation, confusable-script
+/// check or length bound. Ten spellings a human reads as three all became
+/// separate, fully operational tenants with separate budgets, and an operator
+/// reading a console could not tell which one held the data.
+///
+/// `add_tenant` now refuses any id that is not `[a-z0-9_-]`, non-empty and
+/// bounded. The confusables cannot be *provisioned*, so they cannot coexist.
+///
+/// The second reason for the rule is path safety, and it is why this is a
+/// refusal rather than a warning: tenant-scoped storage keyed by name turns
+/// the id into a path component, so `..`, `/` and a NUL are a traversal away
+/// from another tenant's data. Constraining the id makes `<root>/<tenant>`
+/// safe *by construction* instead of depending on every use site remembering
+/// to sanitize. That property is asserted below too.
+///
+/// What is unchanged, and still asserted: the *store* is not the thing that
+/// was fixed. It still keys on whatever `TenantId` it is handed, so isolation
+/// between two ids that do exist continues to hold by construction.
 #[test]
-fn visually_identical_tenant_names_are_distinct_silent_namespaces() {
+fn visually_identical_tenant_names_can_no_longer_be_provisioned() {
     let _guard = serialized();
 
     let twins = [
@@ -2001,39 +2029,33 @@ fn visually_identical_tenant_names_are_distinct_silent_namespaces() {
     ];
 
     let mut d = Deployment::new();
-    for (i, t) in twins.iter().enumerate() {
+    // Only the canonical spelling is provisioned. Every other one is refused,
+    // and the refusal is the *return value* — silent acceptance was the defect.
+    for t in &twins {
         let mut state = TenantState::new(10);
         state.allow_model("claude-opus");
-        d.add_tenant("memorithm", t, state); // every spelling is accepted
-        d.put(&scope(t, "memory-root"), &format!("secret of #{i}"));
-    }
-
-    // Each twin sees exactly its own cell: the isolation invariant holds.
-    for (i, t) in twins.iter().enumerate() {
+        let accepted = d.add_tenant("memorithm", t, state);
         assert_eq!(
-            d.get(&scope(t, "memory-root")),
-            Some(format!("secret of #{i}").as_str()),
-            "{t:?} must see only its own cell"
+            accepted,
+            *t == "acme",
+            "{t:?}: provisioning must succeed only for the canonical spelling"
         );
-        assert_eq!(d.cells_of(t).len(), 1, "{t:?}");
     }
 
-    // …and the hazard: ten tenants that a human reads as three.
-    let distinct: BTreeSet<&str> = twins.iter().copied().collect();
-    assert_eq!(
-        distinct.len(),
-        twins.len(),
-        "every spelling is a separate namespace"
-    );
+    // The confusables are not tenants at all, so there is nothing to confuse.
+    for t in twins.iter().filter(|t| **t != "acme") {
+        assert_eq!(d.spent(t), None, "{t:?} was provisioned after all");
+    }
+    assert_eq!(d.spent("acme"), Some(0));
 
-    // The governed path agrees with the store here: a mis-spelled tenant is
-    // simply a different tenant, not a refusal an operator would notice.
+    // The governed path agrees: a mis-spelled tenant is now an announced
+    // refusal rather than a silently separate namespace.
     let alice = actor("memorithm", "alice", AuthStrength::Token);
     d.add_role("reader", &["memory.read"])
         .govern_tool("memory.recall", "memory.read");
     d.assign("alice", "reader");
-    for t in ["acme", "Acme", "\u{0430}cme"] {
-        let req = request(t, "alice", "memory.recall", "r-twin");
+    for t in ["Acme", "\u{0430}cme", "acme "] {
+        let req = request(t, "alice", "memory.recall", &format!("r-{t}"));
         assert_eq!(
             d.admit(Call {
                 actor: &alice,
@@ -2041,13 +2063,62 @@ fn visually_identical_tenant_names_are_distinct_silent_namespaces() {
                 model: "claude-opus",
                 cost_tokens: 1,
                 variant: None,
-            }),
-            Outcome::Forwarded,
-            "{t:?} is a fully operational tenant"
+                justification: None,
+            })
+            .refusal(),
+            Some(&Refusal::UnknownTenant),
+            "{t:?} must not be a working tenant"
         );
     }
-    // Three separate budgets were debited — one per spelling.
-    for t in ["acme", "Acme", "\u{0430}cme"] {
-        assert_eq!(d.spent(t), Some(1), "{t:?} keeps its own books");
+    let req = request("acme", "alice", "memory.recall", "r-real");
+    assert_eq!(
+        d.admit(Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: None,
+        }),
+        Outcome::Forwarded
+    );
+    assert_eq!(d.spent("acme"), Some(1), "one tenant, one set of books");
+
+    // PATH SAFETY, the second reason for the rule. Every shape that would
+    // escape or confuse a `<root>/<tenant>` directory is refused, so
+    // tenant-scoped storage can key on the id without sanitizing it again.
+    for hostile in [
+        "..",
+        ".",
+        "../etc",
+        "a/b",
+        "a\\b",
+        "a\u{0}b",
+        "-rf",
+        "CON",
+        "a b",
+        "\u{202e}moc.emca",
+    ] {
+        let mut state = TenantState::new(10);
+        state.allow_model("claude-opus");
+        assert!(
+            !d.add_tenant("memorithm", hostile, state),
+            "{hostile:?} was provisioned as a tenant"
+        );
     }
+    // …and the same rule applies to the owning organization, which is compared
+    // against a credential and would otherwise be confusable in the same way.
+    let mut state = TenantState::new(10);
+    state.allow_model("claude-opus");
+    assert!(!d.add_tenant("Memorithm", "fresh", state));
+
+    // The store itself is unchanged and still isolates whatever it is handed:
+    // that half was never the defect.
+    d.put(&scope("acme", "memory-root"), "acme's secret");
+    d.put(&scope("globex", "memory-root"), "globex's secret");
+    assert_eq!(d.get(&scope("acme", "memory-root")), Some("acme's secret"));
+    assert_eq!(
+        d.get(&scope("globex", "memory-root")),
+        Some("globex's secret")
+    );
 }

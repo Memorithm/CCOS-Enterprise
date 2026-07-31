@@ -90,6 +90,7 @@ fn privilege_cannot_be_invented() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::PermissionDenied),
@@ -111,6 +112,7 @@ fn privilege_cannot_be_invented() {
                 model: "claude-opus",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::ActorMismatch),
@@ -159,6 +161,7 @@ fn privilege_cannot_be_invented() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -187,6 +190,7 @@ fn permissions_do_not_widen_by_adjacency() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -200,6 +204,7 @@ fn permissions_do_not_widen_by_adjacency() {
                 model: "claude-opus",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::PermissionDenied),
@@ -222,6 +227,7 @@ fn permissions_do_not_widen_by_adjacency() {
                 model: "claude-opus",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::ActorMismatch),
@@ -249,6 +255,7 @@ fn an_ungoverned_tool_is_refused_not_forwarded() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ToolNotGoverned),
@@ -275,6 +282,7 @@ fn a_refused_call_repeated_forever_costs_nothing() {
             model: "claude-opus",
             cost_tokens: 999_999,
             variant: None,
+            justification: None,
         });
     }
     assert_eq!(d.spent("acme"), Some(0), "500 refusals drained nothing");
@@ -298,6 +306,7 @@ fn a_refused_call_repeated_forever_costs_nothing() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded,
         "the whole budget survived the abuse"
@@ -334,6 +343,7 @@ fn the_budget_boundary_is_exact() {
             model: "m",
             cost_tokens: cost,
             variant: None,
+            justification: None,
         })
     };
 
@@ -395,6 +405,7 @@ fn an_exhausted_tenant_cannot_re_provision_a_fresh_quota() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -419,6 +430,7 @@ fn an_exhausted_tenant_cannot_re_provision_a_fresh_quota() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::BudgetExhausted),
@@ -455,6 +467,7 @@ fn a_foreign_org_cannot_spend_another_orgs_quota() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -470,6 +483,7 @@ fn a_foreign_org_cannot_spend_another_orgs_quota() {
                 model: "claude-opus",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::TenantNotOwnedByOrg),
@@ -524,6 +538,7 @@ fn oversized_or_empty_identifiers_are_refused_before_any_gate() {
                 model: "claude-opus",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::MalformedRequest((*field).to_string())),
@@ -543,6 +558,7 @@ fn oversized_or_empty_identifiers_are_refused_before_any_gate() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::UnknownTenant),
@@ -557,6 +573,7 @@ fn oversized_or_empty_identifiers_are_refused_before_any_gate() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::MalformedRequest("tenant".to_string())),
@@ -600,6 +617,7 @@ fn a_refusal_flood_cannot_grow_the_journal_without_bound() {
                 model: "claude-opus",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::Unauthenticated)
@@ -772,6 +790,7 @@ fn a_call_naming_a_departed_tenant_is_refused() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -787,6 +806,7 @@ fn a_call_naming_a_departed_tenant_is_refused() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::UnknownTenant)

@@ -1321,6 +1321,7 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
             model,
             cost_tokens: (lcg(&mut seed) >> 40) % 64,
             variant,
+            justification: None,
         });
     }
 
@@ -1341,6 +1342,7 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
                 model: "claude-opus",
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             });
         }
     }

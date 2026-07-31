@@ -56,6 +56,7 @@ fn a_governed_call_reaches_core_and_is_billed_once() {
         model: "claude-opus",
         cost_tokens: 120,
         variant: None,
+        justification: None,
     });
 
     assert_eq!(outcome, Outcome::Forwarded);
@@ -225,6 +226,7 @@ fn no_refusal_is_ever_billed() {
             model,
             cost_tokens: cost,
             variant,
+            justification: None,
         });
 
         match (&expected, outcome.refusal()) {
@@ -284,6 +286,7 @@ fn gates_are_evaluated_in_the_documented_order() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal()
         .cloned()
@@ -417,6 +420,7 @@ fn gates_are_evaluated_in_the_documented_order() {
         model: "claude-opus",
         cost_tokens: cost,
         variant: None,
+        justification: None,
     };
     assert_eq!(d.admit(call(600)), Outcome::Forwarded);
     assert_eq!(d.spent("acme"), Some(600));
@@ -447,6 +451,7 @@ fn required_authentication_strength_is_enforced() {
         model: "claude-opus",
         cost_tokens: 10,
         variant: None,
+        justification: None,
     });
     assert_eq!(outcome.refusal(), Some(&Refusal::Unauthenticated));
 
@@ -459,6 +464,7 @@ fn required_authentication_strength_is_enforced() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -480,6 +486,7 @@ fn advanced_variants_are_policy_activated_per_tenant() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: Some(AdvancedQPageVariant::Hierarchical),
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -496,6 +503,7 @@ fn advanced_variants_are_policy_activated_per_tenant() {
         model: "claude-opus",
         cost_tokens: 10,
         variant: Some(AdvancedQPageVariant::Hierarchical),
+        justification: None,
     });
     assert_eq!(outcome.refusal(), Some(&Refusal::VariantNotActivated));
     assert_eq!(d.spent("globex"), Some(0), "and the refusal cost nothing");
@@ -531,6 +539,7 @@ fn the_path_is_deterministic_under_replay() {
                 model,
                 cost_tokens: *cost,
                 variant: None,
+                justification: None,
             });
         }
         let trail = d
@@ -596,6 +605,7 @@ fn every_decision_is_journaled_with_its_outcome() {
             model: "claude-opus",
             cost_tokens: *cost,
             variant: None,
+            justification: None,
         });
     }
 

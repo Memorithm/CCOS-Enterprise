@@ -73,7 +73,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use ccos_enterprise_admin::{is_canonical_action, validate, AdminAction, JUSTIFICATION_REQUIRED};
 use ccos_enterprise_auth::AuthStrength;
-use ccos_enterprise_conformance::{actor, request, two_tenant_deployment, Call};
+use ccos_enterprise_conformance::{actor, request, two_tenant_deployment, Call, Refusal};
 use ccos_enterprise_gateway::{classify, Disposition};
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1158,26 +1158,26 @@ fn the_approval_policy_lists_categories_the_gate_does_not_cover() {
 /// validator; nothing provides the journal, and nothing in the composed
 /// product calls the validator.
 ///
-/// The proof is structural and total:
-/// * `Call` has no justification field, so a justification cannot be supplied
-///   at the only admission point the product has;
-/// * `AuditRecord` has no justification field, so it cannot be recorded;
-/// * `policy.set` — the deployment's one administrative tool, gated by the
-///   `policy.admin` permission — is forwarded and journaled with no "why".
+/// The proof used to be structural and total: `Call` had no justification
+/// field, so a reason could not be supplied at the only admission point the
+/// product has; `AuditRecord` had none, so it could not be recorded; and
+/// `policy.set` — the deployment's one administrative tool — was forwarded and
+/// journaled with no "why". The identical act was refused when expressed as an
+/// `AdminAction` and admitted when expressed as a governed tool call: layer 6
+/// was enforced on the surface nobody called and absent from the one everybody
+/// called.
 ///
-/// So the identical administrative act is refused when expressed as an
-/// `AdminAction` and forwarded when expressed as a governed tool call. Layer 6
-/// is enforced on the surface nobody calls, and absent from the one everybody
-/// calls.
+/// Both fields now exist, `Deployment::require_justification` marks a tool as
+/// an administrative act, and the predicate is
+/// `ccos_enterprise_admin::is_written_justification` itself rather than a
+/// second copy of it — so the two surfaces cannot drift apart on what counts
+/// as a written reason. This test keeps the same act and asserts the opposite
+/// outcome.
 #[test]
-fn the_composed_path_administers_with_no_justification_at_all() {
+fn the_composed_path_now_demands_and_records_a_justification() {
     let mut d = two_tenant_deployment();
-    // `memorithm` is the org that OWNS the `acme` tenant. The credential now
-    // binds the request, so an `acme`-org credential would be refused at the
-    // ownership gate — and that refusal has nothing to do with what this test
-    // pins. The impersonation cases live in `stress_rbac_scale.rs` and
-    // `stress_tenancy_fuzz.rs`; here the caller is deliberately legitimate, so
-    // that the *only* thing missing from the admitted act is the justification.
+    // `memorithm` is the org that OWNS the `acme` tenant, so the caller here
+    // is deliberately legitimate: the only thing under test is the reason.
     let root = actor("memorithm", "root", AuthStrength::Token);
     let req = request("acme", "root", "policy.set", "r-admin-1");
 
@@ -1187,32 +1187,54 @@ fn the_composed_path_administers_with_no_justification_at_all() {
         model: "claude-opus",
         cost_tokens: 1,
         variant: None,
+        justification: None,
     });
-    assert!(
-        outcome.is_forwarded(),
-        "the administrative tool call is admitted: {outcome:?}"
+    assert_eq!(
+        outcome.refusal(),
+        Some(&Refusal::JustificationRequired),
+        "the administrative tool call was admitted with no reason: {outcome:?}"
     );
+    assert_eq!(d.spent("acme"), Some(0), "and it cost the tenant nothing");
 
-    // The journal it leaves behind: correlated, attributed — and silent about
-    // why. There is nowhere for a justification to go.
+    // The attempt is journaled — a refused administrative act is exactly the
+    // event an audit trail exists to keep.
     let trail = d.audit_of("acme");
-    let record = trail.last().expect("the act was journaled");
+    let record = trail.last().expect("the attempt was journaled");
     assert_eq!(record.tool, "policy.set");
     assert_eq!(record.actor, "root");
     assert_eq!(record.request_id, "r-admin-1");
-    let rendered = format!("{record:?}");
-    assert!(
-        !rendered.contains("justification"),
-        "the composed audit record has no justification field: {rendered}"
-    );
+    assert!(!record.outcome.is_forwarded());
 
-    // Meanwhile the same act, named the way the admin crate names it, is
-    // refused for exactly the missing reason.
+    // The two surfaces now agree, which was the whole complaint: the same act
+    // is refused for the same reason whether it is named as an `AdminAction`
+    // or called as a governed tool.
     assert!(!accepted("root", "policy.disable", "acme", None));
 
-    // And a second admission with the same request_id is admitted again — the
-    // administrative path has no idempotency key either, so a replayed
-    // administrative call is journaled twice with the same correlation id.
+    // With a reason, the act goes through and the reason is in the record.
+    let req = request("acme", "root", "policy.set", "r-admin-2");
+    assert!(d
+        .admit(Call {
+            actor: &root,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: Some("closing the gpt-5 allowlist entry, ticket 881"),
+        })
+        .is_forwarded());
+    assert_eq!(
+        d.audit_of("acme")
+            .last()
+            .and_then(|r| r.justification.as_deref()),
+        Some("closing the gpt-5 allowlist entry, ticket 881")
+    );
+
+    // STILL OPEN, and worth keeping separate from the repair above: the
+    // administrative path inherits the *general* replay rule rather than a
+    // stricter one. A replayed administrative `request_id` returns its prior
+    // outcome without re-charging, which is right for billing — but it means a
+    // captured administrative call replays as "forwarded" forever, and nothing
+    // requires a fresh reason for a fresh act.
     let before = d.audit_of("acme").len();
     let again = d.admit(Call {
         actor: &root,
@@ -1220,16 +1242,17 @@ fn the_composed_path_administers_with_no_justification_at_all() {
         model: "claude-opus",
         cost_tokens: 1,
         variant: None,
+        justification: Some("a different reason entirely"),
     });
     assert!(again.is_forwarded());
     assert_eq!(d.audit_of("acme").len(), before + 1);
     assert_eq!(
         d.audit_of("acme")
             .iter()
-            .filter(|r| r.request_id == "r-admin-1")
+            .filter(|r| r.request_id == "r-admin-2")
             .count(),
         2,
-        "the same request_id appears twice — no replay defence"
+        "the same administrative request_id is journaled twice"
     );
 }
 

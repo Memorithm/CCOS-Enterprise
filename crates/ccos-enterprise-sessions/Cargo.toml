@@ -1,0 +1,18 @@
+[package]
+name = "ccos-enterprise-sessions"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "One CCOS Core session per tenant: the backend the governed MCP front door dispatches into, with the isolation the front door can verify but not enforce."
+
+[dependencies]
+ccos-enterprise-mcp = { path = "../ccos-enterprise-mcp" }
+ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }
+ccos-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+ccos-enterprise-auth = { path = "../ccos-enterprise-auth" }

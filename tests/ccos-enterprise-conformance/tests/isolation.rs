@@ -94,6 +94,7 @@ fn exhausting_one_tenants_budget_leaves_the_other_untouched() {
             model: "claude-opus",
             cost_tokens: 1_000,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -105,6 +106,7 @@ fn exhausting_one_tenants_budget_leaves_the_other_untouched() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::BudgetExhausted)
@@ -119,6 +121,7 @@ fn exhausting_one_tenants_budget_leaves_the_other_untouched() {
             model: "claude-opus",
             cost_tokens: 400,
             variant: None,
+            justification: None,
         }),
         Outcome::Forwarded
     );
@@ -142,6 +145,7 @@ fn model_allowlists_do_not_leak_between_tenants() {
             model: "gpt-5",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ModelNotAllowed)
@@ -154,6 +158,7 @@ fn model_allowlists_do_not_leak_between_tenants() {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ModelNotAllowed)
@@ -198,6 +203,7 @@ fn concurrent_tenants_do_not_contaminate_each_other() {
                         model: "claude-opus",
                         cost_tokens: COST,
                         variant: None,
+                        justification: None,
                     });
                     assert_eq!(outcome, Outcome::Forwarded, "tenant-{i} call {c}");
                 }

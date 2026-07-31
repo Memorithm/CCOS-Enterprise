@@ -1075,6 +1075,7 @@ fn restore_gate_never_consults_the_tenant_and_is_outside_the_governed_path() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: None,
+            justification: None,
         });
         match outcome.refusal() {
             Some(Refusal::OutsideBoundary(why)) => {
@@ -1484,6 +1485,7 @@ fn no_deployment_state_can_influence_a_restore_verdict() {
             model: "claude-opus",
             cost_tokens: 100,
             variant: None,
+            justification: None,
         });
     }
     assert_eq!(d.spent("acme"), Some(1_000), "budget exhausted");

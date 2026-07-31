@@ -571,6 +571,7 @@ fn tag_of(r: &Refusal) -> &'static str {
         Refusal::ModelNotAllowed => "model_not_allowed",
         Refusal::VariantNotActivated => "variant_not_activated",
         Refusal::BudgetExhausted => "budget_exhausted",
+        Refusal::JustificationRequired => "justification_required",
     }
 }
 
@@ -888,6 +889,7 @@ fn endurance_two_hundred_thousand_admissions_across_fifty_tenants() {
             model: MODELS[step.model],
             cost_tokens: step.cost,
             variant,
+            justification: None,
         });
         let out_b = b.admit(Call {
             actor: &principals[step.principal],
@@ -895,6 +897,7 @@ fn endurance_two_hundred_thousand_admissions_across_fifty_tenants() {
             model: MODELS[step.model],
             cost_tokens: step.cost,
             variant,
+            justification: None,
         });
         assert_eq!(
             out_a, out_b,
@@ -1181,6 +1184,7 @@ fn unauthenticated_flood_is_bounded_by_the_audit_capacity() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: None,
+            justification: None,
         });
         // Identity is still evaluated first, before the credential binding:
         // this caller is *also* in an org that owns no tenant here, and never
@@ -1313,6 +1317,7 @@ fn unauthenticated_flood_is_bounded_by_the_audit_capacity() {
             model: "claude-opus",
             cost_tokens: 25,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::TenantNotOwnedByOrg),
@@ -1327,6 +1332,7 @@ fn unauthenticated_flood_is_bounded_by_the_audit_capacity() {
             model: "claude-opus",
             cost_tokens: 25,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::ActorMismatch),
@@ -1403,6 +1409,7 @@ fn attacker_sized_names_no_longer_size_the_audit_record() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: None,
+            justification: None,
         });
         assert!(matches!(out, Outcome::Refused(Refusal::Unauthenticated)));
     }
@@ -1447,6 +1454,7 @@ fn attacker_sized_names_no_longer_size_the_audit_record() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: None,
+            justification: None,
         });
         let Some(Refusal::OutsideBoundary(why)) = out.refusal() else {
             panic!("call {i}: expected a boundary refusal");
@@ -1512,6 +1520,7 @@ fn attacker_sized_names_no_longer_size_the_audit_record() {
         model: "claude-opus",
         cost_tokens: 0,
         variant: None,
+        justification: None,
     });
     let Some(Refusal::OutsideBoundary(why)) = out.refusal() else {
         panic!("a 256-byte `shell.` name must still be a boundary refusal");
@@ -1582,6 +1591,7 @@ fn audit_records_carry_cost_and_sequence_but_still_no_timestamp() {
             model: "claude-opus",
             cost_tokens: 3,
             variant: None,
+            justification: None,
         });
         assert!(out.is_forwarded(), "call {i} should be admitted");
     }
@@ -1671,6 +1681,7 @@ fn audit_of_scans_the_whole_trail_and_allocates_per_match() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         });
     }
     assert_eq!(d.audit_of(&names[1]).len(), 8);
@@ -1686,6 +1697,7 @@ fn audit_of_scans_the_whole_trail_and_allocates_per_match() {
             model: "claude-opus",
             cost_tokens: 0,
             variant: None,
+            justification: None,
         });
     }
     assert_eq!(d.audit().count(), DEFAULT_AUDIT_CAPACITY);
@@ -1734,6 +1746,7 @@ fn audit_of_scans_the_whole_trail_and_allocates_per_match() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         });
     }
     let started = Instant::now();
@@ -1791,6 +1804,7 @@ fn a_replayed_request_id_is_charged_exactly_once() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         });
         admitted += u64::from(out.is_forwarded());
     }
@@ -1817,6 +1831,7 @@ fn a_replayed_request_id_is_charged_exactly_once() {
             model: "claude-opus",
             cost_tokens: 5,
             variant: None,
+            justification: None,
         });
         admitted_thin += u64::from(out.is_forwarded());
     }
@@ -1921,6 +1936,7 @@ fn unlimited_budget_stops_summing_admitted_costs() {
             model: "claude-opus",
             cost_tokens: cost,
             variant: None,
+            justification: None,
         });
         assert!(out.is_forwarded(), "an unlimited budget admits everything");
         admitted_sum += u128::from(cost);
@@ -2022,6 +2038,7 @@ fn endurance_five_million_admissions() {
             model: MODELS[step.model],
             cost_tokens: step.cost,
             variant,
+            justification: None,
         });
         if let Some(b) = mirror.as_mut() {
             let out_b = b.admit(Call {
@@ -2030,6 +2047,7 @@ fn endurance_five_million_admissions() {
                 model: MODELS[step.model],
                 cost_tokens: step.cost,
                 variant,
+                justification: None,
             });
             assert_eq!(out, out_b, "call {seq}: the mirror deployment diverged");
         }

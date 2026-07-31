@@ -31,9 +31,6 @@
 //! rather than implied: a `Backend` that ignores its tenant argument is
 //! unsound, and no type here can stop it.
 
-use ccos_enterprise_auth::AuthenticatedActor;
-use ccos_enterprise_gateway::GatewayRequest;
-use ccos_enterprise_qpages::AdvancedQPageVariant;
 use ccos_enterprise_runtime::{Call, Deployment, Outcome, Refusal};
 
 use crate::{governed_names, to_core, Disposition, CATALOGUE};
@@ -111,6 +108,13 @@ impl<B: Backend> GovernedMcp<B> {
         &self.backend
     }
 
+    /// The backend, mutably — for lifecycle calls a deployment owns, such as
+    /// checkpointing sessions on a clean shutdown. Not a governance surface:
+    /// nothing reached through here goes past `admit`.
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+
     /// The `tools/list` answer: Enterprise names only.
     ///
     /// Note what is absent — Core's bare names, and the one excluded tool. A
@@ -139,33 +143,28 @@ impl<B: Backend> GovernedMcp<B> {
     /// `request.tool` is an **Enterprise** name. It is translated only after
     /// the call is admitted, so a caller cannot reach a Core tool by naming it
     /// directly: `recall` is not in the catalogue, `memory.recall` is.
-    pub fn call(
-        &mut self,
-        actor: &AuthenticatedActor,
-        request: &GatewayRequest,
-        model: &str,
-        cost_tokens: u64,
-        variant: Option<AdvancedQPageVariant>,
-        arguments: &serde_json::Value,
-    ) -> McpOutcome {
+    ///
+    /// The call is the runtime's own [`Call`], not a re-exploded copy of its
+    /// fields: one shape for "a call" across the product, and a front door
+    /// that cannot silently drop something the admission path reads. That
+    /// includes `justification` — none of Core's 16 tools is administrative
+    /// today, but a front door unable to carry a reason would make layer 6
+    /// unreachable through the only surface clients use.
+    pub fn call(&mut self, call: Call<'_>, arguments: &serde_json::Value) -> McpOutcome {
+        let tool = call.request.tool.clone();
+        let tenant = call.request.tenant.clone();
         // The catalogue check is deliberately *after* nothing and *before*
         // admission only in the sense that an unknown name has no Core tool to
         // run. It does not short-circuit governance: an unknown name is still
         // journaled, because "who asked for what" is the question an audit
         // trail exists to answer, and a probe for capabilities that do not
         // exist is exactly the traffic worth keeping.
-        let outcome = self.deployment.admit(Call {
-            actor,
-            request,
-            model,
-            cost_tokens,
-            variant,
-        });
+        let outcome = self.deployment.admit(call);
         if let Outcome::Refused(r) = outcome {
             return McpOutcome::Refused(r);
         }
 
-        let Some(core_tool) = to_core(&request.tool) else {
+        let Some(core_tool) = to_core(&tool) else {
             // Admitted by governance, but not in the table. Reachable only if
             // a deployment governs a tool this crate does not translate, which
             // `the_governance_map_covers_every_advertised_capability` and the
@@ -173,7 +172,7 @@ impl<B: Backend> GovernedMcp<B> {
             return McpOutcome::UnknownTool;
         };
 
-        match self.backend.dispatch(&request.tenant, core_tool, arguments) {
+        match self.backend.dispatch(&tenant, core_tool, arguments) {
             Ok(value) => McpOutcome::Ok(value),
             Err(e) => McpOutcome::BackendError(e),
         }
@@ -197,6 +196,8 @@ pub fn govern_catalogue(deployment: &mut Deployment) {
 mod tests {
     use super::*;
     use ccos_enterprise_auth::AuthStrength;
+    use ccos_enterprise_auth::AuthenticatedActor;
+    use ccos_enterprise_gateway::GatewayRequest;
     use ccos_enterprise_runtime::{actor, request, TenantState};
     use serde_json::json;
 
@@ -265,7 +266,17 @@ mod tests {
         let mut mcp = front_door();
         let a = actor("memorithm", "alice", AuthStrength::Token);
         let req = request("acme", "alice", "memory.recall", "r-1");
-        let out = mcp.call(&a, &req, "claude-opus", 10, None, &json!({}));
+        let out = mcp.call(
+            Call {
+                actor: &a,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: None,
+            },
+            &json!({}),
+        );
         assert!(matches!(out, McpOutcome::Ok(_)), "{out:?}");
         assert_eq!(
             mcp.backend().calls,
@@ -344,7 +355,17 @@ mod tests {
         ];
 
         for (a, req, model, expected) in &cases {
-            let out = mcp.call(a, req, model, 10, None, &json!({}));
+            let out = mcp.call(
+                Call {
+                    actor: a,
+                    request: req,
+                    model,
+                    cost_tokens: 10,
+                    variant: None,
+                    justification: None,
+                },
+                &json!({}),
+            );
             let McpOutcome::Refused(actual) = &out else {
                 panic!("{:?} was not refused: {out:?}", req.request_id);
             };
@@ -379,7 +400,17 @@ mod tests {
         // dot, so the gateway's canonical grammar refuses them outright.
         for bare in ["recall", "ingest", "page_fault", "octa_feedback"] {
             let req = request("acme", "alice", bare, &format!("r-{bare}"));
-            let out = mcp.call(&a, &req, "claude-opus", 1, None, &json!({}));
+            let out = mcp.call(
+                Call {
+                    actor: &a,
+                    request: &req,
+                    model: "claude-opus",
+                    cost_tokens: 1,
+                    variant: None,
+                    justification: None,
+                },
+                &json!({}),
+            );
             assert!(
                 matches!(out, McpOutcome::Refused(_)),
                 "{bare} was not refused: {out:?}"
@@ -399,7 +430,17 @@ mod tests {
         );
         let a = actor("memorithm", "alice", AuthStrength::Token);
         let req = request("acme", "alice", "memory.recall", "r-fault");
-        let out = mcp.call(&a, &req, "claude-opus", 10, None, &json!({}));
+        let out = mcp.call(
+            Call {
+                actor: &a,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: None,
+            },
+            &json!({}),
+        );
         assert_eq!(out, McpOutcome::BackendError("core said no".into()));
         assert!(
             out.reached_the_backend(),
@@ -416,7 +457,17 @@ mod tests {
         let a = actor("memorithm", "alice", AuthStrength::Token);
         for tenant in ["acme", "globex", "acme"] {
             let req = request(tenant, "alice", "memory.recall", &format!("r-{tenant}-x"));
-            let _ = mcp.call(&a, &req, "claude-opus", 1, None, &json!({}));
+            let _ = mcp.call(
+                Call {
+                    actor: &a,
+                    request: &req,
+                    model: "claude-opus",
+                    cost_tokens: 1,
+                    variant: None,
+                    justification: None,
+                },
+                &json!({}),
+            );
         }
         let tenants: Vec<&str> = mcp
             .backend()
@@ -436,7 +487,17 @@ mod tests {
         let a = actor("memorithm", "alice", AuthStrength::Token);
         for (i, tool) in mcp.list_tools().iter().map(|t| t.name).enumerate() {
             let req = request("acme", "alice", tool, &format!("r-{i}"));
-            let out = mcp.call(&a, &req, "claude-opus", 1, None, &json!({}));
+            let out = mcp.call(
+                Call {
+                    actor: &a,
+                    request: &req,
+                    model: "claude-opus",
+                    cost_tokens: 1,
+                    variant: None,
+                    justification: None,
+                },
+                &json!({}),
+            );
             assert!(
                 matches!(out, McpOutcome::Ok(_)),
                 "advertised {tool} was not callable: {out:?}"

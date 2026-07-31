@@ -297,7 +297,7 @@ impl Drop for Watchdog {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const THREADS: usize = 32;
-const PINNED_KINDS: usize = 13;
+const PINNED_KINDS: usize = 14;
 
 /// The organization that owns every tenant in this file's fixtures. A
 /// credential's org must own the tenant its request names, so the fixture has
@@ -410,7 +410,8 @@ fn storm_deployment(cfg: &StormConfig) -> Deployment {
         .govern_tool("memory.recall", "memory.read")
         .govern_tool("memory.ingest", "memory.write")
         .govern_tool("policy.set", "policy.admin")
-        .govern_tool("audit.query", "memory.read");
+        .govern_tool("audit.query", "memory.read")
+        .require_justification("policy.set");
 
     for (name, limit) in cfg.tenants() {
         let mut st = TenantState::new(limit);
@@ -426,6 +427,9 @@ fn storm_deployment(cfg: &StormConfig) -> Deployment {
         // nothing else. Cross-tenant contamination is then a string prefix
         // away from being visible.
         assert!(d.assign(&format!("{name}/alice"), "writer"));
+        // One operator per tenant, so the administrative probe is refused for
+        // the *reason* it targets rather than on permission.
+        assert!(d.assign(&format!("{name}/root"), "operator"));
     }
     d
 }
@@ -451,6 +455,7 @@ enum Kind {
     ModelNotAllowed,
     VariantNotActivated,
     BudgetExhausted,
+    JustificationRequired,
 }
 
 /// Every refusal the composed path can produce. Kept exhaustive on purpose: a
@@ -469,6 +474,7 @@ const ALL_KINDS: &[Kind] = &[
     Kind::ModelNotAllowed,
     Kind::VariantNotActivated,
     Kind::BudgetExhausted,
+    Kind::JustificationRequired,
 ];
 
 fn kind_of(o: &Outcome) -> Kind {
@@ -485,6 +491,7 @@ fn kind_of(o: &Outcome) -> Kind {
         Outcome::Refused(Refusal::ModelNotAllowed) => Kind::ModelNotAllowed,
         Outcome::Refused(Refusal::VariantNotActivated) => Kind::VariantNotActivated,
         Outcome::Refused(Refusal::BudgetExhausted) => Kind::BudgetExhausted,
+        Outcome::Refused(Refusal::JustificationRequired) => Kind::JustificationRequired,
     }
 }
 
@@ -503,6 +510,8 @@ struct AdmitOp {
     cost: u64,
     variant: Option<AdvancedQPageVariant>,
     strength: AuthStrength,
+    /// The reason, for the administrative probe. `None` everywhere else.
+    justification: Option<String>,
     request_id: String,
     pinned: Option<Kind>,
 }
@@ -556,6 +565,7 @@ fn pinned_probe(home: &str, which: usize) -> AdmitOp {
         cost: 1,
         variant: None,
         strength: AuthStrength::Token,
+        justification: None,
         request_id: String::new(), // filled in after the shuffle
         pinned: None,
     };
@@ -621,6 +631,18 @@ fn pinned_probe(home: &str, which: usize) -> AdmitOp {
             pinned: Some(Kind::TenantNotOwnedByOrg),
             ..base(home, "alice")
         },
+        // An administrative act by a caller who genuinely holds `policy.admin`,
+        // carrying no reason. Entitlement is deliberate: the refusal must come
+        // from the justification gate, not from permission, or the probe would
+        // be testing the wrong thing.
+        12 => AdmitOp {
+            actor: format!("{home}/root"),
+            cred_actor: format!("{home}/root"),
+            tool: "policy.set".to_string(),
+            cost: 0,
+            pinned: Some(Kind::JustificationRequired),
+            ..base(home, "alice")
+        },
         // An identifier that no record should ever have to carry verbatim.
         // Kept under the tenant's own prefix so the *journalled* (clamped)
         // actor is still visibly the tenant's, which is what invariant 3 reads.
@@ -664,6 +686,7 @@ fn chaos_op(rng: &mut Rng, tid: usize, home: &str, k: usize) -> Op {
             } else {
                 AuthStrength::Strong
             },
+            justification: None,
             request_id: String::new(),
             pinned: None,
         }),
@@ -776,6 +799,7 @@ fn run_thread(deployment: &Mutex<Deployment>, ops: &[Op], start: &Barrier) -> Th
                     model: &a.model,
                     cost_tokens: a.cost,
                     variant: a.variant,
+                    justification: a.justification.as_deref(),
                 });
                 if let Some(expected) = a.pinned {
                     let got = kind_of(&outcome);
@@ -1074,7 +1098,7 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
     assert_eq!(tag_total, m("gateway.refused"), "the tags sum to the total");
     assert_eq!(
         metrics.len(),
-        3 + 11,
+        3 + 12,
         "requests/forwarded/refused plus one series per refusal kind, and \
          nothing attacker-shaped: {:?}",
         metrics.keys().collect::<Vec<_>>()
@@ -1592,6 +1616,7 @@ fn budget_race_admits_exactly_the_limit_and_never_overdrafts() {
                         model: BASE_MODEL,
                         cost_tokens: 1,
                         variant: None,
+                        justification: None,
                     });
                 }
             });
@@ -1664,6 +1689,7 @@ fn two_interleavings_produce_two_journals_that_each_replay_exactly() {
                         model: BASE_MODEL,
                         cost_tokens: 1,
                         variant: None,
+                        justification: None,
                     };
                     if goes_first {
                         guard(&d).admit(call());
@@ -1694,6 +1720,7 @@ fn two_interleavings_produce_two_journals_that_each_replay_exactly() {
                 model: BASE_MODEL,
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             });
         }
         (journal_of(&d), d.spent("acme"))
@@ -1780,6 +1807,7 @@ fn identical_concurrent_calls_are_ordered_and_billed_exactly_once() {
                     model: BASE_MODEL,
                     cost_tokens: 1,
                     variant: None,
+                    justification: None,
                 });
             });
         }
@@ -1852,6 +1880,7 @@ fn a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explai
                 model: "smuggled-model",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             })
         };
         gate.wait();
@@ -1864,6 +1893,7 @@ fn a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explai
                 model: "smuggled-model",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             })
         };
         assert_eq!(before.refusal(), Some(&Refusal::ModelNotAllowed));
@@ -1926,6 +1956,7 @@ fn ledger_and_journal_tear_when_read_in_separate_lock_acquisitions() {
                 model: BASE_MODEL,
                 cost_tokens: 100,
                 variant: None,
+                justification: None,
             });
             assert_eq!(out, Outcome::Forwarded);
             traffic_gate.wait(); // …now let the operator read the journal
@@ -1986,6 +2017,7 @@ fn one_panic_under_the_global_lock_denies_service_to_every_tenant() {
                 model: "claude-opus",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             }),
             Outcome::Forwarded
         );
@@ -2051,6 +2083,7 @@ fn audit_of_a_silent_tenant_walks_the_whole_global_trail() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         });
     }
     assert_eq!(
@@ -2110,6 +2143,7 @@ fn the_audit_buffer_is_bounded_under_contention_and_says_what_it_dropped() {
                         model: BASE_MODEL,
                         cost_tokens: 1,
                         variant: None,
+                        justification: None,
                     });
                 }
             });

@@ -24,10 +24,13 @@
 //! 4. **namespace boundary** — *before* every tenant-configurable gate,
 //!    because no tenant's roles, allowlists or budgets may ever widen it;
 //! 5. **authorization** — deny by default, ungoverned tools included;
-//! 6. **model governance**, then **Q-Page activation**;
-//! 7. **replay** — a `request_id` already decided returns its prior outcome
+//! 6. **justification** — an administrative act needs a reason a human can
+//!    read. After authorization on purpose: refusing earlier would tell an
+//!    unauthorized prober which tools are sensitive;
+//! 7. **model governance**, then **Q-Page activation**;
+//! 8. **replay** — a `request_id` already decided returns its prior outcome
 //!    rather than being billed twice;
-//! 8. **budget** — charged **last**, so a call refused for any other reason
+//! 9. **budget** — charged **last**, so a call refused for any other reason
 //!    costs the tenant nothing.
 //!
 //! Both ordering choices are load-bearing and pinned by tests: the boundary is
@@ -47,6 +50,22 @@
 //! ([`Refusal::TenantNotOwnedByOrg`]). That second rule is what [`OrgId`] is
 //! for; before this crate it was carried on every credential and read by
 //! nothing.
+//!
+//! ## Layer 6, and where it lives
+//!
+//! `docs/ENTERPRISE_SECURITY_MODEL.md` calls layer 6 "administrative acts
+//! validated and journaled with justification". `ccos_enterprise_admin`
+//! implemented the rule — for an `AdminAction` type nothing in the product
+//! constructed — while this path forwarded and journaled the deployment's one
+//! administrative tool with no "why" at all. The layer was enforced on a
+//! surface nobody called and absent from the one everybody called.
+//!
+//! [`Deployment::require_justification`] marks a governed tool as an
+//! administrative act. The predicate is
+//! `ccos_enterprise_admin::is_written_justification` **itself**, not a copy:
+//! the workspace already carries one duplicated predicate that agrees only by
+//! luck, and the rule deciding whether a privileged act is recorded is not the
+//! place for a second.
 //!
 //! ## What this crate bounds, and what it does not
 //!
@@ -74,6 +93,43 @@ use ccos_enterprise_tenancy::{TenantId, TenantScope};
 /// these, and an unauthenticated caller could make every audit record a
 /// megabyte wide.
 pub const MAX_IDENTIFIER_BYTES: usize = 128;
+
+/// Whether an organization or tenant identifier is one this product will
+/// provision: non-empty, at most [`MAX_IDENTIFIER_BYTES`], and made only of
+/// ASCII `[a-z0-9_-]`.
+///
+/// Two separate reasons, and the second is why this is a refusal at
+/// provisioning time rather than a warning:
+///
+/// * **Confusables.** Raw `String` ids let `acme`, `Acme`, `ACME`, `"acme "`,
+///   `acme\u{200b}`, `\u{430}cme` (Cyrillic а) and the NFC/NFD spellings of an
+///   accented name all coexist as distinct tenants that render identically.
+///   An operator reading a console cannot tell which one holds the data, and
+///   a support request naming "acme" is unanswerable.
+/// * **Path safety.** Any tenant-scoped storage keyed by name — Core sessions,
+///   backups, exports — turns the id into a path component. `..`, `/`, a NUL
+///   or a leading `-` are then a traversal or an argument-injection away from
+///   another tenant's data. Constraining the id makes `<root>/<tenant>` safe
+///   *by construction*, which is a much better property than remembering to
+///   sanitize at every use site.
+///
+/// Hyphens are allowed because real tenant names use them (`victim-corp`,
+/// `t-00`); dots are not, so no id can be `.` or `..`.
+pub fn is_canonical_identifier(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    // The first byte must be alphanumeric. A leading `-` reads as a flag to
+    // anything that ever passes the id to a command line, and a leading `_`
+    // is the conventional hidden-file prefix; neither is worth the ambiguity
+    // when no real tenant name needs one.
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return false;
+    }
+    id.len() <= MAX_IDENTIFIER_BYTES
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
 
 /// Default ceiling on the in-memory audit buffer. See the module docs: this
 /// bounds memory, it does not substitute for durable storage.
@@ -109,6 +165,9 @@ pub enum Refusal {
     VariantNotActivated,
     /// The call would exceed the tenant's token budget.
     BudgetExhausted,
+    /// The tool is an administrative act and the call carried no legible
+    /// reason. See [`Deployment::require_justification`].
+    JustificationRequired,
 }
 
 /// The outcome of one admission decision, as journaled.
@@ -149,6 +208,13 @@ pub struct AuditRecord {
     pub tool: String,
     /// Tokens actually charged. Always `0` for a refusal.
     pub cost: u64,
+    /// The reason the caller gave, for an act that needed one.
+    ///
+    /// `None` for the overwhelming majority of traffic, which is not
+    /// administrative. When the tool *is* administrative this is `Some` on
+    /// every forwarded record, because the call could not have been admitted
+    /// otherwise — which is the whole point of the field.
+    pub justification: Option<String>,
     pub outcome: Outcome,
 }
 
@@ -203,6 +269,13 @@ pub struct Call<'a> {
     /// Set when the call needs an advanced Q-Page variant; `None` uses only
     /// Core's standard primitives, which every tenant has.
     pub variant: Option<AdvancedQPageVariant>,
+    /// Why the caller is performing an administrative act.
+    ///
+    /// Required — and required to be *legible* — for any tool the deployment
+    /// has marked with [`Deployment::require_justification`]. Ignored for
+    /// every other tool, and journaled either way when present, so a reason
+    /// offered voluntarily is still recorded.
+    pub justification: Option<&'a str>,
 }
 
 /// `TenantScope`'s key form: the tenant is part of every key, so there is no
@@ -219,6 +292,9 @@ pub struct Deployment {
     /// tool → the permission it requires. A tool absent from this map is
     /// refused: governance is opt-in, exposure is not.
     governed_tools: BTreeMap<String, Permission>,
+    /// Tools that are administrative acts: admitted only with a legible
+    /// reason, which is then journaled with the decision.
+    justification_required: BTreeSet<String>,
     /// Tenant-scoped storage, standing in for Core's memory roots.
     store: BTreeMap<TenantScopeKey, String>,
     metrics: CounterRegistry,
@@ -248,6 +324,7 @@ impl Deployment {
             tenant_owner: BTreeMap::new(),
             roles: RoleBook::default(),
             governed_tools: BTreeMap::new(),
+            justification_required: BTreeSet::new(),
             store: BTreeMap::new(),
             metrics: CounterRegistry::default(),
             audit: VecDeque::new(),
@@ -282,6 +359,12 @@ impl Deployment {
     /// allowlist and activations while the journal still showed its forwarded
     /// calls. Returns `false` and changes nothing when the tenant exists.
     pub fn add_tenant(&mut self, org: &str, tenant: &str, state: TenantState) -> bool {
+        // Refused before anything is inserted: an id that cannot be rendered
+        // unambiguously, or safely turned into a path component, is not a
+        // tenant this product will carry. See [`is_canonical_identifier`].
+        if !is_canonical_identifier(org) || !is_canonical_identifier(tenant) {
+            return false;
+        }
         let id = TenantId(tenant.to_string());
         if self.tenants.contains_key(&id) {
             return false;
@@ -295,6 +378,16 @@ impl Deployment {
         self.tenants.get_mut(&TenantId(tenant.to_string()))
     }
 
+    /// Define a role. **Provisioning only**: a name already taken is left
+    /// exactly as it was.
+    ///
+    /// The no-op on a duplicate is deliberate and worth defending. This is a
+    /// builder used at construction time, where a repeated name is a
+    /// programmer error; the previous behaviour made that error a *silent mass
+    /// privilege change* affecting every holder. First-definition-wins turns
+    /// the same mistake into a safe one. Changing a live role is
+    /// [`redefine_role`](Self::redefine_role), which says so and reports what
+    /// it hit.
     pub fn add_role(&mut self, name: &str, permissions: &[&str]) -> &mut Self {
         let mut role = Role {
             name: name.to_string(),
@@ -309,11 +402,73 @@ impl Deployment {
 
     /// Assign a role. Returns false (and grants nothing) for unknown roles —
     /// the RBAC crate's fail-closed rule, surfaced here.
+    /// Replace a live role's permission set, affecting every holder at once.
+    /// Returns whether a role of that name existed.
+    ///
+    /// Separate from [`add_role`](Self::add_role) so that a mass privilege
+    /// change cannot be reached by a typo. It is still **unjournaled**: role
+    /// mutation has no audit shape, which is a defect this method makes
+    /// visible rather than fixes — see `stress_rbac_scale`.
+    pub fn redefine_role(&mut self, name: &str, permissions: &[&str]) -> bool {
+        let mut role = Role {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        for p in permissions {
+            role.permissions.insert(Permission(p.to_string()));
+        }
+        self.roles.redefine_role(role)
+    }
+
+    /// Remove a role and every grant of it. Returns whether it existed.
+    pub fn remove_role(&mut self, name: &str) -> bool {
+        self.roles.remove_role(name)
+    }
+
+    /// Withdraw one role from one actor. Returns whether the grant existed.
+    pub fn unassign(&mut self, actor: &str, role: &str) -> bool {
+        self.roles.unassign(actor, role)
+    }
+
+    /// De-provision a principal entirely. Returns whether it held anything.
+    pub fn remove_actor(&mut self, actor: &str) -> bool {
+        self.roles.remove_actor(actor)
+    }
+
+    /// The roles an actor holds, in name order.
+    pub fn roles_of(&self, actor: &str) -> Vec<&str> {
+        self.roles.roles_of(actor)
+    }
+
     pub fn assign(&mut self, actor: &str, role: &str) -> bool {
         self.roles.assign(actor, role)
     }
 
     /// Declare which permission a tool requires. Undeclared tools are refused.
+    /// Mark a governed tool as an **administrative act**: it is admitted only
+    /// when the call carries a reason a human could read, and that reason is
+    /// journaled with the decision.
+    ///
+    /// This is layer 6 of `docs/ENTERPRISE_SECURITY_MODEL.md` — "administrative
+    /// acts validated and journaled with justification" — reaching the composed
+    /// path at last. `ccos_enterprise_admin::validate` implemented the rule for
+    /// an `AdminAction` type nothing in the product constructed; meanwhile the
+    /// deployment's one administrative tool was forwarded and journaled with no
+    /// "why" at all. The layer was enforced on a surface nobody called and
+    /// absent from the one everybody called.
+    ///
+    /// The predicate is `ccos_enterprise_admin::is_written_justification`, not
+    /// a copy of it: there is one definition of "legible" in the product.
+    pub fn require_justification(&mut self, tool: &str) -> &mut Self {
+        self.justification_required.insert(tool.to_string());
+        self
+    }
+
+    /// Whether a tool is an administrative act in this deployment.
+    pub fn requires_justification(&self, tool: &str) -> bool {
+        self.justification_required.contains(tool)
+    }
+
     pub fn govern_tool(&mut self, tool: &str, permission: &str) -> &mut Self {
         self.governed_tools
             .insert(tool.to_string(), Permission(permission.to_string()));
@@ -396,6 +551,10 @@ impl Deployment {
             actor: clamp(&call.request.actor),
             tool: clamp(&call.request.tool),
             cost,
+            // Recorded whenever offered, not only when demanded: a reason
+            // given voluntarily is still evidence, and dropping it would make
+            // the trail depend on configuration rather than on what happened.
+            justification: call.justification.map(clamp),
             outcome: outcome.clone(),
         });
     }
@@ -447,6 +606,19 @@ impl Deployment {
         };
         if !self.roles.allows(&call.actor.actor.0, permission) {
             return refuse(Refusal::PermissionDenied);
+        }
+
+        // 5b. Administrative acts need a recorded reason.
+        //
+        // Placed *after* authorization on purpose: "this act needs a reason" is
+        // only a meaningful answer to a caller who is entitled to perform it,
+        // and refusing earlier would tell an unauthorized prober which tools
+        // are sensitive. Placed *before* the budget, like every other refusal,
+        // so a missing reason costs the tenant nothing.
+        if self.justification_required.contains(&call.request.tool)
+            && !ccos_enterprise_admin::is_written_justification(call.justification)
+        {
+            return refuse(Refusal::JustificationRequired);
         }
 
         // 6. Model governance, then Q-Page activation.
@@ -557,6 +729,7 @@ fn tag(r: &Refusal) -> &'static str {
         Refusal::ModelNotAllowed => "model_not_allowed",
         Refusal::VariantNotActivated => "variant_not_activated",
         Refusal::BudgetExhausted => "budget_exhausted",
+        Refusal::JustificationRequired => "justification_required",
     }
 }
 
@@ -600,6 +773,10 @@ pub struct DeploymentSnapshot {
     pub tenants: BTreeMap<String, TenantSnapshot>,
     pub roles: RoleBook,
     pub governed_tools: BTreeMap<String, Permission>,
+    /// Tools that are administrative acts. Persisted because a restart that
+    /// forgot them would silently stop demanding reasons.
+    #[serde(default)]
+    pub justification_required: BTreeSet<String>,
     /// Tenant-scoped cells, as `(tenant, key, value)` triples.
     pub cells: Vec<(String, String, String)>,
 }
@@ -669,7 +846,10 @@ impl std::fmt::Display for RestoreError {
 impl std::error::Error for RestoreError {}
 
 fn check_identifier(what: &str, value: &str) -> Result<(), RestoreError> {
-    if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+    // The same rule `add_tenant` enforces. A snapshot is a file an operator or
+    // a bad merge can edit, so the restore path must not be the back door
+    // through which a confusable or path-unsafe id enters a live deployment.
+    if !is_canonical_identifier(value) {
         return Err(RestoreError::MalformedIdentifier {
             what: what.to_string(),
             value: clamp(value),
@@ -708,6 +888,7 @@ impl Deployment {
                 .collect(),
             roles: self.roles.clone(),
             governed_tools: self.governed_tools.clone(),
+            justification_required: self.justification_required.clone(),
             cells: self
                 .store
                 .iter()
@@ -743,10 +924,12 @@ impl Deployment {
         d.required_strength = snapshot.required_strength;
         d.roles = snapshot.roles;
         d.governed_tools = snapshot.governed_tools;
+        d.justification_required = snapshot.justification_required;
         d.audit_dropped = snapshot.audit_dropped;
 
         for (name, t) in snapshot.tenants {
             check_identifier("tenant", &name)?;
+            check_identifier("org", &t.owner)?;
             if t.owner.is_empty() {
                 return Err(RestoreError::TenantWithoutOwner { tenant: name });
             }
@@ -880,7 +1063,11 @@ pub fn two_tenant_deployment() -> Deployment {
         .govern_tool("memory.recall", "memory.read")
         .govern_tool("memory.ingest", "memory.write")
         .govern_tool("policy.set", "policy.admin")
-        .govern_tool("audit.query", "memory.read");
+        .govern_tool("audit.query", "memory.read")
+        // `policy.set` is the deployment's one administrative act: it changes
+        // what the tenant is allowed to do. It is the tool `stress_admin_fuzz`
+        // used to demonstrate that layer 6 was enforced nowhere.
+        .require_justification("policy.set");
 
     let mut acme = TenantState::new(1_000);
     acme.allow_model("claude-opus")
@@ -913,6 +1100,7 @@ mod tests {
             model: "claude-opus",
             cost_tokens: 10,
             variant: None,
+            justification: None,
         });
         assert_eq!(outcome.refusal(), Some(&Refusal::ActorMismatch));
         assert_eq!(d.spent("acme"), Some(0), "an impersonation costs nothing");
@@ -936,6 +1124,7 @@ mod tests {
                 model: "claude-opus",
                 cost_tokens: 10,
                 variant: None,
+                justification: None,
             })
             .refusal(),
             Some(&Refusal::TenantNotOwnedByOrg)
@@ -954,6 +1143,7 @@ mod tests {
             model: "claude-opus",
             cost_tokens: 400,
             variant: None,
+            justification: None,
         });
         assert_eq!(d.spent("acme"), Some(400));
 
@@ -977,6 +1167,7 @@ mod tests {
                     model: "claude-opus",
                     cost_tokens: 100,
                     variant: None,
+                    justification: None,
                 }),
                 Outcome::Forwarded
             );
@@ -1003,6 +1194,7 @@ mod tests {
                 model: "claude-opus",
                 cost_tokens: *cost,
                 variant: None,
+                justification: None,
             });
         }
         let trail: Vec<&AuditRecord> = d.audit().collect();
@@ -1035,6 +1227,7 @@ mod tests {
                 model: "m",
                 cost_tokens: 1,
                 variant: None,
+                justification: None,
             });
         }
         assert_eq!(d.audit().count(), 8, "the buffer never grows past its cap");
@@ -1042,6 +1235,173 @@ mod tests {
         // The retained window is the newest, and still ordered.
         let seqs: Vec<u64> = d.audit().map(|r| r.sequence).collect();
         assert_eq!(seqs, (92..100).collect::<Vec<_>>());
+    }
+
+    /// Layer 6 reaching the composed path. `policy.set` changes what a tenant
+    /// may do; before this it was forwarded and journaled with no "why".
+    #[test]
+    fn an_administrative_act_needs_a_reason_and_the_reason_is_journaled() {
+        let mut d = two_tenant_deployment();
+        let root = actor("memorithm", "root", AuthStrength::Strong);
+        let req = request("acme", "root", "policy.set", "r-1");
+
+        assert_eq!(
+            d.admit(Call {
+                actor: &root,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: None,
+            })
+            .refusal(),
+            Some(&Refusal::JustificationRequired)
+        );
+        assert_eq!(d.spent("acme"), Some(0), "a missing reason costs nothing");
+
+        // An invisible reason is no reason — the rule is the admin crate's,
+        // not a second copy of it.
+        for blank in ["", "   ", "\u{200b}", "\u{feff}\t\u{202e}"] {
+            let req = request("acme", "root", "policy.set", &format!("r-{blank:?}"));
+            assert_eq!(
+                d.admit(Call {
+                    actor: &root,
+                    request: &req,
+                    model: "claude-opus",
+                    cost_tokens: 10,
+                    variant: None,
+                    justification: Some(blank),
+                })
+                .refusal(),
+                Some(&Refusal::JustificationRequired),
+                "{blank:?} passed as a reason"
+            );
+        }
+
+        // With a legible reason it is admitted, and the reason is in the trail.
+        let req = request("acme", "root", "policy.set", "r-ok");
+        assert_eq!(
+            d.admit(Call {
+                actor: &root,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: Some("tightening the allowlist after the audit"),
+            }),
+            Outcome::Forwarded
+        );
+        let record = d
+            .audit()
+            .find(|r| r.request_id == "r-ok")
+            .expect("journaled");
+        assert_eq!(
+            record.justification.as_deref(),
+            Some("tightening the allowlist after the audit")
+        );
+        // Every *forwarded* administrative record carries one, necessarily.
+        assert!(d
+            .audit()
+            .filter(|r| r.tool == "policy.set" && r.outcome.is_forwarded())
+            .all(|r| r.justification.is_some()));
+    }
+
+    /// The gate must not spread. A reason is demanded for the tools marked
+    /// administrative and for no others, and it is *recorded* whenever offered
+    /// — so the trail reflects what happened, not what was configured.
+    #[test]
+    fn an_ordinary_tool_neither_demands_a_reason_nor_discards_one() {
+        let mut d = two_tenant_deployment();
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+
+        let req = request("acme", "alice", "memory.ingest", "r-plain");
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: None,
+            }),
+            Outcome::Forwarded,
+            "an ordinary tool must not inherit the requirement"
+        );
+
+        let req = request("acme", "alice", "memory.ingest", "r-volunteered");
+        d.admit(Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 10,
+            variant: None,
+            justification: Some("bulk import, ticket 4471"),
+        });
+        assert_eq!(
+            d.audit()
+                .find(|r| r.request_id == "r-volunteered")
+                .and_then(|r| r.justification.as_deref()),
+            Some("bulk import, ticket 4471"),
+            "a reason given voluntarily is still evidence"
+        );
+        assert!(!d.requires_justification("memory.ingest"));
+        assert!(d.requires_justification("policy.set"));
+    }
+
+    /// Ordering: the reason is demanded only of a caller entitled to the act.
+    /// Asking earlier would tell an unauthorized prober which tools are
+    /// sensitive — a free map of the administrative surface.
+    #[test]
+    fn a_caller_without_the_permission_is_refused_before_being_asked_for_a_reason() {
+        let mut d = two_tenant_deployment();
+        // bob is a reader; `policy.set` needs `policy.admin`.
+        let bob = actor("memorithm", "bob", AuthStrength::Token);
+        let req = request("acme", "bob", "policy.set", "r-probe");
+        assert_eq!(
+            d.admit(Call {
+                actor: &bob,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 0,
+                variant: None,
+                justification: None,
+            })
+            .refusal(),
+            Some(&Refusal::PermissionDenied),
+            "an unauthorized caller must not learn that this tool is administrative"
+        );
+    }
+
+    /// The predicate itself, stated as a table. Two properties are being
+    /// bought — unambiguous rendering and path safety — and every rejected
+    /// shape below buys one of them.
+    #[test]
+    fn the_identifier_rule_admits_real_names_and_refuses_confusable_or_unsafe_ones() {
+        for good in ["acme", "t-00", "victim-corp", "a", "9lives", "a_b-c9"] {
+            assert!(is_canonical_identifier(good), "{good:?} is a real name");
+        }
+        for bad in [
+            "",                                    // nothing to name
+            "Acme",                                // case confusable
+            "acme ",                               // trailing space
+            " acme",                               // leading space
+            "acme\u{200b}",                        // zero-width
+            "\u{430}cme",                          // Cyrillic homoglyph
+            "e\u{301}quipe",                       // NFD
+            "..",                                  // traversal
+            ".",                                   // self
+            "a/b",                                 // separator
+            "a\\b",                                // Windows separator
+            "a\u{0}b",                             // NUL
+            "-rf",                                 // reads as a flag
+            "_hidden",                             // conventional hidden prefix
+            "a.b",                                 // dots are not allowed at all
+            &"a".repeat(MAX_IDENTIFIER_BYTES + 1), // over the bound
+        ] {
+            assert!(!is_canonical_identifier(bad), "{bad:?} must be refused");
+        }
+        // Exactly at the bound is fine; one past it is not.
+        assert!(is_canonical_identifier(&"a".repeat(MAX_IDENTIFIER_BYTES)));
     }
 
     #[test]

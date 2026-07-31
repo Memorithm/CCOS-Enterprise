@@ -258,6 +258,7 @@ fn recall_on(
         model: "claude-opus",
         cost_tokens: cost,
         variant,
+        justification: None,
     })
 }
 
@@ -817,6 +818,7 @@ fn omitting_the_variant_bypasses_the_gate_entirely() {
         model: "claude-opus",
         cost_tokens: 1,
         variant: None,
+        justification: None,
     });
     assert!(
         out.is_forwarded(),
@@ -832,6 +834,7 @@ fn omitting_the_variant_bypasses_the_gate_entirely() {
         model: "claude-opus",
         cost_tokens: 1,
         variant: Some(AdvancedQPageVariant::Hierarchical),
+        justification: None,
     });
     assert_eq!(out.refusal(), Some(&Refusal::VariantNotActivated));
     assert_eq!(
@@ -872,6 +875,7 @@ fn ten_active_variants_are_indistinguishable_from_none() {
                     model,
                     cost_tokens: *cost,
                     variant: None,
+                    justification: None,
                 })
             })
             .collect();
@@ -925,6 +929,7 @@ fn the_audit_trail_cannot_tell_an_experimental_call_from_a_standard_one() {
         model: "claude-opus",
         cost_tokens: 1,
         variant: Some(AdvancedQPageVariant::ExperimentalBridge),
+        justification: None,
     });
     let standard_req = request("acme", "alice", "memory.recall", "variant-standard");
     let standard = d.admit(Call {
@@ -933,6 +938,7 @@ fn the_audit_trail_cannot_tell_an_experimental_call_from_a_standard_one() {
         model: "claude-opus",
         cost_tokens: 1,
         variant: None,
+        justification: None,
     });
     assert!(experimental.is_forwarded() && standard.is_forwarded());
 
@@ -985,6 +991,7 @@ fn a_replayed_request_id_is_never_billed_twice() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: Some(AdvancedQPageVariant::ExperimentalBridge),
+            justification: None,
         });
         assert!(
             out.is_forwarded(),
@@ -1193,6 +1200,7 @@ fn no_activation_can_widen_the_boundary_the_allowlist_or_the_budget() {
                 model: "claude-opus",
                 cost_tokens: 1,
                 variant,
+                justification: None,
             });
             assert!(
                 matches!(out.refusal(), Some(Refusal::OutsideBoundary(_))),
@@ -1209,6 +1217,7 @@ fn no_activation_can_widen_the_boundary_the_allowlist_or_the_budget() {
         model: "gpt-5",
         cost_tokens: 1,
         variant: Some(AdvancedQPageVariant::CostBounded),
+        justification: None,
     });
     assert_eq!(out.refusal(), Some(&Refusal::ModelNotAllowed));
 
@@ -1266,6 +1275,7 @@ fn no_credential_reaches_a_variant_it_does_not_own() {
         model: "claude-opus",
         cost_tokens: 1,
         variant: Some(AdvancedQPageVariant::Hierarchical),
+        justification: None,
     });
     assert_eq!(
         out.refusal(),
@@ -1283,6 +1293,7 @@ fn no_credential_reaches_a_variant_it_does_not_own() {
         model: "claude-opus",
         cost_tokens: 1,
         variant: Some(AdvancedQPageVariant::MultiTenantFederated),
+        justification: None,
     });
     assert_eq!(
         out.refusal(),
@@ -1299,6 +1310,7 @@ fn no_credential_reaches_a_variant_it_does_not_own() {
         model: "claude-opus",
         cost_tokens: 1,
         variant: Some(AdvancedQPageVariant::Hierarchical),
+        justification: None,
     });
     assert_eq!(out.refusal(), Some(&Refusal::Unauthenticated));
 
@@ -1547,6 +1559,7 @@ fn re_adding_a_live_tenant_is_refused_and_keeps_its_activations_and_ledger() {
             model: "claude-opus",
             cost_tokens: 1,
             variant: None,
+            justification: None,
         })
         .refusal(),
         Some(&Refusal::TenantNotOwnedByOrg),

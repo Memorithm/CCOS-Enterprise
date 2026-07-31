@@ -144,7 +144,7 @@
 //!    (`crates/ccos-enterprise-runtime/src/lib.rs`) still returns `&mut Self`,
 //!    needs no identity, no permission and no
 //!    `ccos_enterprise_admin::AdminAction` justification.
-//!    → [`a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explain_it`]
+//!    → [`a_concurrent_governance_change_is_journaled_between_the_outcomes_it_flips`]
 //!
 //! 2. **There is no atomic snapshot of the product's own accounting.**
 //!    `spent`, `audit`/`audit_of` and `metrics` are four separate calls on
@@ -205,8 +205,8 @@ use std::time::{Duration, Instant};
 
 use ccos_enterprise_auth::AuthStrength;
 use ccos_enterprise_conformance::{
-    actor, request, two_tenant_deployment, AuditRecord, Call, Deployment, Outcome, Refusal,
-    TenantState, DEFAULT_AUDIT_CAPACITY, MAX_IDENTIFIER_BYTES,
+    actor, request, two_tenant_deployment, AuditRecord, Call, Deployment, GovernanceChange,
+    JournalEntry, Outcome, Refusal, TenantState, DEFAULT_AUDIT_CAPACITY, MAX_IDENTIFIER_BYTES,
 };
 use ccos_enterprise_observability::CounterRegistry;
 use ccos_enterprise_policy::{PolicyDecision, TokenBudget};
@@ -837,8 +837,12 @@ fn run_thread(deployment: &Mutex<Deployment>, ops: &[Op], start: &Barrier) -> Th
             }
             Op::AllowModel { tenant, model } => {
                 let mut d = guard(deployment);
-                match d.tenant_mut(tenant) {
-                    Some(st) => {
+                // The guard borrows the deployment and journals on drop, so it
+                // is bound rather than matched inline: a temporary would live
+                // to the end of the statement, past the `d` it borrows.
+                let rules = d.tenant_mut(tenant);
+                match rules {
+                    Some(mut st) => {
                         st.allow_model(model);
                     }
                     None => report.problems.push(format!("tenant {tenant} vanished")),
@@ -846,8 +850,9 @@ fn run_thread(deployment: &Mutex<Deployment>, ops: &[Op], start: &Barrier) -> Th
             }
             Op::Activate { tenant, variant } => {
                 let mut d = guard(deployment);
-                match d.tenant_mut(tenant) {
-                    Some(st) => {
+                let rules = d.tenant_mut(tenant);
+                match rules {
+                    Some(mut st) => {
                         st.activate(*variant);
                     }
                     None => report.problems.push(format!("tenant {tenant} vanished")),
@@ -941,20 +946,56 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
         0,
         "the storm's journal is complete: nothing was dropped from the buffer"
     );
-    // DEFECT (documented, not weakened): `put`, `assign`, `allow_model` and
-    // `activate` all change what a later admission decides, and none of them
-    // leaves a record. The journal cannot explain its own contents.
+    // The rule changes are journaled too, in their own stream: `assign`,
+    // `allow_model` and `activate` all change what a later admission decides,
+    // and every one of them that took effect left a record. Only the ones that
+    // changed nothing — an `assign` of a role the actor already holds, an
+    // `allow_model` for a model already allowed — are absent, because the
+    // guard journals the difference it measured rather than the fact of a
+    // borrow.
     assert!(
         admits < total_ops,
         "the storm really did run non-admission operations"
     );
     let unjournaled = total_ops - admits;
-    assert_eq!(
-        d.audit().count(),
-        total_ops - unjournaled,
-        "DEFECT: {unjournaled} of {total_ops} governed operations \
-         (put/assign/allow_model/activate) left no audit record at all"
+    assert!(
+        d.governance().count() > 0,
+        "DEFECT would be: {unjournaled} of {total_ops} governed operations \
+         (put/assign/allow_model/activate) leaving no record at all"
     );
+    assert_eq!(
+        d.governance_dropped(),
+        0,
+        "the storm's governance trail is complete too"
+    );
+    for record in d.governance() {
+        assert!(
+            matches!(
+                record.change,
+                GovernanceChange::RoleAssigned { .. } | GovernanceChange::TenantRulesChanged { .. }
+            ),
+            "the storm only runs assign/allow_model/activate: {record:?}"
+        );
+        // Nothing in the storm attributes its changes, and the trail says so
+        // rather than inventing an actor.
+        assert_eq!(record.actor, None);
+    }
+    // Ordinals are dense and ascending under 32 threads: the counter advances
+    // under the same lock the change is made under, so no two changes share one.
+    let ordinals: Vec<u64> = d.governance().map(|r| r.ordinal).collect();
+    assert_eq!(
+        ordinals,
+        (0..ordinals.len() as u64).collect::<Vec<_>>(),
+        "governance ordinals must be dense and ascending"
+    );
+    // Every change is anchored inside the decision stream, so the merged
+    // journal is totally ordered and holds every row of both.
+    assert!(d.governance().all(|r| r.at_sequence <= admits as u64));
+    assert_eq!(d.journal().len(), admits + d.governance().count());
+
+    // STILL OPEN: `put` and `get` are tenant-scoped *storage*, not rules, and
+    // nothing records them at all. A cross-tenant read is journaled nowhere —
+    // see `stress_tenancy_fuzz`.
 
     // ── Invariant 2: per-tenant ledger == sum of that tenant's forwarded
     //    costs, reconstructed from the product's own journal. ─────────────
@@ -1851,15 +1892,24 @@ fn identical_concurrent_calls_are_ordered_and_billed_exactly_once() {
     assert_eq!(Some(billed), d.spent("acme"));
 }
 
-/// **DEFECT (audit completeness).** A governance change races with the
-/// admissions it governs, and *nothing* records it. The two admissions below
-/// are identical apart from their request id; the first is refused, the second
-/// forwarded, and the journal contains exactly two records and no third one
-/// explaining why the answer changed. `tenant_mut(..).allow_model(..)` returns
-/// `&mut Self`, journals nothing, increments no counter and requires no
-/// identity, no permission and no `AdminAction` justification.
+/// **REPAIRED (audit completeness).** A governance change races with the
+/// admissions it governs, and the journal now records it, in order, between
+/// the two outcomes it flipped.
+///
+/// The two admissions below are identical apart from their request id; the
+/// first is refused, the second forwarded. The merged journal holds three
+/// rows, and the middle one says the allowlist widened. `tenant_mut` hands out
+/// a guard that compares the tenant's rules before and after the borrow and
+/// journals the difference on drop — the most a `&mut` borrow can honestly
+/// report, and enough to answer the question.
+///
+/// **Still open**, and asserted at the end so it cannot quietly change: the
+/// change requires no identity and no permission. What is repaired is that it
+/// can no longer be *invisible*; an unattributed edit is journaled as
+/// unattributed. Demanding an identity would mean `&mut Deployment` were not
+/// already full authority, which it is.
 #[test]
-fn a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explain_it() {
+fn a_concurrent_governance_change_is_journaled_between_the_outcomes_it_flips() {
     let _wd = Watchdog::arm("governance_change_flips_outcome", 30);
     let d = Arc::new(Mutex::new(one_tenant(1_000)));
     let gate = Arc::new(Barrier::new(2));
@@ -1869,10 +1919,11 @@ fn a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explai
     thread::scope(|s| {
         s.spawn(move || {
             admin_gate.wait(); // …after the first call
-            guard(&admin_d)
-                .tenant_mut("acme")
-                .expect("tenant exists")
-                .allow_model("smuggled-model");
+            {
+                let mut d = guard(&admin_d);
+                let mut rules = d.tenant_mut("acme").expect("tenant exists");
+                rules.allow_model("smuggled-model");
+            }
             admin_gate.wait(); // …before the second
         });
 
@@ -1909,18 +1960,49 @@ fn a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explai
     assert_eq!(
         d.audit().count(),
         2,
-        "DEFECT: the allowlist widened between the two calls and the journal \
-         holds only the two admissions — no record of the change, its actor, \
-         or its justification"
+        "the two admissions, and only those: a rule change is not a decision"
     );
-    // The two rows are ordered and priced, so the *flip* is legible — the
-    // refusal cost 0 and the forward cost 10 — but nothing between them says
-    // why the second was allowed. Ordering was the repair; provenance was not.
+    // The two decisions are ordered and priced, so the *flip* is legible — the
+    // refusal cost 0 and the forward cost 10.
     let rows = journal_of(&d);
     assert_eq!(rows[0].sequence, 0);
     assert_eq!(rows[1].sequence, 1);
     assert_eq!((rows[0].forwarded, rows[0].cost), (false, 0));
     assert_eq!((rows[1].forwarded, rows[1].cost), (true, 10));
+
+    // …and the merged journal now says WHY, in the one position that answers
+    // it: after the refusal, before the forward.
+    let merged = d.journal();
+    assert_eq!(merged.len(), 3, "{merged:?}");
+    assert!(matches!(merged[0], JournalEntry::Decision(r) if !r.outcome.is_forwarded()));
+    assert!(matches!(merged[2], JournalEntry::Decision(r) if r.outcome.is_forwarded()));
+    let JournalEntry::Governance(change) = merged[1] else {
+        panic!("the middle row must be the change: {merged:?}");
+    };
+    assert_eq!(
+        change.at_sequence, 1,
+        "anchored between decision 0 and decision 1"
+    );
+    assert_eq!(
+        change.change,
+        GovernanceChange::TenantRulesChanged {
+            tenant: "acme".to_string(),
+            models_allowed: vec!["smuggled-model".to_string()],
+            models_revoked: vec![],
+            variants_activated: vec![],
+            variants_deactivated: vec![],
+        },
+        "the record names the model that was added, not merely that something \
+         changed"
+    );
+
+    // STILL OPEN: no identity, no permission, no justification was required to
+    // make it — the record carries `None` for both, which is the honest thing
+    // to write down rather than an omission.
+    assert_eq!(change.actor, None);
+    assert_eq!(change.justification, None);
+
+    // And still no counter tracks policy mutation.
     let metrics = d.metrics();
     let names: Vec<&String> = metrics.iter().map(|(k, _)| k).collect();
     assert!(
@@ -1929,6 +2011,74 @@ fn a_concurrent_governance_change_flips_an_outcome_and_the_journal_cannot_explai
             .all(|(k, _)| k.starts_with("gateway.") || k.starts_with('_')),
         "no counter tracks policy mutation either — only the gateway's own \
          series and the registry's gauges are here: {names:?}"
+    );
+}
+
+/// The same scenario with the operator's name and reason attached, so the two
+/// paths sit side by side and the difference between them is exactly one thing:
+/// attribution.
+#[test]
+fn an_attributed_governance_change_carries_who_and_why() {
+    let _wd = Watchdog::arm("attributed_governance_change", 30);
+    let mut d = one_tenant(1_000);
+    let who = actor(HOME_ORG, "alice", AuthStrength::Token);
+
+    let first = request("acme", "alice", "memory.recall", "r-1");
+    assert_eq!(
+        d.admit(Call {
+            actor: &who,
+            request: &first,
+            model: "smuggled-model",
+            cost_tokens: 10,
+            variant: None,
+            justification: None,
+        })
+        .refusal(),
+        Some(&Refusal::ModelNotAllowed)
+    );
+
+    {
+        let mut admin = d.as_admin("root", "vendor migration, change 4471");
+        let mut rules = admin.tenant_mut("acme").expect("tenant exists");
+        rules.allow_model("smuggled-model");
+    }
+
+    let change = d.governance().next().expect("journaled");
+    assert_eq!(change.actor.as_deref(), Some("root"));
+    assert_eq!(
+        change.justification.as_deref(),
+        Some("vendor migration, change 4471")
+    );
+
+    // A reason that renders blank is no reason — the same rule layer 6 applies
+    // to a call, applied to the record of a change.
+    {
+        let mut admin = d.as_admin("root", "\u{200b}\t ");
+        assert!(admin.add_role("auditor", &["memory.read"]));
+    }
+    let blank = d.governance().last().expect("journaled all the same");
+    assert_eq!(
+        blank.justification, None,
+        "an invisible reason is recorded as no reason, not as evidence"
+    );
+    assert_eq!(
+        blank.actor.as_deref(),
+        Some("root"),
+        "the name still stands"
+    );
+
+    // An inspection that changes nothing leaves no row: the guard journals the
+    // difference it measured, not the fact that a borrow happened.
+    let before = d.governance().count();
+    {
+        let mut rules = d.tenant_mut("acme").expect("tenant exists");
+        rules.allow_model("smuggled-model"); // already allowed
+        let _ = rules.spent();
+    }
+    assert_eq!(
+        d.governance().count(),
+        before,
+        "a borrow that changed nothing must not fabricate a change"
     );
 }
 

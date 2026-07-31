@@ -128,8 +128,9 @@ fn populated(tag: &str, n: usize) -> (PathBuf, Vec<u8>, Vec<u8>, u64) {
 /// records that same load returned. A load that returns N records and a ledger
 /// for N+1 is the failure this crate exists to prevent.
 fn ledger_agrees_with_journal(loaded: &Loaded, at: usize) {
-    let restored = Deployment::restore(loaded.snapshot.clone(), &loaded.journal)
-        .unwrap_or_else(|e| panic!("offset {at}: a load that succeeded did not restore: {e}"));
+    let restored =
+        Deployment::restore(loaded.snapshot.clone(), &loaded.journal, &loaded.governance)
+            .unwrap_or_else(|e| panic!("offset {at}: a load that succeeded did not restore: {e}"));
     for tenant in ["acme", "globex"] {
         let billed: u64 = loaded
             .journal
@@ -202,7 +203,7 @@ fn every_truncation_of_the_journal_is_either_refused_or_exactly_correct() {
     let store = Store::open(&dir).expect("open");
     let l = store.load().expect("load").expect("store");
     assert_eq!(l.torn_tail, 0);
-    let restored = Deployment::restore(l.snapshot, &l.journal).expect("restore");
+    let restored = Deployment::restore(l.snapshot, &l.journal, &l.governance).expect("restore");
     assert_eq!(restored.spent("acme"), Some(full_spent));
 
     println!(

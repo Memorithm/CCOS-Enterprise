@@ -50,6 +50,13 @@ impl QPageRegistry {
     pub fn active_count(&self) -> usize {
         self.active.len()
     }
+
+    /// Every active variant, in declaration order. Activation is documented as
+    /// "an explicit, auditable tenant decision", and an auditor cannot compare
+    /// two states they cannot enumerate.
+    pub fn active(&self) -> Vec<AdvancedQPageVariant> {
+        self.active.iter().copied().collect()
+    }
 }
 
 #[cfg(test)]

@@ -67,6 +67,38 @@
 //! luck, and the rule deciding whether a privileged act is recorded is not the
 //! place for a second.
 //!
+//! ## Two journals, one order
+//!
+//! A decision journal alone cannot explain its own contents. The same call,
+//! refused and then forwarded, used to leave exactly two records and nothing
+//! between them saying what changed — because the change *was* nothing, as far
+//! as the product was concerned: `redefine_role` escalated every holder of a
+//! role and journaled nothing, and `tenant_mut(..).allow_model(..)` widened an
+//! allowlist and journaled nothing.
+//!
+//! Every rule change on a serving deployment is now a [`GovernanceRecord`]:
+//! what changed, from what to what, and — for role edits — every principal
+//! whose rights moved. [`Deployment::journal`] merges the two streams into the
+//! one order in which either is readable.
+//!
+//! Three decisions in that design are worth stating because each rules out an
+//! easier one:
+//!
+//! * **Anchored, not sharing a counter.** A governance record carries the
+//!   sequence of the decision it precedes rather than consuming one. Sharing
+//!   would make [`AuditRecord::sequence`] non-dense, and that density is what
+//!   lets a restore detect a *lost decision*.
+//! * **Provisioning is not journaled.** Before the first decision there is no
+//!   outcome for a change to explain, and journaling the builder would fill a
+//!   bounded buffer with the provisioning script. [`Deployment::is_serving`]
+//!   is where the line sits.
+//! * **Attribution is recorded, not demanded.** [`Deployment::as_admin`]
+//!   carries an operator's name and reason into the record. The bare mutators
+//!   journal the same change with both fields empty, because a
+//!   `&mut Deployment` is already the whole authority — a method that refused
+//!   without a name would only push callers back to a path that is not in the
+//!   trail. What the product guarantees here is visibility, not permission.
+//!
 //! ## What this crate bounds, and what it does not
 //!
 //! The audit journal is an in-memory **buffer** with a hard capacity
@@ -218,6 +250,146 @@ pub struct AuditRecord {
     pub outcome: Outcome,
 }
 
+/// A change to the rules the admission path decides by.
+///
+/// Each variant records the *effect*, not the call: what a reader needs in
+/// order to explain why an outcome changed, without having to hold the code
+/// that made the change. Redefinition and removal carry their blast radius —
+/// the holders affected — because "the role changed" is not evidence and
+/// "these four principals gained `policy.admin`" is.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GovernanceChange {
+    /// A role was defined on a serving deployment.
+    RoleDefined {
+        role: String,
+        permissions: Vec<String>,
+    },
+    /// A live role's permission set was replaced, affecting every holder.
+    RoleRedefined {
+        role: String,
+        from: Vec<String>,
+        to: Vec<String>,
+        holders: Vec<String>,
+    },
+    /// A role and every grant of it were removed.
+    RoleRemoved {
+        role: String,
+        holders: Vec<String>,
+    },
+    RoleAssigned {
+        actor: String,
+        role: String,
+    },
+    RoleUnassigned {
+        actor: String,
+        role: String,
+    },
+    /// A principal was de-provisioned.
+    ActorRemoved {
+        actor: String,
+        roles: Vec<String>,
+    },
+    /// A tenant was provisioned on a serving deployment.
+    TenantAdded {
+        tenant: String,
+        org: String,
+    },
+    /// A tenant's own rules changed, as measured across a mutable borrow.
+    /// Only non-empty differences are journaled, so an inspection that changed
+    /// nothing leaves no row.
+    TenantRulesChanged {
+        tenant: String,
+        models_allowed: Vec<String>,
+        models_revoked: Vec<String>,
+        variants_activated: Vec<String>,
+        variants_deactivated: Vec<String>,
+    },
+    /// A tool became governed, or the permission it requires changed.
+    ToolGoverned {
+        tool: String,
+        permission: String,
+        previous: Option<String>,
+    },
+    /// A tool became an administrative act.
+    ToolMadeAdministrative {
+        tool: String,
+    },
+    /// The identity floor moved.
+    StrengthRequired {
+        from: AuthStrength,
+        to: AuthStrength,
+    },
+}
+
+/// One journaled governance change.
+///
+/// The question the journal previously could not answer is "the same call was
+/// refused and then forwarded — what changed in between?", and answering it
+/// requires the change and the decisions to be *orderable against one
+/// another*, not merely both recorded somewhere. So a governance record is
+/// anchored to the decision stream rather than given a sequence of its own:
+/// it sits immediately before the decision that will take
+/// [`GovernanceRecord::at_sequence`].
+///
+/// Anchoring rather than sharing one counter is deliberate. A shared counter
+/// would make [`AuditRecord::sequence`] non-dense, and the density of the
+/// decision journal is what lets a restore detect that a decision was lost —
+/// a guarantee worth more than the tidiness of one counter.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GovernanceRecord {
+    /// The sequence the *next* decision will take. This record sits between
+    /// decision `at_sequence - 1` and decision `at_sequence`.
+    pub at_sequence: u64,
+    /// Monotonic among governance records, so several changes made between the
+    /// same pair of decisions keep the order they were made in.
+    pub ordinal: u64,
+    /// Who made the change, when the caller said so.
+    ///
+    /// `None` is not an omission the journal hides: it is the recorded fact
+    /// that the change was made through an unattributed handle. Nothing in
+    /// this product *demands* an identity to mutate a live deployment — that
+    /// is a real remaining defect — and a journal that silently attributed
+    /// such a change to "system" would be lying about it.
+    pub actor: Option<String>,
+    /// The reason the caller gave, if any. Legibility is
+    /// `ccos_enterprise_admin::is_written_justification`, the one definition in
+    /// the product; a reason that renders blank is recorded as `None`.
+    pub justification: Option<String>,
+    pub change: GovernanceChange,
+}
+
+/// One row of the deployment's journal: a decision, or a change to the rules
+/// decisions are made by.
+///
+/// [`Deployment::journal`] merges the two streams by sequence, which is the
+/// only form in which either is fully readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalEntry<'a> {
+    Decision(&'a AuditRecord),
+    Governance(&'a GovernanceRecord),
+}
+
+impl JournalEntry<'_> {
+    /// The decision sequence this row sits at. A governance row shares the
+    /// number of the decision it precedes.
+    pub fn sequence(&self) -> u64 {
+        match self {
+            JournalEntry::Decision(r) => r.sequence,
+            JournalEntry::Governance(r) => r.at_sequence,
+        }
+    }
+
+    /// The total order over the merged journal: rows sort by sequence, and
+    /// within one sequence every governance change precedes the decision it
+    /// was made before, in the order the changes were made.
+    fn order(&self) -> (u64, u8, u64) {
+        match self {
+            JournalEntry::Governance(r) => (r.at_sequence, 0, r.ordinal),
+            JournalEntry::Decision(r) => (r.sequence, 1, 0),
+        }
+    }
+}
+
 /// Per-tenant governed state. Nothing here is shared between tenants.
 ///
 /// The ledger is **private**: it was `pub` and directly assignable, so
@@ -301,6 +473,18 @@ pub struct Deployment {
     audit: VecDeque<AuditRecord>,
     audit_capacity: usize,
     audit_dropped: u64,
+    /// Changes to the rules, in the same sequence space as the decisions.
+    governance: VecDeque<GovernanceRecord>,
+    governance_dropped: u64,
+    next_governance_ordinal: u64,
+    /// Whether this deployment has decided anything yet.
+    ///
+    /// Before the first decision there is no outcome for a rule change to
+    /// explain, so provisioning journals nothing; after it, every change does.
+    /// This is the whole line between "building a deployment" and "mutating a
+    /// live one", and it is drawn where an auditor would draw it rather than
+    /// by which method was called.
+    serving: bool,
     next_sequence: u64,
     /// Decided request ids, newest last, bounded by `replay_memory`.
     decided: BTreeSet<(TenantId, String)>,
@@ -330,6 +514,10 @@ impl Deployment {
             audit: VecDeque::new(),
             audit_capacity: DEFAULT_AUDIT_CAPACITY,
             audit_dropped: 0,
+            governance: VecDeque::new(),
+            governance_dropped: 0,
+            next_governance_ordinal: 0,
+            serving: false,
             next_sequence: 0,
             decided: BTreeSet::new(),
             decided_order: VecDeque::new(),
@@ -348,8 +536,84 @@ impl Deployment {
 
     /// Demand a stronger proof of identity for every call.
     pub fn require_strength(&mut self, strength: AuthStrength) -> &mut Self {
+        let from = self.required_strength;
         self.required_strength = strength;
+        if from != strength {
+            self.record(
+                GovernanceChange::StrengthRequired { from, to: strength },
+                None,
+                None,
+            );
+        }
         self
+    }
+
+    // ── Governance journalling ───────────────────────────────────────────
+
+    /// Journal one rule change, if this deployment has decided anything yet.
+    ///
+    /// Before the first decision the deployment is being *built*, and a change
+    /// with no outcome behind it has nothing to explain — journalling it would
+    /// fill the trail with the provisioning script and push every real record
+    /// out of a bounded buffer. From the first decision on, every change is
+    /// recorded, whether or not the caller offered a name or a reason.
+    fn record(
+        &mut self,
+        change: GovernanceChange,
+        actor: Option<&str>,
+        justification: Option<&str>,
+    ) {
+        if !self.serving {
+            return;
+        }
+        // The ordinal advances whether or not the record is kept, so two
+        // changes never share one and a reader can tell a dropped record from
+        // a reordered one.
+        let ordinal = self.next_governance_ordinal;
+        self.next_governance_ordinal += 1;
+        if self.audit_capacity == 0 {
+            self.governance_dropped += 1;
+            self.metrics.inc("governance.dropped", 1);
+            return;
+        }
+        while self.governance.len() >= self.audit_capacity {
+            self.governance.pop_front();
+            self.governance_dropped += 1;
+            self.metrics.inc("governance.dropped", 1);
+        }
+        self.governance.push_back(GovernanceRecord {
+            at_sequence: self.next_sequence,
+            ordinal,
+            actor: actor.map(clamp),
+            // A reason that renders blank is no reason: recording `Some("​")`
+            // would let an invisible string pass for evidence, which is the
+            // hole `is_written_justification` exists to close.
+            justification: justification
+                .filter(|j| ccos_enterprise_admin::is_written_justification(Some(j)))
+                .map(clamp),
+            change,
+        });
+    }
+
+    /// Make rule changes under a recorded identity and reason.
+    ///
+    /// The bare mutators journal too — an unattributed change is still a
+    /// change, and hiding it would be worse than recording it as anonymous —
+    /// but nothing in them can *demand* a name, because a `&mut Deployment` is
+    /// already the whole authority. This handle is how a caller that has an
+    /// operator's identity puts it in the trail.
+    ///
+    /// It does not gate: a blank reason is recorded as no reason rather than
+    /// refused, because refusing here would tempt callers back to the bare
+    /// methods and out of the trail entirely. Gating administrative *calls* is
+    /// layer 6's job, on the admission path, where a caller cannot route
+    /// around it.
+    pub fn as_admin<'a>(&'a mut self, actor: &str, why: &str) -> Admin<'a> {
+        Admin {
+            deployment: self,
+            actor: actor.to_string(),
+            justification: why.to_string(),
+        }
     }
 
     /// Provision a tenant owned by `org`.
@@ -359,6 +623,17 @@ impl Deployment {
     /// allowlist and activations while the journal still showed its forwarded
     /// calls. Returns `false` and changes nothing when the tenant exists.
     pub fn add_tenant(&mut self, org: &str, tenant: &str, state: TenantState) -> bool {
+        self.add_tenant_as(org, tenant, state, None, None)
+    }
+
+    fn add_tenant_as(
+        &mut self,
+        org: &str,
+        tenant: &str,
+        state: TenantState,
+        by: Option<&str>,
+        why: Option<&str>,
+    ) -> bool {
         // Refused before anything is inserted: an id that cannot be rendered
         // unambiguously, or safely turned into a path component, is not a
         // tenant this product will carry. See [`is_canonical_identifier`].
@@ -371,11 +646,53 @@ impl Deployment {
         }
         self.tenant_owner.insert(id.clone(), OrgId(org.to_string()));
         self.tenants.insert(id, state);
+        self.record(
+            GovernanceChange::TenantAdded {
+                tenant: tenant.to_string(),
+                org: org.to_string(),
+            },
+            by,
+            why,
+        );
         true
     }
 
-    pub fn tenant_mut(&mut self, tenant: &str) -> Option<&mut TenantState> {
-        self.tenants.get_mut(&TenantId(tenant.to_string()))
+    /// Borrow a tenant's rules for change.
+    ///
+    /// The returned guard journals **what actually differed** across the
+    /// borrow, on drop: models allowed or revoked, variants activated or
+    /// deactivated. An inspection that changes nothing leaves no row.
+    ///
+    /// This shape is forced by the signature it replaces. `tenant_mut` handed
+    /// out a `&mut TenantState`, so the deployment could not see what was done
+    /// with it — and `tenant_mut(..).allow_model(..)` was the exact call that
+    /// widened an allowlist between two identical requests, flipping a refusal
+    /// into a forward with a journal of two rows and nothing between them. A
+    /// borrow cannot report intent, but it can be made to report its own
+    /// effect, and that is what an auditor needs.
+    pub fn tenant_mut(&mut self, tenant: &str) -> Option<TenantRules<'_>> {
+        self.tenant_mut_as(tenant, None, None)
+    }
+
+    fn tenant_mut_as<'a>(
+        &'a mut self,
+        tenant: &str,
+        by: Option<&str>,
+        why: Option<&str>,
+    ) -> Option<TenantRules<'a>> {
+        let id = TenantId(tenant.to_string());
+        let state = self.tenants.get(&id)?;
+        let before_models = state.models.0.clone();
+        let before_variants: BTreeSet<AdvancedQPageVariant> =
+            state.qpages.active().into_iter().collect();
+        Some(TenantRules {
+            actor: by.map(str::to_string),
+            justification: why.map(str::to_string),
+            deployment: self,
+            tenant: id,
+            before_models,
+            before_variants,
+        })
     }
 
     /// Define a role. **Provisioning only**: a name already taken is left
@@ -389,6 +706,17 @@ impl Deployment {
     /// [`redefine_role`](Self::redefine_role), which says so and reports what
     /// it hit.
     pub fn add_role(&mut self, name: &str, permissions: &[&str]) -> &mut Self {
+        self.add_role_as(name, permissions, None, None);
+        self
+    }
+
+    fn add_role_as(
+        &mut self,
+        name: &str,
+        permissions: &[&str],
+        by: Option<&str>,
+        why: Option<&str>,
+    ) -> bool {
         let mut role = Role {
             name: name.to_string(),
             ..Default::default()
@@ -396,20 +724,42 @@ impl Deployment {
         for p in permissions {
             role.permissions.insert(Permission(p.to_string()));
         }
-        self.roles.add_role(role);
-        self
+        if !self.roles.add_role(role) {
+            return false;
+        }
+        self.record(
+            GovernanceChange::RoleDefined {
+                role: name.to_string(),
+                permissions: owned(permissions),
+            },
+            by,
+            why,
+        );
+        true
     }
 
-    /// Assign a role. Returns false (and grants nothing) for unknown roles —
-    /// the RBAC crate's fail-closed rule, surfaced here.
     /// Replace a live role's permission set, affecting every holder at once.
     /// Returns whether a role of that name existed.
     ///
     /// Separate from [`add_role`](Self::add_role) so that a mass privilege
-    /// change cannot be reached by a typo. It is still **unjournaled**: role
-    /// mutation has no audit shape, which is a defect this method makes
-    /// visible rather than fixes — see `stress_rbac_scale`.
+    /// change cannot be reached by a typo, and journaled with its **blast
+    /// radius**: the permissions before and after, and every principal whose
+    /// rights just moved. That last part is the reason the record is worth
+    /// having — "the `reader` role was redefined" is a note, and "these 400
+    /// principals gained `policy.admin` at sequence 91 812" is evidence.
     pub fn redefine_role(&mut self, name: &str, permissions: &[&str]) -> bool {
+        self.redefine_role_as(name, permissions, None, None)
+    }
+
+    fn redefine_role_as(
+        &mut self,
+        name: &str,
+        permissions: &[&str],
+        by: Option<&str>,
+        why: Option<&str>,
+    ) -> bool {
+        let from = owned(&self.roles.permissions_of(name));
+        let holders = owned(&self.roles.holders_of(name));
         let mut role = Role {
             name: name.to_string(),
             ..Default::default()
@@ -417,22 +767,88 @@ impl Deployment {
         for p in permissions {
             role.permissions.insert(Permission(p.to_string()));
         }
-        self.roles.redefine_role(role)
+        if !self.roles.redefine_role(role) {
+            return false;
+        }
+        self.record(
+            GovernanceChange::RoleRedefined {
+                role: name.to_string(),
+                from,
+                to: owned(&self.roles.permissions_of(name)),
+                holders,
+            },
+            by,
+            why,
+        );
+        true
     }
 
     /// Remove a role and every grant of it. Returns whether it existed.
     pub fn remove_role(&mut self, name: &str) -> bool {
-        self.roles.remove_role(name)
+        self.remove_role_as(name, None, None)
+    }
+
+    fn remove_role_as(&mut self, name: &str, by: Option<&str>, why: Option<&str>) -> bool {
+        let holders = owned(&self.roles.holders_of(name));
+        if !self.roles.remove_role(name) {
+            return false;
+        }
+        self.record(
+            GovernanceChange::RoleRemoved {
+                role: name.to_string(),
+                holders,
+            },
+            by,
+            why,
+        );
+        true
     }
 
     /// Withdraw one role from one actor. Returns whether the grant existed.
     pub fn unassign(&mut self, actor: &str, role: &str) -> bool {
-        self.roles.unassign(actor, role)
+        self.unassign_as(actor, role, None, None)
+    }
+
+    fn unassign_as(
+        &mut self,
+        actor: &str,
+        role: &str,
+        by: Option<&str>,
+        why: Option<&str>,
+    ) -> bool {
+        if !self.roles.unassign(actor, role) {
+            return false;
+        }
+        self.record(
+            GovernanceChange::RoleUnassigned {
+                actor: actor.to_string(),
+                role: role.to_string(),
+            },
+            by,
+            why,
+        );
+        true
     }
 
     /// De-provision a principal entirely. Returns whether it held anything.
     pub fn remove_actor(&mut self, actor: &str) -> bool {
-        self.roles.remove_actor(actor)
+        self.remove_actor_as(actor, None, None)
+    }
+
+    fn remove_actor_as(&mut self, actor: &str, by: Option<&str>, why: Option<&str>) -> bool {
+        let roles = owned(&self.roles.roles_of(actor));
+        if !self.roles.remove_actor(actor) {
+            return false;
+        }
+        self.record(
+            GovernanceChange::ActorRemoved {
+                actor: actor.to_string(),
+                roles,
+            },
+            by,
+            why,
+        );
+        true
     }
 
     /// The roles an actor holds, in name order.
@@ -440,11 +856,27 @@ impl Deployment {
         self.roles.roles_of(actor)
     }
 
+    /// Grant a role. Returns false (and grants nothing) for unknown roles —
+    /// the RBAC crate's fail-closed rule, surfaced here.
     pub fn assign(&mut self, actor: &str, role: &str) -> bool {
-        self.roles.assign(actor, role)
+        self.assign_as(actor, role, None, None)
     }
 
-    /// Declare which permission a tool requires. Undeclared tools are refused.
+    fn assign_as(&mut self, actor: &str, role: &str, by: Option<&str>, why: Option<&str>) -> bool {
+        if !self.roles.assign(actor, role) {
+            return false;
+        }
+        self.record(
+            GovernanceChange::RoleAssigned {
+                actor: actor.to_string(),
+                role: role.to_string(),
+            },
+            by,
+            why,
+        );
+        true
+    }
+
     /// Mark a governed tool as an **administrative act**: it is admitted only
     /// when the call carries a reason a human could read, and that reason is
     /// journaled with the decision.
@@ -460,7 +892,15 @@ impl Deployment {
     /// The predicate is `ccos_enterprise_admin::is_written_justification`, not
     /// a copy of it: there is one definition of "legible" in the product.
     pub fn require_justification(&mut self, tool: &str) -> &mut Self {
-        self.justification_required.insert(tool.to_string());
+        if self.justification_required.insert(tool.to_string()) {
+            self.record(
+                GovernanceChange::ToolMadeAdministrative {
+                    tool: tool.to_string(),
+                },
+                None,
+                None,
+            );
+        }
         self
     }
 
@@ -469,9 +909,22 @@ impl Deployment {
         self.justification_required.contains(tool)
     }
 
+    /// Declare which permission a tool requires. Undeclared tools are refused.
     pub fn govern_tool(&mut self, tool: &str, permission: &str) -> &mut Self {
-        self.governed_tools
+        let previous = self
+            .governed_tools
             .insert(tool.to_string(), Permission(permission.to_string()));
+        if previous.as_ref().map(|p| p.0.as_str()) != Some(permission) {
+            self.record(
+                GovernanceChange::ToolGoverned {
+                    tool: tool.to_string(),
+                    permission: permission.to_string(),
+                    previous: previous.map(|p| p.0),
+                },
+                None,
+                None,
+            );
+        }
         self
     }
 
@@ -514,6 +967,10 @@ impl Deployment {
     /// the tenant nothing; and the **credential is checked against the
     /// request** before any tenant state is touched.
     pub fn admit(&mut self, call: Call<'_>) -> Outcome {
+        // From here on the deployment has decided something, so every later
+        // rule change has an outcome to explain and is journaled. See
+        // [`Deployment::record`].
+        self.serving = true;
         let (outcome, cost) = self.decide(&call);
         self.metrics.inc("gateway.requests", 1);
         match &outcome {
@@ -523,12 +980,12 @@ impl Deployment {
                 self.metrics.inc(&format!("gateway.refused.{}", tag(r)), 1);
             }
         }
-        self.journal(&call, &outcome, cost);
+        self.journal_decision(&call, &outcome, cost);
         outcome
     }
 
     /// Append one record, dropping the oldest if the buffer is full.
-    fn journal(&mut self, call: &Call<'_>, outcome: &Outcome, cost: u64) {
+    fn journal_decision(&mut self, call: &Call<'_>, outcome: &Outcome, cost: u64) {
         if self.audit_capacity == 0 {
             self.audit_dropped += 1;
             self.metrics.inc("audit.dropped", 1);
@@ -687,6 +1144,46 @@ impl Deployment {
         self.audit_dropped
     }
 
+    /// The rule changes this deployment has made since it started serving, in
+    /// the order it made them.
+    pub fn governance(&self) -> impl Iterator<Item = &GovernanceRecord> {
+        self.governance.iter()
+    }
+
+    /// How many governance records the buffer has dropped.
+    pub fn governance_dropped(&self) -> u64 {
+        self.governance_dropped
+    }
+
+    /// Decisions and rule changes, merged into the single ordered stream they
+    /// share a sequence space for.
+    ///
+    /// This is the form the journal has to be read in to answer "why did the
+    /// answer change?": the two buffers are each in order, and the merge is
+    /// the only place their *relative* order is recoverable.
+    ///
+    /// Both buffers are bounded independently, so a burst of one can age the
+    /// other out of view; [`Deployment::audit_dropped`] and
+    /// [`Deployment::governance_dropped`] are how a reader learns that the
+    /// stream they are holding is not the whole one.
+    pub fn journal(&self) -> Vec<JournalEntry<'_>> {
+        let mut rows: Vec<JournalEntry<'_>> = self
+            .audit
+            .iter()
+            .map(JournalEntry::Decision)
+            .chain(self.governance.iter().map(JournalEntry::Governance))
+            .collect();
+        rows.sort_by_key(JournalEntry::order);
+        rows
+    }
+
+    /// Whether this deployment has decided anything yet — and therefore
+    /// whether a rule change made now is journaled rather than treated as
+    /// provisioning.
+    pub fn is_serving(&self) -> bool {
+        self.serving
+    }
+
     /// The audit trail for one tenant, in decision order.
     pub fn audit_of(&self, tenant: &str) -> Vec<&AuditRecord> {
         self.audit.iter().filter(|r| r.tenant == tenant).collect()
@@ -700,6 +1197,167 @@ impl Deployment {
             .map(|(k, v)| (k.to_string(), v))
             .collect()
     }
+}
+
+/// An attributed handle on a deployment's rules.
+///
+/// Every change made through it carries the operator's name and reason into
+/// the governance journal. The bare methods on [`Deployment`] do the same work
+/// and journal the same change with both fields empty — the difference is
+/// attribution, not enforcement, and that is deliberate: a `&mut Deployment`
+/// is already the whole authority, so a method that *refused* without a name
+/// would only push callers back to the bare path and out of the trail.
+pub struct Admin<'a> {
+    deployment: &'a mut Deployment,
+    actor: String,
+    justification: String,
+}
+
+impl Admin<'_> {
+    fn by(&self) -> (Option<&str>, Option<&str>) {
+        (Some(self.actor.as_str()), Some(self.justification.as_str()))
+    }
+
+    /// See [`Deployment::add_tenant`].
+    pub fn add_tenant(&mut self, org: &str, tenant: &str, state: TenantState) -> bool {
+        let (by, why) = (self.actor.clone(), self.justification.clone());
+        self.deployment
+            .add_tenant_as(org, tenant, state, Some(&by), Some(&why))
+    }
+
+    /// See [`Deployment::add_role`].
+    pub fn add_role(&mut self, name: &str, permissions: &[&str]) -> bool {
+        let (by, why) = self.by();
+        let (by, why) = (by.map(str::to_string), why.map(str::to_string));
+        self.deployment
+            .add_role_as(name, permissions, by.as_deref(), why.as_deref())
+    }
+
+    /// See [`Deployment::redefine_role`].
+    pub fn redefine_role(&mut self, name: &str, permissions: &[&str]) -> bool {
+        let (by, why) = (self.actor.clone(), self.justification.clone());
+        self.deployment
+            .redefine_role_as(name, permissions, Some(&by), Some(&why))
+    }
+
+    /// See [`Deployment::remove_role`].
+    pub fn remove_role(&mut self, name: &str) -> bool {
+        let (by, why) = (self.actor.clone(), self.justification.clone());
+        self.deployment.remove_role_as(name, Some(&by), Some(&why))
+    }
+
+    /// See [`Deployment::assign`].
+    pub fn assign(&mut self, actor: &str, role: &str) -> bool {
+        let (by, why) = (self.actor.clone(), self.justification.clone());
+        self.deployment
+            .assign_as(actor, role, Some(&by), Some(&why))
+    }
+
+    /// See [`Deployment::unassign`].
+    pub fn unassign(&mut self, actor: &str, role: &str) -> bool {
+        let (by, why) = (self.actor.clone(), self.justification.clone());
+        self.deployment
+            .unassign_as(actor, role, Some(&by), Some(&why))
+    }
+
+    /// See [`Deployment::remove_actor`].
+    pub fn remove_actor(&mut self, actor: &str) -> bool {
+        let (by, why) = (self.actor.clone(), self.justification.clone());
+        self.deployment
+            .remove_actor_as(actor, Some(&by), Some(&why))
+    }
+
+    /// See [`Deployment::tenant_mut`].
+    pub fn tenant_mut(&mut self, tenant: &str) -> Option<TenantRules<'_>> {
+        let (by, why) = (self.actor.clone(), self.justification.clone());
+        self.deployment.tenant_mut_as(tenant, Some(&by), Some(&why))
+    }
+}
+
+/// A tenant's rules, borrowed for change, journalling what actually differed.
+///
+/// Dereferences to [`TenantState`], so it is used exactly as the `&mut
+/// TenantState` it replaces. The record is written on drop, from a comparison
+/// of the allowlist and activation set before and after — which is the most a
+/// borrow can honestly report. It says what changed, not what the caller meant
+/// to change, and nothing at all when nothing changed.
+pub struct TenantRules<'a> {
+    deployment: &'a mut Deployment,
+    tenant: TenantId,
+    before_models: BTreeSet<String>,
+    before_variants: BTreeSet<AdvancedQPageVariant>,
+    actor: Option<String>,
+    justification: Option<String>,
+}
+
+impl std::ops::Deref for TenantRules<'_> {
+    type Target = TenantState;
+
+    fn deref(&self) -> &TenantState {
+        self.deployment.tenants.get(&self.tenant).expect(
+            "the tenant was present when the guard was made, and the \
+                     guard holds the only mutable borrow of the deployment",
+        )
+    }
+}
+
+impl std::ops::DerefMut for TenantRules<'_> {
+    fn deref_mut(&mut self) -> &mut TenantState {
+        self.deployment.tenants.get_mut(&self.tenant).expect(
+            "the tenant was present when the guard was made, and the \
+                     guard holds the only mutable borrow of the deployment",
+        )
+    }
+}
+
+impl Drop for TenantRules<'_> {
+    fn drop(&mut self) {
+        let (after_models, after_variants) = {
+            let state = &self.deployment.tenants[&self.tenant];
+            (
+                state.models.0.clone(),
+                state.qpages.active().into_iter().collect::<BTreeSet<_>>(),
+            )
+        };
+        let models_allowed = owned_diff(&after_models, &self.before_models);
+        let models_revoked = owned_diff(&self.before_models, &after_models);
+        let variants_activated = variant_diff(&after_variants, &self.before_variants);
+        let variants_deactivated = variant_diff(&self.before_variants, &after_variants);
+        if models_allowed.is_empty()
+            && models_revoked.is_empty()
+            && variants_activated.is_empty()
+            && variants_deactivated.is_empty()
+        {
+            return;
+        }
+        let change = GovernanceChange::TenantRulesChanged {
+            tenant: self.tenant.0.clone(),
+            models_allowed,
+            models_revoked,
+            variants_activated,
+            variants_deactivated,
+        };
+        let (by, why) = (self.actor.clone(), self.justification.clone());
+        self.deployment
+            .record(change, by.as_deref(), why.as_deref());
+    }
+}
+
+/// Names present in `a` and absent from `b`, in order.
+fn owned_diff(a: &BTreeSet<String>, b: &BTreeSet<String>) -> Vec<String> {
+    a.difference(b).cloned().collect()
+}
+
+fn variant_diff(
+    a: &BTreeSet<AdvancedQPageVariant>,
+    b: &BTreeSet<AdvancedQPageVariant>,
+) -> Vec<String> {
+    a.difference(b).map(|v| format!("{v:?}")).collect()
+}
+
+/// Borrowed names, owned for a record.
+fn owned(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| (*s).to_string()).collect()
 }
 
 /// Truncate an identifier to what a record needs, on a character boundary.
@@ -777,6 +1435,10 @@ pub struct DeploymentSnapshot {
     /// forgot them would silently stop demanding reasons.
     #[serde(default)]
     pub justification_required: BTreeSet<String>,
+    /// Governance records evicted from the in-memory buffer before this
+    /// snapshot, for the same reason `audit_dropped` is carried.
+    #[serde(default)]
+    pub governance_dropped: u64,
     /// Tenant-scoped cells, as `(tenant, key, value)` triples.
     pub cells: Vec<(String, String, String)>,
 }
@@ -889,6 +1551,7 @@ impl Deployment {
             roles: self.roles.clone(),
             governed_tools: self.governed_tools.clone(),
             justification_required: self.justification_required.clone(),
+            governance_dropped: self.governance_dropped,
             cells: self
                 .store
                 .iter()
@@ -912,6 +1575,7 @@ impl Deployment {
     pub fn restore(
         snapshot: DeploymentSnapshot,
         journal: &[AuditRecord],
+        governance: &[GovernanceRecord],
     ) -> Result<Self, RestoreError> {
         if snapshot.schema != SNAPSHOT_SCHEMA {
             return Err(RestoreError::SchemaMismatch {
@@ -926,6 +1590,7 @@ impl Deployment {
         d.governed_tools = snapshot.governed_tools;
         d.justification_required = snapshot.justification_required;
         d.audit_dropped = snapshot.audit_dropped;
+        d.governance_dropped = snapshot.governance_dropped;
 
         for (name, t) in snapshot.tenants {
             check_identifier("tenant", &name)?;
@@ -973,6 +1638,7 @@ impl Deployment {
         // Sequences must be dense and ascending throughout. A gap means
         // decisions were lost; a repeat means one would be counted twice.
         // Both are refusals rather than repairs.
+        //
         let mut next = journal.first().map(|r| r.sequence).unwrap_or(0);
         for record in journal {
             if record.sequence != next {
@@ -1024,7 +1690,30 @@ impl Deployment {
                 d.metrics.inc("audit.dropped", 1);
             }
         }
+
+        // Governance records are replayed into the buffer but never re-applied
+        // to the state: the snapshot already holds the roles, allowlists and
+        // activations they produced. They are evidence, not instructions.
+        for record in governance {
+            while d.governance.len() >= d.audit_capacity {
+                d.governance.pop_front();
+                d.governance_dropped += 1;
+                d.metrics.inc("governance.dropped", 1);
+            }
+            if d.audit_capacity > 0 {
+                d.governance.push_back(record.clone());
+            } else {
+                d.governance_dropped += 1;
+                d.metrics.inc("governance.dropped", 1);
+            }
+        }
+
         d.next_sequence = next;
+        d.next_governance_ordinal = governance.last().map_or(0, |r| r.ordinal + 1);
+        // A restored deployment has a history: it has decided or changed
+        // something, so every change from here on is journaled rather than
+        // treated as provisioning.
+        d.serving = next > 0 || !governance.is_empty();
         Ok(d)
     }
 }

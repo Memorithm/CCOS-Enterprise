@@ -16,6 +16,7 @@
 //! touching the assertion.
 
 pub use ccos_enterprise_runtime::{
-    actor, request, two_tenant_deployment, AuditRecord, Call, Deployment, Outcome, Refusal,
-    TenantState, DEFAULT_AUDIT_CAPACITY, DEFAULT_REPLAY_MEMORY, MAX_IDENTIFIER_BYTES,
+    actor, request, two_tenant_deployment, AuditRecord, Call, Deployment, GovernanceChange,
+    GovernanceRecord, JournalEntry, Outcome, Refusal, TenantState, DEFAULT_AUDIT_CAPACITY,
+    DEFAULT_REPLAY_MEMORY, MAX_IDENTIFIER_BYTES,
 };

@@ -14,20 +14,31 @@
 //!
 //! ## Shape: a snapshot plus a journal
 //!
-//! [`Store`] keeps two files under one root:
+//! [`Store`] keeps three files under one root:
 //!
 //! | file | contents | written by |
 //! |---|---|---|
 //! | `deployment.json` | the governed state: tenants, owners, ledgers, roles, tool governance, allowlists, activations, cells | [`Store::save_snapshot`], atomically |
 //! | `audit.jsonl` | one decision per line, in decision order | [`Store::append`], append-only |
+//! | `governance.jsonl` | one rule change per line, in the order made | [`Store::append_governance`], append-only |
 //!
-//! The snapshot is a checkpoint, not the truth: the **journal is the
-//! authority** for ordering and for everything decided since the last
-//! checkpoint. [`Store::load`] returns both, and
-//! `Deployment::restore(snapshot, &journal)` folds the tail back in. That is
-//! what makes "kill the process mid-flight and restart" lose nothing: a
-//! decision is durable once its journal line is fsynced, whether or not a
-//! snapshot followed it.
+//! The snapshot is a checkpoint, not the truth: the **journals are the
+//! authority** for ordering and for everything that happened since the last
+//! checkpoint. [`Store::load`] returns all three, and
+//! `Deployment::restore(snapshot, &journal, &governance)` folds the tails back
+//! in. That is what makes "kill the process mid-flight and restart" lose
+//! nothing: a decision is durable once its journal line is fsynced, whether or
+//! not a snapshot followed it.
+//!
+//! The two journals are separate files rather than one stream of two record
+//! kinds. The decision journal's dense-sequence check — a gap means a decision
+//! was made and lost — is the strongest guarantee this crate offers, and it
+//! only holds if nothing else consumes sequences. Rule changes carry their own
+//! ordering instead (`GovernanceRecord::at_sequence` anchors each one between
+//! two decisions), so they merge into one readable trail without weakening the
+//! check. Both are replayed as **evidence**, never as instructions: the
+//! snapshot already holds the state a rule change produced, so re-applying the
+//! record would apply it twice.
 //!
 //! ## Why the journal is not written with `write_durable`
 //!
@@ -60,12 +71,21 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use ccos_enterprise_runtime::{AuditRecord, DeploymentSnapshot};
+use ccos_enterprise_runtime::{AuditRecord, DeploymentSnapshot, GovernanceRecord};
 
 /// Snapshot file name under the store root.
 pub const SNAPSHOT_FILE: &str = "deployment.json";
 /// Journal file name under the store root.
 pub const JOURNAL_FILE: &str = "audit.jsonl";
+
+/// Rule changes, one JSON object per line, in the order they were made.
+///
+/// A second file rather than a second kind of line in `audit.jsonl`: the
+/// decision journal's framing and its dense-sequence check are the strongest
+/// guarantees this crate offers, and widening its record type would weaken
+/// both to carry a stream that has its own ordering anyway
+/// (`GovernanceRecord::at_sequence`/`ordinal`).
+pub const GOVERNANCE_FILE: &str = "governance.jsonl";
 /// Single-writer lock file under the store root. Never read or written — only
 /// the kernel lock held on it means anything. See [`Store::open`].
 pub const LOCK_FILE: &str = "store.lock";
@@ -165,6 +185,10 @@ pub struct Loaded {
     pub snapshot: DeploymentSnapshot,
     /// Every journaled decision, in sequence order.
     pub journal: Vec<AuditRecord>,
+    /// Every journaled rule change, in the order it was made. Anchored to the
+    /// decision stream by `at_sequence`, so the two merge without sharing a
+    /// counter — see [`ccos_enterprise_runtime::GovernanceRecord`].
+    pub governance: Vec<GovernanceRecord>,
     /// Bytes discarded from the end of the journal because the process died
     /// mid-append. `0` on a clean shutdown. Non-zero means one decision was
     /// made and not durably recorded — the caller should say so out loud, and
@@ -181,6 +205,10 @@ pub struct Loaded {
 pub struct Store {
     root: PathBuf,
     journal: BufWriter<File>,
+    governance: BufWriter<File>,
+    /// The next governance ordinal this store expects, so a rule change cannot
+    /// be journaled out of order or reuse an ordinal.
+    next_ordinal: u64,
     /// The next sequence this store expects to append, so a caller cannot
     /// journal decisions out of order or skip one.
     next_sequence: u64,
@@ -249,9 +277,23 @@ impl Store {
             .append(true)
             .open(&journal_path)
             .map_err(io(&journal_path))?;
+
+        let governance_path = root.join(GOVERNANCE_FILE);
+        let next_ordinal = match read_governance(&governance_path)? {
+            Some((records, _)) => records.last().map(|r| r.ordinal + 1).unwrap_or(0),
+            None => 0,
+        };
+        let governance_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&governance_path)
+            .map_err(io(&governance_path))?;
+
         Ok(Self {
             root,
             journal: BufWriter::new(file),
+            governance: BufWriter::new(governance_file),
+            next_ordinal,
             next_sequence,
             _lock: lock,
         })
@@ -273,6 +315,15 @@ impl Store {
 
     fn journal_path(&self) -> PathBuf {
         self.root.join(JOURNAL_FILE)
+    }
+
+    fn governance_path(&self) -> PathBuf {
+        self.root.join(GOVERNANCE_FILE)
+    }
+
+    /// The ordinal the next appended rule change must carry.
+    pub fn next_ordinal(&self) -> u64 {
+        self.next_ordinal
     }
 
     /// Write the governed state atomically.
@@ -354,6 +405,49 @@ impl Store {
         Ok(())
     }
 
+    /// Append rule changes, with the same validate-then-write discipline as
+    /// [`Store::append`]: nothing reaches the writer until the whole batch is
+    /// known good, so a refused batch really did write nothing.
+    pub fn append_governance(&mut self, records: &[GovernanceRecord]) -> Result<(), StoreError> {
+        let path = self.governance_path();
+
+        let mut expected = self.next_ordinal;
+        let mut buffer: Vec<u8> = Vec::new();
+        for record in records {
+            if record.ordinal != expected {
+                return Err(StoreError::JournalDiscontinuity {
+                    path,
+                    line: 0,
+                    expected,
+                    found: record.ordinal,
+                });
+            }
+            let line = serde_json::to_vec(record).map_err(|e| StoreError::JournalCorrupt {
+                path: path.clone(),
+                line: 0,
+                detail: format!("cannot be serialized: {e}"),
+            })?;
+            if line.contains(&b'\n') {
+                return Err(StoreError::JournalCorrupt {
+                    path,
+                    line: 0,
+                    detail: "a serialized record contains a raw newline, which \
+                             would break the one-record-per-line framing"
+                        .to_string(),
+                });
+            }
+            buffer.extend_from_slice(&line);
+            buffer.push(b'\n');
+            expected += 1;
+        }
+
+        self.governance.write_all(&buffer).map_err(io(&path))?;
+        self.governance.flush().map_err(io(&path))?;
+        self.governance.get_ref().sync_data().map_err(io(&path))?;
+        self.next_ordinal = expected;
+        Ok(())
+    }
+
     /// Read the durable state back.
     ///
     /// `Ok(None)` means "no store here yet" and is the *only* empty answer:
@@ -369,6 +463,7 @@ impl Store {
             Err(e) => return Err(io(&snapshot_path)(e)),
         };
         let journal = read_journal(&journal_path)?;
+        let governance = read_governance(&self.governance_path())?;
 
         match (snapshot_bytes, journal) {
             (None, None) => Ok(None),
@@ -386,20 +481,32 @@ impl Store {
                         detail: e.to_string(),
                     })?;
                 let (journal, torn_tail) = journal.unwrap_or_default();
+                let (governance, governance_torn) = governance.unwrap_or_default();
                 Ok(Some(Loaded {
                     snapshot,
                     journal,
-                    torn_tail,
+                    governance,
+                    // One torn-tail figure for the store, not one per file:
+                    // what the caller has to say out loud is "a write did not
+                    // survive", and which file it was in does not change that.
+                    torn_tail: torn_tail + governance_torn,
                 }))
             }
         }
     }
 }
 
-/// Parse the journal. `None` when the file does not exist.
+/// A journal file's committed lines, and how many bytes of torn tail were
+/// discarded to get them.
+type Committed = (Vec<Vec<u8>>, usize);
+
+/// Split a journal file into its committed lines. `None` when the file does
+/// not exist.
 ///
-/// Returns the records and how many bytes of torn tail were discarded.
-fn read_journal(path: &Path) -> Result<Option<(Vec<AuditRecord>, usize)>, StoreError> {
+/// Returns the lines and how many bytes of torn tail were discarded. Both
+/// journals share this because both share the framing: one JSON object per
+/// line, appended, never rewritten.
+fn read_lines(path: &Path) -> Result<Option<Committed>, StoreError> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -424,9 +531,7 @@ fn read_journal(path: &Path) -> Result<Option<(Vec<AuditRecord>, usize)>, StoreE
     let trailing = lines.pop();
     debug_assert!(matches!(trailing, None | Some(&[])));
 
-    let mut records: Vec<AuditRecord> = Vec::new();
-    let mut expected = 0u64;
-    for (index, line) in lines.into_iter().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         if line.is_empty() {
             return Err(StoreError::JournalCorrupt {
                 path: path.to_path_buf(),
@@ -436,8 +541,26 @@ fn read_journal(path: &Path) -> Result<Option<(Vec<AuditRecord>, usize)>, StoreE
                     .to_string(),
             });
         }
+    }
+    Ok(Some((
+        lines.into_iter().map(<[u8]>::to_vec).collect(),
+        torn_tail,
+    )))
+}
+
+/// Parse the decision journal. `None` when the file does not exist.
+///
+/// Sequences must be dense from zero: a gap means a decision was made and
+/// lost, and this is the only place that can still say so.
+fn read_journal(path: &Path) -> Result<Option<(Vec<AuditRecord>, usize)>, StoreError> {
+    let Some((lines, torn_tail)) = read_lines(path)? else {
+        return Ok(None);
+    };
+    let mut records: Vec<AuditRecord> = Vec::new();
+    let mut expected = 0u64;
+    for (index, line) in lines.into_iter().enumerate() {
         let record: AuditRecord =
-            serde_json::from_slice(line).map_err(|e| StoreError::JournalCorrupt {
+            serde_json::from_slice(&line).map_err(|e| StoreError::JournalCorrupt {
                 path: path.to_path_buf(),
                 line: index + 1,
                 detail: e.to_string(),
@@ -456,12 +579,44 @@ fn read_journal(path: &Path) -> Result<Option<(Vec<AuditRecord>, usize)>, StoreE
     Ok(Some((records, torn_tail)))
 }
 
+/// Parse the governance journal. `None` when the file does not exist.
+///
+/// Ordinals must be dense from zero, for the same reason and with the same
+/// force as the decision journal's sequences: a rule change that was made and
+/// then lost is precisely the thing this file exists to make impossible.
+fn read_governance(path: &Path) -> Result<Option<(Vec<GovernanceRecord>, usize)>, StoreError> {
+    let Some((lines, torn_tail)) = read_lines(path)? else {
+        return Ok(None);
+    };
+    let mut records: Vec<GovernanceRecord> = Vec::new();
+    let mut expected = 0u64;
+    for (index, line) in lines.into_iter().enumerate() {
+        let record: GovernanceRecord =
+            serde_json::from_slice(&line).map_err(|e| StoreError::JournalCorrupt {
+                path: path.to_path_buf(),
+                line: index + 1,
+                detail: e.to_string(),
+            })?;
+        if record.ordinal != expected {
+            return Err(StoreError::JournalDiscontinuity {
+                path: path.to_path_buf(),
+                line: index + 1,
+                expected,
+                found: record.ordinal,
+            });
+        }
+        expected = record.ordinal + 1;
+        records.push(record);
+    }
+    Ok(Some((records, torn_tail)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ccos_enterprise_runtime::{
-        actor, request, two_tenant_deployment, Call, Deployment, Outcome, Refusal, RestoreError,
-        TenantState,
+        actor, request, two_tenant_deployment, Call, Deployment, JournalEntry, Outcome, Refusal,
+        RestoreError, TenantState,
     };
 
     use ccos_enterprise_auth::AuthStrength;
@@ -529,7 +684,8 @@ mod tests {
         let store = Store::open(&dir).expect("reopen");
         let loaded = store.load().expect("load").expect("a store exists");
         assert_eq!(loaded.torn_tail, 0, "clean shutdown");
-        let restored = Deployment::restore(loaded.snapshot, &loaded.journal).expect("restore");
+        let restored = Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance)
+            .expect("restore");
         assert_eq!(restored.spent("acme"), Some(357), "the ledger survived");
         assert_eq!(restored.spent("globex"), Some(0));
         assert_eq!(
@@ -553,7 +709,9 @@ mod tests {
 
         let store = Store::open(&dir).expect("reopen");
         let loaded = store.load().expect("load").expect("store");
-        let mut restored = Deployment::restore(loaded.snapshot, &loaded.journal).expect("restore");
+        let mut restored =
+            Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance)
+                .expect("restore");
         let a = actor("memorithm", "alice", AuthStrength::Token);
         let req = request("acme", "alice", "memory.ingest", "after-restart");
         assert_eq!(
@@ -573,6 +731,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A rule change survives a restart, keeps its place in the decision
+    /// stream, and is not re-applied.
+    ///
+    /// The last part is the one worth being explicit about: the snapshot
+    /// already holds the roles and allowlists the change produced, so replaying
+    /// the record as an instruction would apply it twice. Governance records
+    /// are evidence — read back into the trail, never back into the state.
+    #[test]
+    fn a_rule_change_survives_a_restart_in_its_place_in_the_journal() {
+        let dir = scratch("governance");
+        let mut store = Store::open(&dir).expect("open");
+        let mut d = two_tenant_deployment();
+        store.save_snapshot(&d.snapshot()).expect("snapshot");
+
+        // A decision, then a change, then another decision.
+        run(&mut d, &mut store, &[("acme", "before", 10)]);
+        assert!(d
+            .as_admin("root", "incident 902")
+            .redefine_role("reader", &["memory.read", "policy.admin"]));
+        let changes: Vec<_> = d.governance().cloned().collect();
+        assert_eq!(changes.len(), 1);
+        store.append_governance(&changes).expect("append");
+        run(&mut d, &mut store, &[("acme", "after", 10)]);
+        store.save_snapshot(&d.snapshot()).expect("snapshot");
+        drop(store);
+
+        let store = Store::open(&dir).expect("reopen");
+        let loaded = store.load().expect("load").expect("store");
+        assert_eq!(loaded.governance.len(), 1, "the change is on disk");
+        assert_eq!(loaded.torn_tail, 0);
+        let restored = Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance)
+            .expect("restore");
+
+        // Same trail, same order, same attribution.
+        let rows = restored.journal();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let JournalEntry::Governance(change) = rows[1] else {
+            panic!("the change lost its place: {rows:?}");
+        };
+        assert_eq!(change.at_sequence, 1);
+        assert_eq!(change.actor.as_deref(), Some("root"));
+        assert_eq!(change.justification.as_deref(), Some("incident 902"));
+
+        // The state is the snapshot's, not the record re-applied: `reader`
+        // holds exactly what it held when the snapshot was taken.
+        assert_eq!(
+            restored.roles_of("bob"),
+            vec!["reader"],
+            "no grant was invented by the replay"
+        );
+        // And the next change continues the ordinal rather than restarting it,
+        // so a second restart cannot renumber history.
+        let mut restored = restored;
+        assert!(restored.remove_role("reader"));
+        assert_eq!(
+            restored.governance().last().expect("journaled").ordinal,
+            1,
+            "the ordinal continues across the restart"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_replayed_request_id_is_still_suppressed_after_a_restart() {
         let dir = scratch("replay");
@@ -584,7 +804,9 @@ mod tests {
 
         let store = Store::open(&dir).expect("reopen");
         let loaded = store.load().expect("load").expect("store");
-        let mut restored = Deployment::restore(loaded.snapshot, &loaded.journal).expect("restore");
+        let mut restored =
+            Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance)
+                .expect("restore");
         let a = actor("memorithm", "alice", AuthStrength::Token);
         let req = request("acme", "alice", "memory.ingest", "once");
         assert_eq!(
@@ -629,7 +851,8 @@ mod tests {
         let loaded = store.load().expect("load").expect("store");
         assert_eq!(loaded.torn_tail, 37, "the partial line is measured");
         assert_eq!(loaded.journal.len(), 2, "and the committed lines survive");
-        let restored = Deployment::restore(loaded.snapshot, &loaded.journal).expect("restore");
+        let restored = Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance)
+            .expect("restore");
         assert_eq!(restored.spent("acme"), Some(30));
         // The store resumes at the next sequence, not at the torn one.
         assert_eq!(store.next_sequence(), 2);
@@ -715,7 +938,7 @@ mod tests {
         std::fs::write(dir.join(SNAPSHOT_FILE), text).expect("write");
 
         let loaded = store.load().expect("the file still parses").expect("store");
-        let err = match Deployment::restore(loaded.snapshot, &loaded.journal) {
+        let err = match Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance) {
             Ok(_) => panic!("an impossible ledger must be refused"),
             Err(e) => e,
         };
@@ -795,7 +1018,8 @@ mod tests {
             "the checkpoint's mark"
         );
         assert_eq!(loaded.journal.len(), 4, "the journal keeps all four");
-        let restored = Deployment::restore(loaded.snapshot, &loaded.journal).expect("restore");
+        let restored = Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance)
+            .expect("restore");
 
         assert_eq!(
             restored.spent("acme"),
@@ -988,7 +1212,8 @@ mod tests {
 
         let store = Store::open(&dir).expect("reopen");
         let loaded = store.load().expect("load").expect("store");
-        let restored = Deployment::restore(loaded.snapshot, &loaded.journal).expect("restore");
+        let restored = Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance)
+            .expect("restore");
         for tenant in ["acme", "globex"] {
             assert_eq!(
                 restored.spent(tenant),

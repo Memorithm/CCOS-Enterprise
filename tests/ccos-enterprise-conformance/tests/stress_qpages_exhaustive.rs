@@ -103,7 +103,7 @@
 
 use ccos_enterprise_auth::AuthStrength;
 use ccos_enterprise_conformance::{
-    actor, request, AuditRecord, Call, Deployment, Outcome, Refusal, TenantState,
+    actor, request, AuditRecord, Call, Deployment, GovernanceChange, Outcome, Refusal, TenantState,
     DEFAULT_AUDIT_CAPACITY,
 };
 use ccos_enterprise_qpages::{AdvancedQPageVariant, QPageRegistry};
@@ -653,7 +653,7 @@ fn ten_thousand_tenants_keep_disjoint_activation_sets() {
     // Pass 2: hammer a strided sample — activate everything on every 97th
     // tenant. (Clearing is unreachable; see F10 above.)
     for t in (0..N).step_by(97) {
-        let state = d.tenant_mut(&tenant_name(t)).expect("provisioned above");
+        let mut state = d.tenant_mut(&tenant_name(t)).expect("provisioned above");
         for v in ALL {
             state.activate(v);
         }
@@ -1031,18 +1031,27 @@ fn a_replayed_request_id_is_never_billed_twice() {
 fn activation_needs_no_privilege_and_leaves_no_trace() {
     let mut d = deployment_activating(0);
 
-    // No actor, no permission check, no `PolicyDecision`, no approval.
-    let state = d.tenant_mut("acme").expect("tenant exists");
-    for v in ALL {
-        state.activate(v);
+    // No actor, no permission check, no `PolicyDecision`, no approval. The
+    // borrow is scoped so the guard's record lands before the journal is read.
+    {
+        let mut state = d.tenant_mut("acme").expect("tenant exists");
+        for v in ALL {
+            state.activate(v);
+        }
     }
 
     let journaled = d.audit().count();
     assert_eq!(
         journaled, 0,
-        "activating ten advanced variants produced {journaled} audit records; the \
-         documented 'auditable tenant decision' journals nothing",
+        "activating ten advanced variants produced {journaled} audit records; \
+         an activation is not a decision",
     );
+    // Nor a governance record — this deployment has not decided anything yet,
+    // so the activation is *provisioning*: there is no outcome for it to
+    // explain. That is the line the runtime draws, and it is drawn here on
+    // purpose, because the same call on a serving deployment IS journaled.
+    assert_eq!(d.governance().count(), 0, "provisioning leaves no trail");
+    assert!(!d.is_serving());
     assert!(
         d.metrics()
             .iter()
@@ -1050,6 +1059,42 @@ fn activation_needs_no_privilege_and_leaves_no_trace() {
         "activation is invisible to observability too — the only rows are the \
          registry's own gauges, all reading zero: {:?}",
         d.metrics()
+    );
+
+    // Once the deployment is serving, the same activation IS recorded — with
+    // what it activated, anchored to the decision it followed. What stays
+    // open is the privilege: it still takes no actor and no permission, and
+    // the record says as much by carrying neither.
+    // The probe is a boundary refusal, so it starts the deployment serving
+    // without billing anything and leaves the count below intact.
+    let reader = actor("memorithm", "bob", AuthStrength::Token);
+    let probe = request("acme", "bob", "shell.exec", "r-serving");
+    assert!(!d
+        .admit(Call {
+            actor: &reader,
+            request: &probe,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: None,
+        })
+        .is_forwarded());
+    assert!(d.is_serving());
+    {
+        let mut state = d.tenant_mut("acme").expect("tenant exists");
+        state.allow_model("smuggled-model");
+    }
+    let change = d.governance().next().expect("now it is journaled");
+    assert_eq!(change.actor, None, "still no identity is demanded");
+    assert_eq!(change.justification, None);
+    assert!(
+        matches!(
+            &change.change,
+            GovernanceChange::TenantRulesChanged { models_allowed, .. }
+                if models_allowed == &["smuggled-model".to_string()]
+        ),
+        "{:?}",
+        change.change
     );
 
     // And a plain `reader` — the least privileged role in the fixture — can

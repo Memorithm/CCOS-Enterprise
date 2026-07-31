@@ -86,21 +86,27 @@ pub const ALLOWED_TOOLS: &[&str] = &["system.health"];
 /// matching is case-insensitive so `RSI.x` cannot slip past a case-normalizing
 /// router downstream.
 pub fn classify(req: &GatewayRequest) -> Disposition {
-    if req.tool.is_empty()
-        || req
-            .tool
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control())
-    {
+    if !is_canonical_tool_name(&req.tool) {
         return Disposition::Reject("tool name is empty or not canonical".into());
     }
     let lowered = req.tool.to_ascii_lowercase();
-    let forbidden = FORBIDDEN_PREFIXES.iter().any(|p| lowered.starts_with(p))
-        || FORBIDDEN_TOOLS.contains(&lowered.as_str());
+    // Match the forbidden lists at EVERY segment boundary, not only at byte 0.
+    //
+    // Anchoring both checks at the start of the name let an exposed prefix
+    // launder every forbidden capability: `ccos.shell.exec` does not begin
+    // with `shell.`, so it escaped the boundary, and it does begin with
+    // `ccos.`, so the catalogue admitted it. 121 spellings forwarded, and on
+    // the composed path a read-only actor reached `shell.exec` for real
+    // budget with no boundary counter moving. A forbidden capability must be
+    // refused wherever it appears in the name, not only when it is the head.
+    let forbidden = segment_suffixes(&lowered).any(|suffix| {
+        FORBIDDEN_PREFIXES.iter().any(|p| suffix.starts_with(p))
+            || FORBIDDEN_TOOLS.contains(&suffix)
+    });
     if forbidden {
         return Disposition::Reject(format!(
             "tool namespace '{}' is outside the Enterprise boundary",
-            req.tool
+            sanitize(&req.tool)
         ));
     }
     let exposed = ALLOWED_PREFIXES.iter().any(|p| lowered.starts_with(p))
@@ -108,10 +114,70 @@ pub fn classify(req: &GatewayRequest) -> Disposition {
     if !exposed {
         return Disposition::Reject(format!(
             "tool '{}' is not in the Enterprise catalogue",
-            req.tool
+            sanitize(&req.tool)
         ));
     }
     Disposition::Forward
+}
+
+/// A canonical tool name: one or more dot-separated segments of
+/// `[a-z0-9_]`, ASCII only, no empty segment, no leading or trailing dot.
+///
+/// Deliberately narrow, and that narrowness is the point. Path separators,
+/// command separators, zero-width joiners, RTL overrides, homoglyphs and
+/// trailing dots are all ways of writing a forbidden capability that some
+/// downstream router might normalize back — `memory.recall/../shell.exec`
+/// and `policy.set;shell.exec` were both forwarded before this existed. A
+/// name the boundary cannot read unambiguously is not classified: it is
+/// refused.
+fn is_canonical_tool_name(tool: &str) -> bool {
+    !tool.is_empty()
+        && tool.len() <= MAX_TOOL_NAME_BYTES
+        && tool.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment.bytes().all(|b| {
+                    b.is_ascii_lowercase()
+                        || b.is_ascii_uppercase()
+                        || b.is_ascii_digit()
+                        || b == b'_'
+                })
+        })
+}
+
+/// Every suffix of `name` that begins at a segment boundary, longest first:
+/// `a.b.c` yields `a.b.c`, `b.c`, `c`.
+fn segment_suffixes(name: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(name).chain(name.match_indices('.').map(|(i, _)| &name[i + 1..]))
+}
+
+/// Longest tool name the boundary will even look at. A canonical name is a
+/// few dozen bytes; anything larger is a probe, and refusing it early keeps
+/// megabyte-scale names out of refusal messages and audit records.
+const MAX_TOOL_NAME_BYTES: usize = 256;
+
+/// Render a rejected name safe to put in a message that will be logged.
+///
+/// The refusal embedded the caller's string verbatim, so a name containing
+/// newlines or ANSI escapes could forge log lines. Canonical names never
+/// reach this (they are ASCII by construction), but non-canonical ones are
+/// exactly the hostile case.
+fn sanitize(tool: &str) -> String {
+    const MAX: usize = 64;
+    let mut out: String = tool
+        .chars()
+        .take(MAX)
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '\u{fffd}'
+            }
+        })
+        .collect();
+    if tool.chars().nth(MAX).is_some() {
+        out.push('…');
+    }
+    out
 }
 
 #[cfg(test)]

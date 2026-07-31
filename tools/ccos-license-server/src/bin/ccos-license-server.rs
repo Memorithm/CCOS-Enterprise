@@ -102,6 +102,7 @@ fn main() {
         vault_path,
         seed,
         bucket: TokenBucket::new(10.0, 0.5),
+        vault_seen: None,
     };
     if let Err(e) = serve(listener, counter) {
         eprintln!("[counter] fatal: {e}");

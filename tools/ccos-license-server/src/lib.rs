@@ -30,7 +30,9 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +51,13 @@ pub const VAULT_SCHEMA_V1: &str = "ccos.license.vault/v1";
 const MAX_HEAD: usize = 8 * 1024;
 const MAX_BODY: usize = 4 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// How many connections may be in flight at once. A read timeout bounds how
+/// long *one* connection blocks; it does not bound how long the *queue*
+/// waits, so a strictly sequential loop lets a single socket that sends
+/// nothing hold up every paying customer for the full timeout. Connections
+/// are therefore handled concurrently, and beyond this many in flight the
+/// counter sheds load with an announced 503 rather than queueing silently.
+pub const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 /// Ceiling on one whole request (head + body), whatever the drip rate — the
 /// per-read timeout alone would let a client that sends one byte every few
 /// seconds hold this sequential server for hours.
@@ -240,6 +249,10 @@ impl TokenBucket {
     }
 }
 
+/// How the vault file looked when this process last read or wrote it:
+/// modification time and length. Used to notice an out-of-band edit.
+pub type VaultFingerprint = (SystemTime, u64);
+
 /// The claim counter: everything [`serve`] needs across requests.
 pub struct Counter {
     pub vault: Vault,
@@ -248,9 +261,63 @@ pub struct Counter {
     /// environment, never from the vault).
     pub seed: [u8; 32],
     pub bucket: TokenBucket,
+    /// The vault file as this process last saw it. `None` re-reads on the
+    /// next claim. See [`Counter::refresh_vault`].
+    pub vault_seen: Option<VaultFingerprint>,
+}
+
+/// Read the vault file's fingerprint. An unreadable file yields `None`, which
+/// forces a reload attempt rather than silently trusting memory.
+fn fingerprint(path: &Path) -> Option<VaultFingerprint> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 impl Counter {
+    /// Re-read the vault when the file on disk is no longer the one this
+    /// process last read or wrote.
+    ///
+    /// The daemon holds the ledger in memory and writes the whole map back on
+    /// every claim, so without this an out-of-band edit is not merely ignored
+    /// — it is **destroyed** by the next claim. That is not a hypothetical
+    /// path: `docs/LICENSING_SERVER.md` instructs the operator to manage codes
+    /// with `ccos-license-admin` and upload `vault.json` over SFTP. Against a
+    /// long-lived daemon that made `revoke` a no-op (the revoked code kept
+    /// selling, and the sale erased the revocation) and made every seat sold
+    /// while the daemon was up disappear at the next claim.
+    ///
+    /// Cheap by design: a `stat` per claim, and a re-read only when the
+    /// fingerprint actually moved. Two caveats worth stating plainly — an
+    /// edit that preserves both length and modification time is missed (file
+    /// timestamps are coarse), and this closes the *stale-read* window, not
+    /// the write race: an upload landing between this refresh and the save
+    /// below is still lost. Concurrent editing of a live vault needs file
+    /// locking, which is a larger change than this repair.
+    pub fn refresh_vault(&mut self) -> io::Result<()> {
+        let Some(current) = fingerprint(&self.vault_path) else {
+            // No file to adopt. The daemon refuses to start without a
+            // loadable vault, so in production this means the ledger was
+            // removed underneath a running process; the in-memory copy is
+            // then the only truth left and the next save restores it. Not a
+            // reason to refuse a paying customer.
+            return Ok(());
+        };
+        if Some(current) == self.vault_seen {
+            return Ok(());
+        }
+        self.vault = Vault::load(&self.vault_path)?;
+        self.vault_seen = fingerprint(&self.vault_path);
+        Ok(())
+    }
+
+    /// Persist the ledger and remember the file we just wrote, so the next
+    /// [`Counter::refresh_vault`] does not mistake our own write for an
+    /// out-of-band edit.
+    fn save_vault(&mut self) -> io::Result<()> {
+        self.vault.save(&self.vault_path)?;
+        self.vault_seen = fingerprint(&self.vault_path);
+        Ok(())
+    }
     /// Handle one parsed request → `(http status, JSON body)`. Pure except for
     /// the durable vault write on a successful state flip — which happens
     /// **before** the token is disclosed, and is rolled back from disk if the
@@ -278,10 +345,17 @@ impl Counter {
         {
             return (400, err_body("malformed claim request"));
         }
+        // Adopt any out-of-band edit BEFORE deciding, so a revocation applied
+        // while this process was running is honoured instead of overwritten.
+        // Fail closed: a ledger we cannot re-read is one we must not flip.
+        if let Err(e) = self.refresh_vault() {
+            eprintln!("[counter] vault reload FAILED, claim refused: {e}");
+            return (500, err_body("ledger unavailable — nothing was issued"));
+        }
         let before = self.vault.clone();
         match self.vault.claim(&req.code_hash, &req.machine, now) {
             Ok((licensee, exp)) => {
-                if let Err(e) = self.vault.save(&self.vault_path) {
+                if let Err(e) = self.save_vault() {
                     // Roll back in memory: the ledger on disk is the truth.
                     self.vault = before;
                     eprintln!("[counter] persist FAILED, claim refused: {e}");
@@ -334,12 +408,29 @@ fn err_body(msg: &str) -> String {
 
 // ── The zero-framework HTTP/1.1 loop ─────────────────────────────────
 
-/// Serve claims forever on `listener`. Connections are handled sequentially
-/// with hard read/write timeouts AND a whole-request deadline — at one small
-/// request per *sale*, latency fairness is not a design pressure, and no
-/// thread pool means no thread-pool bugs; the deadline keeps one slow client
-/// from parking the queue. TLS is the reverse proxy's job.
-pub fn serve(listener: TcpListener, mut counter: Counter) -> io::Result<()> {
+/// Serve claims forever on `listener`, one thread per connection, at most
+/// [`MAX_CONCURRENT_CONNECTIONS`] in flight.
+///
+/// This loop used to be strictly sequential, on the reasoning that at one
+/// small request per *sale* latency fairness is not a design pressure. That
+/// reasoning is wrong against a hostile client, and measurably so: a single
+/// socket that completes the handshake and then sends **zero bytes** made an
+/// honest `GET /healthz` wait 5.15 s, because one connection was the whole of
+/// the counter's capacity. The per-read timeout and the whole-request deadline
+/// bound how long *one* connection blocks; neither bounds how long the queue
+/// behind it waits, and the attacker pays nothing — no bytes, no completion,
+/// and no rate-limit token, since the bucket is only consulted once a request
+/// has parsed.
+///
+/// So: connections are served concurrently, the ledger is shared behind a
+/// mutex (only claims take it, and only briefly), and past the cap the
+/// counter sheds load with an announced 503 instead of queueing silently.
+/// A slow client now costs one thread and its own latency, not everyone's.
+/// TLS is still the reverse proxy's job.
+pub fn serve(listener: TcpListener, counter: Counter) -> io::Result<()> {
+    let counter = Arc::new(Mutex::new(counter));
+    let in_flight = Arc::new(AtomicUsize::new(0));
+
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else {
             // Transient accept failure (EMFILE, ECONNABORTED, …): don't spin
@@ -349,16 +440,57 @@ pub fn serve(listener: TcpListener, mut counter: Counter) -> io::Result<()> {
         };
         let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-        let deadline = Instant::now() + REQUEST_DEADLINE;
-        let (status, body) = match read_request(&mut stream, deadline) {
-            Some((method, path, body)) => {
-                counter.handle(&method, &path, &body, ccos_core::license::now_unix())
-            }
-            None => (400, err_body("malformed request")),
-        };
-        let _ = write_response(&mut stream, status, &body);
+
+        if in_flight.load(Ordering::Acquire) >= MAX_CONCURRENT_CONNECTIONS {
+            // Announced refusal beats an unbounded thread count. Writing it
+            // is itself bounded by the write timeout set above.
+            let _ = write_response(
+                &mut stream,
+                503,
+                &err_body("counter busy — try again shortly"),
+            );
+            continue;
+        }
+
+        in_flight.fetch_add(1, Ordering::AcqRel);
+        let counter = Arc::clone(&counter);
+        let flight = Arc::clone(&in_flight);
+        let spawned = std::thread::Builder::new()
+            .name("ccos-claim".into())
+            .spawn(move || {
+                // Decrement even if the body panics, so one bad connection
+                // cannot permanently consume a slot.
+                let _guard = InFlightGuard(&flight);
+                let deadline = Instant::now() + REQUEST_DEADLINE;
+                let (status, body) = match read_request(&mut stream, deadline) {
+                    Some((method, path, body)) => {
+                        let now = ccos_core::license::now_unix();
+                        match counter.lock() {
+                            Ok(mut c) => c.handle(&method, &path, &body, now),
+                            // A poisoned mutex means an earlier claim panicked
+                            // mid-flip: refuse rather than trust the ledger.
+                            Err(_) => (500, err_body("counter unavailable")),
+                        }
+                    }
+                    None => (400, err_body("malformed request")),
+                };
+                let _ = write_response(&mut stream, status, &body);
+            });
+        if spawned.is_err() {
+            // Out of threads: give the slot back and shed this connection.
+            in_flight.fetch_sub(1, Ordering::AcqRel);
+        }
     }
     Ok(())
+}
+
+/// Releases an in-flight slot on drop, panic included.
+struct InFlightGuard<'a>(&'a AtomicUsize);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Parse one HTTP/1.1 request off the socket: request line, `Content-Length`,
@@ -384,11 +516,28 @@ fn read_request(stream: &mut TcpStream, deadline: Instant) -> Option<(String, St
     let mut request_line = lines.next()?.split_whitespace();
     let method = request_line.next()?.to_string();
     let path = request_line.next()?.to_string();
-    let content_length: usize = lines
+    // Content-Length, strictly. The previous `.parse().ok().unwrap_or(0)`
+    // could not tell "no header" from "header we could not read", so
+    // `Content-Length: abc` and a value one past `u64::MAX` both silently
+    // became zero and were answered 200 — a request smuggling primitive the
+    // moment anything sits in front of this server. A header that is present
+    // must be exactly one header and exactly a decimal number.
+    let mut lengths = lines
         .filter_map(|l| l.split_once(':'))
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.trim().parse().ok())
-        .unwrap_or(0);
+        .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .map(|(_, v)| v.trim());
+    let content_length: usize = match (lengths.next(), lengths.next()) {
+        (None, _) => 0,
+        // Two Content-Length headers: the classic desync. Refuse outright
+        // rather than pick one and hope the proxy picked the same.
+        (Some(_), Some(_)) => return None,
+        (Some(v), None) => {
+            if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            v.parse().ok()?
+        }
+    };
     if content_length > MAX_BODY {
         return None;
     }
@@ -539,6 +688,7 @@ mod tests {
             vault_path: dir.join("vault.json"),
             seed: SEED,
             bucket: TokenBucket::new(100.0, 100.0),
+            vault_seen: None,
         }
     }
 

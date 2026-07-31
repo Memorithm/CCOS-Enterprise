@@ -114,7 +114,15 @@ pub fn canonical_code(input: &str) -> Option<String> {
                     'I' | 'L' => '1',
                     up => up,
                 };
-                if !ALPHABET.contains(&(c as u8)) {
+                // Compare the CHARACTER, not its truncated low byte. `c as u8`
+                // narrows a `char` to `u8`, so U+0430 (Cyrillic а) became 0x30
+                // — ASCII '0', a member of the alphabet. The guard passed, a
+                // two-byte character was pushed, and because the length check
+                // below counts BYTES the value then cleared it at 19 symbols
+                // and the byte-indexed slices landed mid-character: the parser
+                // documented as returning `None` panicked instead, and when it
+                // did not it returned strings violating its own contract.
+                if !c.is_ascii() || !ALPHABET.contains(&(c as u8)) {
                     return None;
                 }
                 symbols.push(c);
@@ -123,6 +131,8 @@ pub fn canonical_code(input: &str) -> Option<String> {
     }
     // "CCOS" itself survives the alphabet (C, 0, S are all members).
     let body = symbols.strip_prefix("CC0S").unwrap_or(&symbols);
+    // Every accepted symbol is ASCII, so bytes and characters agree here —
+    // but only because the guard above now enforces it.
     if body.len() != 20 {
         return None;
     }

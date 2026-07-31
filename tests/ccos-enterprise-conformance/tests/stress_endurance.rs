@@ -572,6 +572,7 @@ fn tag_of(r: &Refusal) -> &'static str {
         Refusal::VariantNotActivated => "variant_not_activated",
         Refusal::BudgetExhausted => "budget_exhausted",
         Refusal::JustificationRequired => "justification_required",
+        Refusal::StorageExhausted => "storage_exhausted",
     }
 }
 

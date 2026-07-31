@@ -1171,8 +1171,9 @@ fn refusal_index(r: &Refusal) -> usize {
         Refusal::BudgetExhausted => 7,
         Refusal::ActorMismatch => 8,
         Refusal::TenantNotOwnedByOrg => 9,
-        Refusal::JustificationRequired => 11,
         Refusal::MalformedRequest(_) => 10,
+        Refusal::JustificationRequired => 11,
+        Refusal::StorageExhausted => 12,
     }
 }
 

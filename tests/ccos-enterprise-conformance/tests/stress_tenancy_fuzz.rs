@@ -138,75 +138,74 @@
 //!     operator error an audit trail exists to record, and it leaves no trace.
 //!     -> [`re_provisioning_is_refused_but_the_store_still_outlives_the_tenant_record`]
 //!
+//! ## What was BROKEN and is now REPAIRED
+//!
+//! 1. **The tenant-scoped store was completely ungoverned.** `put`/`get`/
+//!    `cells_of` were reachable with no identity, no RBAC, no boundary check,
+//!    no budget and — decisively — **no audit record and no metric**. A write
+//!    to a tenant that did not exist in the deployment was accepted and
+//!    readable, so `Refusal::UnknownTenant` guarded `admit` and nothing else.
+//!
+//!    Two repairs. `put_cell`/`get_cell`/`remove_cell` run a cell access
+//!    through all nine gates, journal it, meter it and bill it — so
+//!    `docs/COGNITIVE_AUDIT.md`'s journal finally sees tenant memory traffic.
+//!    And the direct path can no longer produce a state the governed one could
+//!    not: it refuses an unknown tenant, an oversized key or value, and a
+//!    tenant over its cell allowance. **Still open**: a direct write is a write
+//!    with no actor and no record. It cannot create an illegal state; it can
+//!    create a legal one anonymously.
+//!    -> [`the_store_refuses_unknown_tenants_and_the_governed_path_journals_every_cell`]
+//!
+//! 3. **EXHAUSTION VECTOR — the store had no cap and no delete.** No bound on
+//!    cells, key bytes or value bytes, and no `remove`, `evict` or `clear`
+//!    anywhere in the API, so every byte written was retained for the process's
+//!    lifetime: overwriting every value with `""` gave back 400 000 B of
+//!    5 447 344 B and nothing could release the rest. A tenant whose token
+//!    budget was **zero** could still fill it.
+//!
+//!    `MAX_CELLS_PER_TENANT`, `MAX_CELL_KEY_BYTES` and `MAX_CELL_VALUE_BYTES`
+//!    make the worst case arithmetic; `remove` and `clear_cells` make it
+//!    reversible; and the governed path is metered in tokens like everything
+//!    else, so a zero-budget tenant cannot write a cell through it.
+//!    -> [`store_growth_is_bounded_and_releasable`]
+//!
+//! 4. **The tenant name was copied into every cell key**, so one long name was
+//!    amplified by its cell count: 64 KiB across 256 cells retained
+//!    16 810 950 B. The map is nested now, so the name is held once per tenant.
+//!    -> [`a_tenant_name_is_held_once_however_many_cells_it_has`]
+//!
+//! 5. **`get` allocated a full copy of the caller's key on every read**,
+//!    including a pure miss: a 4 MiB key cost a 4 MiB allocation to answer
+//!    "no". `TenantId: Borrow<str>` means both lookups take a `&str`.
+//!    -> [`get_allocates_nothing_on_a_read_including_a_pure_miss`]
+//!
+//! 9. **Tenant identifiers were raw `String`s with no canonicalisation**, so
+//!    `"acme"`, `"Acme"`, `"acme "` and `"\u{0430}cme"` were distinct, silently
+//!    coexisting namespaces. `add_tenant` refuses all but the canonical
+//!    spelling, and — new here — so does the store, so a namespace that cannot
+//!    be provisioned cannot be created through the back door either.
+//!    -> [`visually_identical_tenant_names_can_no_longer_be_provisioned`]
+//!
 //! ## What is still BROKEN
 //!
-//! 1. **The tenant-scoped store is completely ungoverned.** `put`/`get`/
-//!    `cells_of` (`src/lib.rs:328-352`) are reachable with no identity, no
-//!    RBAC, no boundary check, no budget and — decisively — **no audit record
-//!    and no metric**. A write to a tenant that does not exist in the
-//!    deployment is accepted and readable, so `Refusal::UnknownTenant` guards
-//!    `admit` and nothing else; an overwrite destroys the previous value with
-//!    zero trace. `docs/COGNITIVE_AUDIT.md`'s journal never sees a byte of
-//!    tenant memory traffic.
-//!    -> [`the_store_is_ungoverned_and_unknown_tenants_are_writable`]
-//!
 //! 2. **`rescope` is documented as "a deliberate, auditable act"
-//!    (`crates/ccos-enterprise-tenancy/src/lib.rs:27-28`) but nothing anywhere
-//!    records it.** The rescoped `TenantScope` is bit-identical to one built
-//!    from scratch, carries no provenance, and reading through it leaves the
-//!    audit journal and the metric registry empty. When the target tenant
-//!    happens to hold the same inner key the crossing silently returns the
-//!    *other* tenant's data — correct by the store's contract, invisible by the
-//!    crate's own promise.
-//!    -> [`rescope_into_an_occupied_key_substitutes_silently_and_unaudited`]
+//!    (`crates/ccos-enterprise-tenancy/src/lib.rs:27-28`) and records nothing.**
+//!    The rescoped `TenantScope` is bit-identical to one built from scratch and
+//!    carries no provenance — a scope is a struct, not an act, so the crossing
+//!    is only observable where the scope is *used*. That is why the repair had
+//!    to go on the access path: the governed path refuses the crossing and
+//!    hands back nothing, and a direct `get` through a rescoped scope is still
+//!    a silent substitution.
+//!    -> [`rescope_carries_no_provenance_and_only_the_direct_path_crosses_silently`]
 //!
-//! 3. **EXHAUSTION VECTOR — the store is an unbounded `BTreeMap` with no
-//!    delete.** No cap on cells, on key bytes, on value bytes or on tenants;
-//!    no `remove`, `delete`, `evict` or `clear` exists anywhere in the API, so
-//!    every byte written is retained for the lifetime of the process. Growth is
-//!    linear and caller-controlled: measured 218.0 / 217.9 / 217.9 B per cell
-//!    at 25k / 50k / 100k cells (2.00x per doubling) for an 80-byte payload —
-//!    a 2.7x overhead the caller does not pay for. Overwriting every value with
-//!    `""` gives back 400 000 B of 5 447 344 B (92.7% still resident), and
-//!    there is no API that releases the rest. A tenant whose token budget is
-//!    **zero** can still fill it, because the budget meters tokens on `admit`
-//!    and the store is not on that path at all.
-//!    -> [`store_growth_is_unbounded_linear_and_irreversible`]
-//!
-//! 4. **The tenant name is copied into every cell key, so one long tenant name
-//!    is amplified by its cell count.** `put` stores
-//!    `(scope.tenant.clone(), scope.inner.clone())` (`src/lib.rs:328-333`): a
-//!    64 KiB tenant name written to 256 keys retains 16 810 950 B from 256
-//!    calls — 256x the name. Nothing validates or bounds a tenant identifier.
-//!    -> [`a_long_tenant_name_is_copied_into_every_one_of_its_cells`]
-//!
-//! 5. **`get` allocates a full copy of the caller's key on every read,
-//!    including a miss.** `src/lib.rs:337-341` builds an owned
-//!    `(TenantId, String)` before looking anything up, so a 4 MiB key costs a
-//!    4 MiB allocation + memcpy even when the tenant does not exist and the
-//!    lookup cannot possibly hit — measured peak +4 194 318 B for one missing
-//!    `get`. A read-only caller controls that size.
-//!    -> [`get_clones_the_whole_key_on_every_read_including_a_pure_miss`]
-//!
-//! 9. **Tenant identifiers are raw `String`s with no canonicalisation.**
-//!    `"acme"`, `"Acme"`, `"acme "`, `"\u{0430}cme"` (Cyrillic a) and the NFC/NFD
-//!    spellings of the same name are five distinct, silently coexisting
-//!    namespaces. Isolation holds between them (that is the good news); the
-//!    provisioning surface that lets two admins create indistinguishable
-//!    tenants is the bad news, and `add_tenant` accepts all of them.
-//!    -> [`visually_identical_tenant_names_are_distinct_silent_namespaces`]
-//!
-//! 11. **NEW — the ownership refusal makes tenant names enumerable.** The
-//!     credential binding added in finding 8 answers `UnknownTenant` for a name
-//!     no organization has claimed and `TenantNotOwnedByOrg` for one another
-//!     organization owns (`src/lib.rs:429-436`). Any caller who can present a
-//!     token-strength credential for *any* org can therefore difference the two
+//! 11. **The ownership refusal makes tenant names enumerable.** The credential
+//!     binding answers `UnknownTenant` for a name no organization has claimed
+//!     and `TenantNotOwnedByOrg` for one another organization owns. Any caller
+//!     with a token-strength credential for *any* org can difference the two
 //!     and read off the deployment's tenant table one name at a time, at zero
-//!     cost, from outside every tenant. The comment at `src/lib.rs:425` says
-//!     this ordering exists "so a probe cannot enumerate tenants by their
-//!     refusal" — which holds for the actor check above it, not for this pair.
-//!     Collapsing both to one refusal would close it; the refusal is otherwise
-//!     invariant, which is what makes this the only channel left.
+//!     cost, from outside every tenant. Collapsing both to one refusal would
+//!     close it; the refusal is otherwise invariant, which is what makes this
+//!     the only channel left.
 //!     -> [`rescope_can_never_silently_read_the_source_tenants_data`], last
 //!     assertion
 //!
@@ -225,6 +224,8 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use ccos_enterprise_auth::AuthStrength;
+use ccos_enterprise_runtime::{MAX_CELLS_PER_TENANT, MAX_CELL_KEY_BYTES, MAX_CELL_VALUE_BYTES};
+
 use ccos_enterprise_conformance::{
     actor, request, two_tenant_deployment, Call, Deployment, Outcome, Refusal, TenantState,
     DEFAULT_AUDIT_CAPACITY, MAX_IDENTIFIER_BYTES,
@@ -388,8 +389,55 @@ fn hostile_string(rng: &mut Lcg, parts: usize) -> String {
     s
 }
 
+/// The organization every fixture tenant belongs to.
+const HOME_ORG: &str = "memorithm";
+
 fn scope(tenant: &str, key: &str) -> TenantScope<String> {
     TenantScope::new(TenantId(tenant.to_string()), key.to_string())
+}
+
+/// The store's shape, standing on its own.
+///
+/// `Deployment`'s cell map is `BTreeMap<TenantId, BTreeMap<String, String>>`,
+/// and the keying proofs in this section are about **that shape** rather than
+/// about the deployment wrapped around it: the tenant is a separate lookup,
+/// not a prefix, so there is no separator to smuggle and no length prefix to
+/// get wrong.
+///
+/// They are made here rather than through `Deployment::put` because the
+/// deployment now refuses a cell for a tenant it does not hold, and a tenant
+/// can only be provisioned under a canonical name — so the hostile names these
+/// tests are built from cannot reach the map through the product at all any
+/// more. That is a stronger boundary, asserted in
+/// [`hostile_tenant_names_can_no_longer_reach_the_store_at_all`]; it is also
+/// why the shape itself needs its own proof, since nothing else would exercise
+/// it with names like these again.
+#[derive(Default)]
+struct CellStore(BTreeMap<TenantId, BTreeMap<String, String>>);
+
+impl CellStore {
+    fn put(&mut self, scope: &TenantScope<String>, value: &str) {
+        self.0
+            .entry(scope.tenant.clone())
+            .or_default()
+            .insert(scope.inner.clone(), value.to_string());
+    }
+
+    fn get(&self, scope: &TenantScope<String>) -> Option<&str> {
+        self.0
+            .get(scope.tenant.0.as_str())?
+            .get(scope.inner.as_str())
+            .map(String::as_str)
+    }
+
+    fn cells_of(&self, tenant: &str) -> Vec<(&str, &str)> {
+        self.0
+            .get(tenant)
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
 }
 
 fn scope_owned(tenant: String, key: String) -> TenantScope<String> {
@@ -402,20 +450,22 @@ fn scope_owned(tenant: String, key: String) -> TenantScope<String> {
 
 /// **HELD.** The headline claim, tested rather than trusted.
 ///
-/// `Deployment`'s store is `BTreeMap<(TenantId, String), String>`
-/// (`src/lib.rs:223`, type alias at `:210`). Tuple `Eq`/`Ord` is
-/// componentwise, so the tenant is a *structurally* separate field — there is
-/// no separator to smuggle, and no length prefix to get wrong. This test
-/// asserts both directions:
+/// `Deployment`'s store is `BTreeMap<TenantId, BTreeMap<String, String>>`.
+/// The tenant is a *structurally* separate lookup — there is no separator to
+/// smuggle, and no length prefix to get wrong. This test asserts both
+/// directions:
 ///
-/// * the tuple store keeps all 27 hostile pairs apart (0 collisions), and
+/// * the nested store keeps all 27 hostile pairs apart (0 collisions), and
 /// * the flattened `"{tenant}{sep}{key}"` spelling a naive store would use
 ///   collides on most of them, for *every* separator including `\0` —
 ///
 /// so if anyone ever "optimises" the key into a single `String`, the second
 /// half of this test tells them exactly what they broke.
+///
+/// It runs against [`CellStore`], the shape on its own, for the reason given
+/// there: the product refuses these tenant names now, one layer earlier.
 #[test]
-fn tuple_keying_defeats_every_separator_confusion_attack() {
+fn nested_keying_defeats_every_separator_confusion_attack() {
     let _guard = serialized();
 
     // Each row is a pair engineered to alias under some flattening.
@@ -449,7 +499,7 @@ fn tuple_keying_defeats_every_separator_confusion_attack() {
         ("\u{e9}", "k"), // NFC vs NFD: same glyph, different bytes
     ];
 
-    let mut d = Deployment::new();
+    let mut d = CellStore::default();
     for (i, (tenant, key)) in pairs.iter().enumerate() {
         d.put(&scope(tenant, key), &format!("cell#{i}"));
     }
@@ -499,13 +549,11 @@ fn tuple_keying_defeats_every_separator_confusion_attack() {
     }
 
     // Part 2, and the stronger statement: there is no separator that *would*
-    // have been safe. Nothing in this API validates a tenant identifier — not
-    // its length, charset, or shape (see
-    // `visually_identical_tenant_names_are_distinct_silent_namespaces`) — so
-    // for any separator at all, including NUL, a C1 control, a bidi override
-    // or the last scalar value, an attacker simply puts it in a name and the
-    // flattening aliases. Only the tuple keying is unconditionally safe.
-    let mut store = Deployment::new();
+    // have been safe. For any separator at all — including NUL, a C1 control,
+    // a bidi override or the last scalar value — an attacker simply puts it in
+    // a name and the flattening aliases. Only the nested keying is
+    // unconditionally safe, whatever a name contains.
+    let mut store = CellStore::default();
     for (i, sep) in [
         "",
         ":",
@@ -575,7 +623,7 @@ fn a_hundred_thousand_hostile_pairs_never_alias_or_leak() {
         .collect();
     assert_eq!(tenant_index.len(), tenants.len(), "tenant pool is deduped");
 
-    let mut d = Deployment::new();
+    let mut d = CellStore::default();
     let mut model: BTreeMap<(String, String), String> = BTreeMap::new();
     let mut keys: Vec<String> = Vec::with_capacity(PAIRS);
     let mut owners: Vec<usize> = Vec::with_capacity(PAIRS);
@@ -658,9 +706,16 @@ fn a_hundred_thousand_hostile_pairs_never_alias_or_leak() {
 // 3. cells_of: exactness and deterministic order at 1 000 x 100
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Build a 1 000 x 100 deployment. Tenant names are deliberately confusable
-/// (`t7`, `t7:`, `t7:7`) and cells are inserted out of sorted order so that a
-/// "deterministic order" claim has something to prove.
+/// Build a 1 000 x 100 deployment. Tenant names are deliberately confusable by
+/// *prefix* (`t7`, `t7_a`, `t7_b`, and `t7` is a prefix of `t70`) and cells are
+/// inserted out of sorted order so that a "deterministic order" claim has
+/// something to prove.
+///
+/// The names used to be `t7`, `t7:`, `t7:7`. They are canonical now because a
+/// cell can only exist under a tenant the deployment actually holds, and
+/// `add_tenant` refuses a non-canonical id — so the confusable-by-punctuation
+/// corpus moved to [`CellStore`], where the keying can still be attacked with
+/// it, and this fixture keeps the prefix confusion that survives the rule.
 fn wide_deployment(tenants: usize, cells: usize, reverse_insertion: bool) -> Deployment {
     let mut d = Deployment::new();
     let order: Vec<usize> = if reverse_insertion {
@@ -668,13 +723,19 @@ fn wide_deployment(tenants: usize, cells: usize, reverse_insertion: bool) -> Dep
     } else {
         (0..tenants).collect()
     };
+    for i in 0..tenants {
+        assert!(
+            d.add_tenant(HOME_ORG, &tenant_name(i), TenantState::new(0)),
+            "tenant {i} must be provisionable"
+        );
+    }
     for i in order {
         let name = tenant_name(i);
         for j in 0..cells {
             // (j * 37) % 100 is a permutation of 0..100, so insertion order
             // is not sorted order.
             let key = format!("cell-{:03}", (j * 37) % cells);
-            d.put(&scope(&name, &key), &format!("t{i}#c{j}"));
+            assert!(d.put(&scope(&name, &key), &format!("t{i}#c{j}")));
         }
     }
     d
@@ -683,8 +744,8 @@ fn wide_deployment(tenants: usize, cells: usize, reverse_insertion: bool) -> Dep
 fn tenant_name(i: usize) -> String {
     match i % 3 {
         0 => format!("t{i}"),
-        1 => format!("t{i}:"),
-        _ => format!("t{i}:{i}"),
+        1 => format!("t{i}_a"),
+        _ => format!("t{i}_b"),
     }
 }
 
@@ -801,7 +862,10 @@ fn cells_of_order_is_byte_order_even_for_nul_and_astral_keys() {
         keys.insert(hostile_string(&mut rng, parts));
     }
 
-    let mut d = Deployment::new();
+    // Against the shape rather than the deployment: the decoy neighbour is
+    // `"t\0"`, which no deployment will provision now, and the claim under
+    // test is about the *inner* key's ordering — see [`CellStore`].
+    let mut d = CellStore::default();
     for (i, k) in keys.iter().enumerate() {
         d.put(&scope("t", k), &format!("v{i}"));
         // A decoy neighbour holding the same key, to be sure the listing is
@@ -1112,17 +1176,26 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
 ///
 /// The last section shows precisely how narrow the remaining hole is, and it
 /// is the reason this finding is still worth its own test. Presented at the
-/// governed path, the very same crossing is now refused with
-/// [`Refusal::TenantNotOwnedByOrg`] before any tenant state is consulted — and
-/// journaled, and counted. The silent substitution survives *only* on the
-/// ungoverned `get`, so defect 2 is now entirely a consequence of defect 1:
-/// close the store's path into `admit` and it closes with it.
+/// governed path — `admit`, and now `get_cell` too — the very same crossing is
+/// refused with [`Refusal::TenantNotOwnedByOrg`] before any tenant state is
+/// consulted, journaled, counted, and answered with nothing.
+///
+/// **What is repaired**: there is now a way to read a cell that cannot cross
+/// silently, and it is the one the product uses.
+/// **What is still open**: `rescope` itself records nothing, because a
+/// `TenantScope` is a struct and not an act — the crossing is only observable
+/// where the scope is *used*, which is why the repair had to be on the access
+/// path rather than on the type. A direct `get` through a rescoped scope is
+/// still a silent substitution.
 #[test]
-fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
+fn rescope_carries_no_provenance_and_only_the_direct_path_crosses_silently() {
     let _guard = serialized();
     let mut d = Deployment::new();
-    d.put(&scope("acme", "memory-root"), "ACME CONFIDENTIAL");
-    d.put(&scope("globex", "memory-root"), "GLOBEX CONFIDENTIAL");
+    for t in ["acme", "globex"] {
+        assert!(d.add_tenant(HOME_ORG, t, TenantState::new(0)));
+    }
+    assert!(d.put(&scope("acme", "memory-root"), "ACME CONFIDENTIAL"));
+    assert!(d.put(&scope("globex", "memory-root"), "GLOBEX CONFIDENTIAL"));
 
     let acme_scope = scope("acme", "memory-root");
     assert_eq!(d.get(&acme_scope), Some("ACME CONFIDENTIAL"));
@@ -1143,13 +1216,17 @@ fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
         "not even Debug distinguishes a crossed scope"
     );
 
-    // The read succeeds and silently returns the *other* tenant's secret.
+    // On the DIRECT path the read still succeeds and silently returns the
+    // *other* tenant's secret. That is correct by the store's contract — a
+    // scope names a cell, and this scope names globex's — and it is exactly
+    // what makes `rescope`'s "deliberate, auditable act" unprovable: there is
+    // no act to audit, only a struct with a different field in it.
     assert_eq!(d.get(&crossed), Some("GLOBEX CONFIDENTIAL"));
 
     // And the deployment recorded nothing whatsoever.
     assert!(
         d.audit().next().is_none(),
-        "DEFECT: a cross-tenant read is journaled nowhere"
+        "STILL OPEN: a direct cross-tenant read is journaled nowhere"
     );
     assert!(
         d.metrics()
@@ -1168,7 +1245,7 @@ fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
     // so the target's roles, allowlist, activations and budget are never
     // consulted and never charged.
     let mut governed = two_tenant_deployment();
-    governed.put(&scope("globex", "memory-root"), "GLOBEX CONFIDENTIAL");
+    assert!(governed.put(&scope("globex", "memory-root"), "GLOBEX CONFIDENTIAL"));
     governed.assign("mallory", "reader");
     let mallory = actor("initech", "mallory", AuthStrength::Token);
     let req = request("globex", "mallory", "memory.recall", "r-crossed");
@@ -1204,47 +1281,84 @@ fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
     );
     let metrics: BTreeMap<String, u64> = governed.metrics().into_iter().collect();
     assert_eq!(metrics.get("gateway.refused.tenant_not_owned"), Some(&1));
+
+    // And the same crossing through the governed CELL path — the one that did
+    // not exist when this finding was written — is refused identically, so
+    // there is now a way to read a cell that cannot cross silently at all.
+    governed.govern_tool("memory.get", "memory.read");
+    let req = request("globex", "mallory", "memory.get", "r-crossed-cell");
+    let (outcome, value) = governed.get_cell(
+        Call {
+            actor: &mallory,
+            request: &req,
+            model: "gpt-5",
+            cost_tokens: 1,
+            variant: None,
+            justification: None,
+        },
+        "memory-root",
+    );
+    assert_eq!(outcome.refusal(), Some(&Refusal::TenantNotOwnedByOrg));
+    assert_eq!(value, None, "and it hands back nothing at all");
+    assert_eq!(governed.spent("globex"), Some(0));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // 5. The store is off the governed path entirely
 // ─────────────────────────────────────────────────────────────────────────
 
-/// **DEFECT 1.** `put`/`get`/`cells_of` (`src/lib.rs:328-352`) take no actor,
-/// consult no `RoleBook`, call no `classify`, charge no `TokenBudget` and
-/// write no `AuditRecord`. This test pins every consequence at once:
+/// **DEFECT 1, REPAIRED.** The store had no gate in front of it: `put`/`get`/
+/// `cells_of` took no actor, consulted no `RoleBook`, called no `classify`,
+/// charged no `TokenBudget` and wrote no `AuditRecord`. Every consequence was
+/// pinned here, and every one is inverted below.
 ///
-/// * a tenant that does not exist in the deployment is writable and readable,
-///   while the *same* tenant string is refused with `Refusal::UnknownTenant`
-///   the moment it reaches `admit` — so the two halves of the product
-///   disagree about which tenants exist;
-/// * a tenant with a **zero** token budget stores as much as it likes;
-/// * an overwrite destroys the previous value leaving no record of either;
-/// * `audit()`, `audit_of()` and `metrics()` stay empty across all of it.
+/// Two things changed, and they are different repairs:
+///
+/// * **The governed cell path exists.** `put_cell`/`get_cell`/`remove_cell`
+///   run a cell access through all nine gates, journal it, meter it and bill
+///   it — `docs/COGNITIVE_AUDIT.md` promises a journal of tenant memory
+///   traffic, and now there is one.
+/// * **The direct path can no longer produce an illegal state.** It still has
+///   no gate in front (that is what "direct" means, and the stress suite needs
+///   it to measure the map itself), but it refuses a tenant the deployment does
+///   not hold, refuses an oversized key or value, and refuses a tenant over its
+///   cell allowance. So the storage layer is never in a state the governed path
+///   could not have produced.
+///
+/// What that does **not** fix is the one thing a direct write still is: a
+/// write with no actor, no reason and no record. The last section asserts it,
+/// because it is the residue of this finding and it should not become
+/// folklore.
 #[test]
-fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
+fn the_store_refuses_unknown_tenants_and_the_governed_path_journals_every_cell() {
     let _guard = serialized();
     let mut d = Deployment::new();
     d.add_role("writer", &["memory.write"])
-        .govern_tool("memory.ingest", "memory.write");
+        .add_role("reader", &["memory.read"])
+        .govern_tool("memory.ingest", "memory.write")
+        .govern_tool("memory.put", "memory.write")
+        .govern_tool("memory.get", "memory.read");
     d.assign("alice", "writer");
+    d.assign("bob", "reader");
 
     // A tenant that exists, but is allowed to spend nothing at all.
     let mut broke = TenantState::new(0);
     broke.allow_model("claude-opus");
-    d.add_tenant("memorithm", "broke", broke);
+    assert!(d.add_tenant(HOME_ORG, "broke", broke));
+    let mut rich = TenantState::new(1_000);
+    rich.allow_model("claude-opus");
+    assert!(d.add_tenant(HOME_ORG, "rich", rich));
 
-    // 1. Writes to a tenant nobody provisioned are accepted and readable.
-    d.put(&scope("ghost-tenant", "memory-root"), "written by nobody");
-    assert_eq!(
-        d.get(&scope("ghost-tenant", "memory-root")),
-        Some("written by nobody"),
-        "DEFECT: the store accepts cells for tenants the deployment does not have"
+    // 1. Writes to a tenant nobody provisioned are refused — by the same rule,
+    //    and with the same answer, that `admit` gives.
+    assert!(
+        !d.put(&scope("ghost-tenant", "memory-root"), "written by nobody"),
+        "the store must not accept cells for tenants the deployment lacks"
     );
-    assert_eq!(d.cells_of("ghost-tenant").len(), 1);
+    assert_eq!(d.get(&scope("ghost-tenant", "memory-root")), None);
+    assert_eq!(d.cells_of("ghost-tenant").len(), 0);
 
-    // …yet `admit` refuses that very tenant.
-    let alice = actor("memorithm", "alice", AuthStrength::Token);
+    let alice = actor(HOME_ORG, "alice", AuthStrength::Token);
     let req = request("ghost-tenant", "alice", "memory.ingest", "r-ghost");
     assert_eq!(
         d.admit(Call {
@@ -1257,7 +1371,7 @@ fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
         })
         .refusal(),
         Some(&Refusal::UnknownTenant),
-        "the governed path knows the tenant is bogus; the store does not"
+        "and both halves of the product agree about which tenants exist"
     );
 
     // 2. A zero-budget tenant cannot make one governed call…
@@ -1274,46 +1388,136 @@ fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
         .refusal(),
         Some(&Refusal::BudgetExhausted)
     );
-    // …but can store 1 000 cells, because bytes are not tokens and the store
-    // is not metered in any unit at all.
-    for i in 0..1_000 {
-        d.put(&scope("broke", &format!("cell-{i}")), &"x".repeat(64));
-    }
-    assert_eq!(d.cells_of("broke").len(), 1_000);
+    // …and cannot store a cell through the governed path either, because that
+    // path is metered in the same unit as everything else.
+    let req = request("broke", "alice", "memory.put", "r-broke-cell");
     assert_eq!(
-        d.spent("broke"),
-        Some(0),
-        "not one token was charged for 64 KiB"
+        d.put_cell(
+            Call {
+                actor: &alice,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 1,
+                variant: None,
+                justification: None,
+            },
+            "cell-0",
+            "x",
+        )
+        .refusal(),
+        Some(&Refusal::BudgetExhausted),
+        "bytes are not tokens, but a governed cell write is a call and a call \
+         costs what the tenant agreed to pay"
     );
+    assert_eq!(d.cells_of("broke").len(), 0, "and nothing was written");
 
-    // 3. Overwrites are silent destruction.
-    d.put(&scope("ghost-tenant", "memory-root"), "clobbered");
+    // 3. The governed path forwards, writes, bills and journals — one record,
+    //    naming the verified actor, at the cost the caller declared.
+    let before = d.audit().count();
+    let req = request("rich", "alice", "memory.put", "r-rich-cell");
     assert_eq!(
-        d.get(&scope("ghost-tenant", "memory-root")),
-        Some("clobbered"),
-        "the previous value is gone, with no version and no record"
+        d.put_cell(
+            Call {
+                actor: &alice,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 7,
+                variant: None,
+                justification: None,
+            },
+            "memory-root",
+            "ACME CONFIDENTIAL",
+        ),
+        Outcome::Forwarded
     );
+    assert_eq!(d.spent("rich"), Some(7), "a cell write is billed");
+    assert_eq!(d.audit().count(), before + 1, "and journaled, exactly once");
+    let record = d.audit().last().expect("journaled");
+    assert_eq!(record.actor, "alice", "under the *verified* actor");
+    assert_eq!(record.tool, "memory.put");
+    assert_eq!(record.cost, 7);
 
-    // 4. Nothing above produced a single audit record or metric sample. The
-    //    only journaled events are the two refused `admit` calls.
+    // 4. RBAC applies to cells like anything else: a reader cannot write one,
+    //    the refusal is journaled, and nothing lands.
+    let bob = actor(HOME_ORG, "bob", AuthStrength::Token);
+    let req = request("rich", "bob", "memory.put", "r-bob-write");
+    assert_eq!(
+        d.put_cell(
+            Call {
+                actor: &bob,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 1,
+                variant: None,
+                justification: None,
+            },
+            "memory-root",
+            "PLANTED",
+        )
+        .refusal(),
+        Some(&Refusal::PermissionDenied)
+    );
+    assert_eq!(
+        d.get(&scope("rich", "memory-root")),
+        Some("ACME CONFIDENTIAL"),
+        "the refused write did not reach the store"
+    );
+    // …and he can read it, because that he is entitled to.
+    let req = request("rich", "bob", "memory.get", "r-bob-read");
+    let (outcome, value) = d.get_cell(
+        Call {
+            actor: &bob,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: None,
+        },
+        "memory-root",
+    );
+    assert_eq!(outcome, Outcome::Forwarded);
+    assert_eq!(value.as_deref(), Some("ACME CONFIDENTIAL"));
+
+    // 5. A refused read returns nothing at all — not even the "no such cell"
+    //    that could be differenced against a permission failure to probe
+    //    another tenant's key space.
+    let mallory = actor("initech", "mallory", AuthStrength::Token);
+    let req = request("rich", "mallory", "memory.get", "r-probe");
+    let (outcome, value) = d.get_cell(
+        Call {
+            actor: &mallory,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: None,
+        },
+        "memory-root",
+    );
+    assert_eq!(outcome.refusal(), Some(&Refusal::TenantNotOwnedByOrg));
+    assert_eq!(value, None, "a refusal answers with nothing");
+
+    // 6. STILL OPEN, and named so it stays visible: a *direct* write is a
+    //    write with no actor, no reason and no record. It cannot produce an
+    //    illegal state any more, but it produces a legal one anonymously.
+    let journaled = d.audit().count();
+    assert!(d.put(&scope("rich", "memory-root"), "clobbered directly"));
+    assert_eq!(
+        d.get(&scope("rich", "memory-root")),
+        Some("clobbered directly"),
+        "an overwrite still destroys the previous value"
+    );
     assert_eq!(
         d.audit().count(),
-        2,
-        "DEFECT: 1 002 writes and 3 reads are journaled nowhere; only `admit` writes audit"
+        journaled,
+        "and the direct path still journals nothing — the governed path is \
+         where the trail comes from, and reaching past it is not journaled"
     );
-    assert!(
-        d.audit_of("ghost-tenant")
-            .iter()
-            .all(|r| !r.outcome.is_forwarded()),
-        "the only ghost-tenant record is the refusal, not the write"
-    );
+    assert_eq!(d.governance().count(), 0, "nor is a cell a rule change");
     let metrics: BTreeMap<String, u64> = d.metrics().into_iter().collect();
-    assert_eq!(metrics.get("gateway.requests"), Some(&2));
     assert!(
-        !metrics
-            .keys()
-            .any(|k| k.contains("store") || k.contains("cell")),
-        "DEFECT: there is no metric for tenant memory traffic at all"
+        !metrics.keys().any(|k| k.contains("cell")),
+        "STILL OPEN: no counter distinguishes cell traffic from any other call"
     );
 }
 
@@ -1321,34 +1525,32 @@ fn the_store_is_ungoverned_and_unknown_tenants_are_writable() {
 // 6. Exhaustion vectors
 // ─────────────────────────────────────────────────────────────────────────
 
-/// **DEFECT 3 — EXHAUSTION VECTOR.** The store is a bare
-/// `BTreeMap<(TenantId, String), String>` with no cap on cells, on tenants, on
-/// key bytes or on value bytes, and the public API has **no removal operation
-/// of any kind** (no `remove`, `delete`, `evict`, `clear`, `truncate`, no TTL,
-/// no quota). Every byte written is retained for the process's lifetime.
+/// **DEFECT 3, REPAIRED.** The store was a bare map with no cap on cells, on
+/// key bytes or on value bytes, and the public API had **no removal operation
+/// of any kind** — no `remove`, `delete`, `evict`, `clear`, `truncate`, no TTL,
+/// no quota. Every byte written was retained for the process's lifetime, and
+/// overwriting every value with `""` gave back 7% of it.
 ///
-/// Measured live bytes for 25k / 50k / 100k cells of identical shape; growth
-/// is exactly linear and entirely caller-controlled. The registry next door
-/// (`CounterRegistry::MAX_SERIES = 4096`) exists precisely because "a label
-/// explosion can never exhaust memory" — the store makes no such promise and
-/// keeps none.
-///
-/// The second half shows there is no way back: overwriting every value with
-/// `""` frees only the values; the keys, which are the larger half and the
-/// half the caller chooses the size of, stay resident.
+/// Three bounds and two deletes later, the worst case is arithmetic:
+/// `MAX_CELLS_PER_TENANT x (MAX_CELL_KEY_BYTES + MAX_CELL_VALUE_BYTES)` per
+/// tenant, and every byte of it is releasable. This test measures the growth
+/// it used to measure, then proves the ceiling and the release.
 #[test]
-fn store_growth_is_unbounded_linear_and_irreversible() {
+fn store_growth_is_bounded_and_releasable() {
     let _guard = serialized();
 
+    // Growth up to the cap is still linear — that was never the defect, and a
+    // sub-linear reading here would mean cells were being lost.
     let mut table = Vec::new();
-    for cells in [25_000usize, 50_000, 100_000] {
+    for cells in [25_000usize, 50_000] {
         let before = live_bytes();
         let mut d = Deployment::new();
+        assert!(d.add_tenant(HOME_ORG, "t", TenantState::new(0)));
         for i in 0..cells {
-            d.put(
+            assert!(d.put(
                 &scope("t", &format!("{i:0>64}")), // 64-byte key, caller-chosen
                 "0123456789abcdef",                // 16-byte value
-            );
+            ));
         }
         let retained = live_bytes() - before;
         table.push((cells, retained));
@@ -1358,7 +1560,6 @@ fn store_growth_is_unbounded_linear_and_irreversible() {
         );
         drop(d);
     }
-
     for w in table.windows(2) {
         let (n0, b0) = w[0];
         let (n1, b1) = w[1];
@@ -1368,48 +1569,96 @@ fn store_growth_is_unbounded_linear_and_irreversible() {
             "doubling {n0} -> {n1} cells multiplied memory by {ratio:.2}: growth is not linear"
         );
     }
-    let (cells, retained) = table[table.len() - 1];
+
+    // The ceiling. Past MAX_CELLS_PER_TENANT a NEW key is refused and the
+    // refusal says which bound was hit — but an EXISTING key can still be
+    // overwritten, so a full tenant is never unable to correct its own data.
+    let mut d = Deployment::new();
+    assert!(d.add_tenant(HOME_ORG, "t", TenantState::new(0)));
+    for i in 0..MAX_CELLS_PER_TENANT {
+        assert!(d.put(&scope("t", &format!("k{i}")), "v"));
+    }
+    assert_eq!(d.cell_count("t"), MAX_CELLS_PER_TENANT);
     assert!(
-        retained > cells * 100,
-        "each cell retains far more than the bytes the caller handed over"
+        !d.put(&scope("t", "one-too-many"), "v"),
+        "the cap is exact: the {}th distinct key is refused",
+        MAX_CELLS_PER_TENANT + 1
+    );
+    assert!(
+        d.put(&scope("t", "k0"), "rewritten"),
+        "a full tenant can still correct a cell it already holds"
+    );
+    assert_eq!(d.get(&scope("t", "k0")), Some("rewritten"));
+    assert_eq!(d.cell_count("t"), MAX_CELLS_PER_TENANT, "and grows no more");
+
+    // The size bounds, each exact at the boundary.
+    assert!(d.put(&scope("t", "k0"), &"v".repeat(MAX_CELL_VALUE_BYTES)));
+    assert!(
+        !d.put(&scope("t", "k0"), &"v".repeat(MAX_CELL_VALUE_BYTES + 1)),
+        "one byte over the value bound is refused"
+    );
+    assert_eq!(
+        d.get(&scope("t", "k0")).map(str::len),
+        Some(MAX_CELL_VALUE_BYTES),
+        "and the refused write did not truncate the cell it failed to replace"
+    );
+    let mut fresh = Deployment::new();
+    assert!(fresh.add_tenant(HOME_ORG, "t", TenantState::new(0)));
+    assert!(fresh.put(&scope("t", &"k".repeat(MAX_CELL_KEY_BYTES)), "v"));
+    assert!(!fresh.put(&scope("t", &"k".repeat(MAX_CELL_KEY_BYTES + 1)), "v"));
+    assert!(
+        !fresh.put(&scope("t", ""), "v"),
+        "and the empty key with them"
     );
 
-    // No delete: overwriting values with "" reclaims only the values. The
-    // keys — 64 B each, caller-sized — are unreachable and unreleasable.
+    // Release. Deleting every cell returns the memory, which is the half that
+    // did not exist at all: emptying the values used to give back 7%.
     let before = live_bytes();
     let mut d = Deployment::new();
+    assert!(d.add_tenant(HOME_ORG, "t", TenantState::new(0)));
     for i in 0..25_000usize {
-        d.put(&scope("t", &format!("{i:0>64}")), "0123456789abcdef");
+        assert!(d.put(&scope("t", &format!("{i:0>64}")), "0123456789abcdef"));
     }
     let full = live_bytes() - before;
     for i in 0..25_000usize {
-        d.put(&scope("t", &format!("{i:0>64}")), "");
+        assert!(d.remove(&scope("t", &format!("{i:0>64}"))));
     }
-    let after_emptying = live_bytes() - before;
-    println!("after emptying every value: {after_emptying} B (was {full} B)");
+    let after_removing = live_bytes() - before;
+    println!("after removing every cell: {after_removing} B (was {full} B)");
+    assert_eq!(d.cells_of("t").len(), 0, "the cells are gone");
     assert!(
-        after_emptying * 100 >= full * 60,
-        "DEFECT: emptying every value released {} B of {full} B — and there is no API that \
-         releases the rest",
-        full - after_emptying
+        after_removing * 10 < full,
+        "removing every cell released {} B of {full} B — a delete must return \
+         the keys, not only the values",
+        full - after_removing
     );
-    assert_eq!(d.cells_of("t").len(), 25_000, "the cells are still there");
+
+    // `clear_cells` is the same thing in one call, and reports what it dropped.
+    for i in 0..1_000usize {
+        assert!(d.put(&scope("t", &format!("k{i}")), "v"));
+    }
+    assert_eq!(d.clear_cells("t"), 1_000);
+    assert_eq!(d.cell_count("t"), 0);
+    assert_eq!(d.clear_cells("never-existed"), 0);
 }
 
-/// **HELD, with an unbounded edge.** 1 MiB keys and a 1 MiB tenant name are
-/// accepted without a murmur — there is no length bound anywhere on either —
-/// and isolation survives them: the same megabyte key under two tenants is two
-/// cells, and two megabyte keys differing only in their **last** byte are two
-/// cells, so nothing hashes, truncates or prefix-compares the key.
+/// **REPAIRED, and the isolation it used to prove is now proved a layer
+/// earlier.** 1 MiB keys and a 1 MiB tenant name used to be accepted without a
+/// murmur: a caller chose how many bytes a single `put` retained and nothing
+/// metered it. Both are refused now — the key by [`MAX_CELL_KEY_BYTES`], the
+/// tenant name by the canonical-identifier rule that gates provisioning.
 ///
-/// The size acceptance itself is the finding: a caller chooses how many bytes
-/// a single `put` retains, and nothing meters it (defect 3).
+/// The isolation half is kept, at the largest size the bounds allow: the same
+/// maximal key under two tenants is two cells, and two maximal keys differing
+/// only in their **last** byte are two cells, so nothing hashes, truncates or
+/// prefix-compares the key.
 #[test]
-fn megabyte_keys_and_tenant_names_are_accepted_and_still_isolated() {
+fn oversized_keys_and_tenant_names_are_refused_and_the_rest_stays_isolated() {
     let _guard = serialized();
     const MIB: usize = 1024 * 1024;
 
-    // Eight ~1 MiB keys, each filled with a different hostile scalar.
+    // Eight ~1 MiB keys, each filled with a different hostile scalar. Every
+    // one is refused, and the store is left holding nothing.
     let fills = [
         'A',
         '\0',
@@ -1427,94 +1676,128 @@ fn megabyte_keys_and_tenant_names_are_accepted_and_still_isolated() {
 
     let before = live_bytes();
     let mut d = Deployment::new();
+    for t in ["acme", "globex"] {
+        assert!(d.add_tenant(HOME_ORG, t, TenantState::new(0)));
+    }
     for (i, k) in keys.iter().enumerate() {
-        d.put(&scope("acme", k), &format!("acme#{i}"));
-        d.put(&scope("globex", k), &format!("globex#{i}"));
+        assert!(!d.put(&scope("acme", k), &format!("acme#{i}")));
+        assert!(!d.put(&scope("globex", k), &format!("globex#{i}")));
     }
     let retained = live_bytes() - before;
-    println!(
-        "16 cells with ~1 MiB keys retained {retained} B ({} B per cell)",
-        retained / 16
-    );
-
-    for (i, k) in keys.iter().enumerate() {
-        assert_eq!(d.get(&scope("acme", k)), Some(format!("acme#{i}").as_str()));
-        assert_eq!(
-            d.get(&scope("globex", k)),
-            Some(format!("globex#{i}").as_str()),
-            "the same megabyte key under another tenant is another cell"
-        );
-    }
-    assert_eq!(d.cells_of("acme").len(), keys.len());
-    assert_eq!(d.cells_of("globex").len(), keys.len());
+    println!("16 refused ~1 MiB keys retained {retained} B");
+    assert_eq!(d.cells_of("acme").len(), 0);
+    assert_eq!(d.cells_of("globex").len(), 0);
     assert!(
-        retained >= 16 * MIB,
-        "every megabyte key is retained in full: expected >= {} B, saw {retained}",
-        16 * MIB
+        retained < MIB,
+        "16 refused megabyte keys retained {retained} B — a refusal must not \
+         store what it refused"
     );
 
-    // Two megabyte keys that differ only in the final byte are distinct: no
-    // truncation, no prefix comparison, no digest collision.
-    let mut long_a = "Z".repeat(MIB);
+    // At the bound, the isolation claim still has to hold. Two maximal keys
+    // differing only in the final byte are distinct: no truncation, no prefix
+    // comparison, no digest collision.
+    let mut long_a = "Z".repeat(MAX_CELL_KEY_BYTES - 1);
     let mut long_b = long_a.clone();
     long_a.push('a');
     long_b.push('b');
-    d.put(&scope("acme", &long_a), "TAIL-A");
-    d.put(&scope("acme", &long_b), "TAIL-B");
+    assert_eq!(long_a.len(), MAX_CELL_KEY_BYTES);
+    assert!(d.put(&scope("acme", &long_a), "TAIL-A"));
+    assert!(d.put(&scope("acme", &long_b), "TAIL-B"));
     assert_eq!(d.get(&scope("acme", &long_a)), Some("TAIL-A"));
     assert_eq!(d.get(&scope("acme", &long_b)), Some("TAIL-B"));
+    // …and the same maximal key under another tenant is another cell.
+    assert!(d.put(&scope("globex", &long_a), "GLOBEX-A"));
+    assert_eq!(d.get(&scope("acme", &long_a)), Some("TAIL-A"));
+    assert_eq!(d.get(&scope("globex", &long_a)), Some("GLOBEX-A"));
 
-    // A 1 MiB *tenant name* is equally acceptable, and equally isolated.
-    let huge_tenant = "T".repeat(MIB);
-    d.put(&scope(&huge_tenant, "memory-root"), "huge tenant's cell");
-    assert_eq!(
-        d.get(&scope(&huge_tenant, "memory-root")),
-        Some("huge tenant's cell")
-    );
-    assert_eq!(d.get(&scope("acme", "memory-root")), None);
-    assert_eq!(d.cells_of(&huge_tenant).len(), 1);
+    // A 1 MiB *tenant name* cannot be provisioned, so it cannot hold a cell.
+    let huge_tenant = "t".repeat(MIB);
+    assert!(!d.add_tenant(HOME_ORG, &huge_tenant, TenantState::new(0)));
+    assert!(!d.put(&scope(&huge_tenant, "memory-root"), "huge tenant's cell"));
+    assert_eq!(d.get(&scope(&huge_tenant, "memory-root")), None);
+    assert_eq!(d.cells_of(&huge_tenant).len(), 0);
 }
 
-/// **DEFECT 4.** `put` clones the tenant name into every cell key
-/// (`src/lib.rs:328-333`), so a long tenant identifier is amplified by that
-/// tenant's cell count: A tenants x K cells retain A x K copies of the name.
-/// Nothing validates a tenant identifier's length, charset or shape — 64 KiB
-/// of tenant name is as acceptable as `acme`.
+/// **DEFECT 4, REPAIRED by the store's shape.** `put` used to clone the tenant
+/// name into every cell key, so a long tenant identifier was amplified by that
+/// tenant's cell count: 64 KiB of name across 256 cells retained 256 copies of
+/// it, 16 810 950 B from 256 calls.
+///
+/// The map is nested now — `BTreeMap<TenantId, BTreeMap<String, String>>` — so
+/// the name is held once per tenant however many cells it has. The 64 KiB name
+/// is also unprovisionable, which closes the vector twice; this test keeps the
+/// measurement at the longest name that IS provisionable, because the shape
+/// property is what a future change could silently undo.
 #[test]
-fn a_long_tenant_name_is_copied_into_every_one_of_its_cells() {
+fn a_tenant_name_is_held_once_however_many_cells_it_has() {
     let _guard = serialized();
-    const NAME_BYTES: usize = 64 * 1024;
     const CELLS: usize = 256;
 
-    let name = "T".repeat(NAME_BYTES);
+    // The longest canonical identifier the product accepts.
+    let name = "t".repeat(MAX_IDENTIFIER_BYTES);
     let before = live_bytes();
     let mut d = Deployment::new();
+    assert!(d.add_tenant(HOME_ORG, &name, TenantState::new(0)));
     for i in 0..CELLS {
-        d.put(&scope(&name, &format!("k{i}")), "v");
+        assert!(d.put(&scope(&name, &format!("k{i}")), "v"));
     }
     let retained = live_bytes() - before;
     println!(
-        "one {NAME_BYTES} B tenant name x {CELLS} cells -> {retained} B ({}x the name)",
-        retained / NAME_BYTES
+        "one {} B tenant name x {CELLS} cells -> {retained} B ({:.1} B/cell)",
+        name.len(),
+        retained as f64 / CELLS as f64
+    );
+    // The claim is structural, so state it structurally: the whole tenant's
+    // footprint stays under a couple of copies of the name plus the cells
+    // themselves. Amplified, it would have been CELLS copies.
+    assert!(
+        retained < name.len() * 4 + CELLS * 128,
+        "expected the name to be held once, not {CELLS} times: {retained} B \
+         for a {} B name over {CELLS} cells",
+        name.len()
+    );
+    // The counterfactual, measured rather than argued: the same data in the
+    // flat `(TenantId, String)` keying the store used to have.
+    let before_flat = live_bytes();
+    let mut flat: BTreeMap<(String, String), String> = BTreeMap::new();
+    for i in 0..CELLS {
+        flat.insert((name.clone(), format!("k{i}")), "v".to_string());
+    }
+    let flat_retained = live_bytes() - before_flat;
+    println!(
+        "the same {CELLS} cells under flat keying: {flat_retained} B ({:.1}x)",
+        flat_retained as f64 / retained as f64
     );
     assert!(
-        retained >= NAME_BYTES * CELLS,
-        "expected >= {} B of amplification, saw {retained}",
-        NAME_BYTES * CELLS
+        flat_retained > retained * 2,
+        "the nesting must save the {CELLS} copies of a {} B name: nested \
+         {retained} B vs flat {flat_retained} B",
+        name.len()
     );
+    drop(flat);
     assert_eq!(d.cells_of(&name).len(), CELLS);
+
+    // And the 64 KiB name that used to be amplified cannot even be created.
+    let huge = "t".repeat(64 * 1024);
+    assert!(!d.add_tenant(HOME_ORG, &huge, TenantState::new(0)));
+    assert!(!d.put(&scope(&huge, "k"), "v"));
 }
 
-/// **DEFECT 5.** `get` builds an owned `(TenantId, String)` *before* the
-/// lookup (`src/lib.rs:337-341`), so the read path allocates and memcpys the
-/// caller's whole key even when the tenant does not exist and the lookup
-/// cannot possibly hit. Reads are supposed to be the cheap side.
+/// **DEFECT 5, REPAIRED.** `get` used to build an owned `(TenantId, String)`
+/// *before* the lookup, so the read path allocated and memcpy'd the caller's
+/// whole key even when the tenant did not exist and the lookup could not
+/// possibly hit — a 4 MiB key cost a 4 MiB allocation to answer "no". Reads
+/// are supposed to be the cheap side.
+///
+/// `TenantId` implements `Borrow<str>` now and the inner map is keyed by
+/// `String`, so both lookups take a `&str` and a miss costs a comparison.
 ///
 /// Measured with the peak watermark rather than a live-bytes delta, because
-/// the clone is freed before `get` returns — a live delta would show zero and
-/// hide the vector entirely.
+/// the clone was freed before `get` returned — a live delta showed zero and
+/// hid the vector entirely, which is why the repair needs the same instrument
+/// the defect did.
 #[test]
-fn get_clones_the_whole_key_on_every_read_including_a_pure_miss() {
+fn get_allocates_nothing_on_a_read_including_a_pure_miss() {
     let _guard = serialized();
     const KEY_BYTES: usize = 4 * 1024 * 1024;
 
@@ -1526,15 +1809,32 @@ fn get_clones_the_whole_key_on_every_read_including_a_pure_miss() {
     let transient = peak_bytes() - before;
     println!("a single missing-key `get` on a {KEY_BYTES} B key peaked at +{transient} B");
     assert!(
-        transient >= KEY_BYTES,
-        "DEFECT expected: a pure miss should not copy the key, but only +{transient} B was seen"
+        transient < 4_096,
+        "a pure miss must not copy the key: +{transient} B for a {KEY_BYTES} B key"
     );
 
-    // `cells_of` has the same shape: it allocates a `TenantId` from the &str
-    // before scanning, but the far bigger cost is the scan itself (defect 6).
+    // A hit is the same: the key is compared, never copied.
+    let mut d = Deployment::new();
+    assert!(d.add_tenant(HOME_ORG, "acme", TenantState::new(0)));
+    let key = "K".repeat(MAX_CELL_KEY_BYTES);
+    assert!(d.put(&scope("acme", &key), "v"));
+    let before = arm_peak();
+    assert_eq!(d.get(&scope("acme", &key)), Some("v"));
+    let transient = peak_bytes() - before;
+    assert!(
+        transient < 4_096,
+        "a hit copied +{transient} B to return a borrowed value"
+    );
+
+    // `cells_of` is a single map lookup now rather than a range scan over the
+    // whole store, so a missing tenant costs nothing either.
     let before = arm_peak();
     assert!(d.cells_of("no-such-tenant").is_empty());
-    let _ = peak_bytes() - before;
+    let transient = peak_bytes() - before;
+    assert!(
+        transient < 4_096,
+        "cells_of on a missing tenant: +{transient} B"
+    );
 }
 
 /// **DEFECT 7 — REPAIRED, AND PINNED HERE.** `admit` used to journal every
@@ -1708,9 +2008,13 @@ fn cells_of_cost_does_not_scale_with_the_rest_of_the_store() {
 
     fn victim_listing_cost(neighbour_cells: usize) -> (Duration, usize) {
         let mut d = Deployment::new();
-        d.put(&scope("victim", "only-cell"), "one small cell");
+        assert!(d.add_tenant(HOME_ORG, "victim", TenantState::new(0)));
+        for i in 0..64 {
+            assert!(d.add_tenant(HOME_ORG, &format!("noisy-{i}"), TenantState::new(0)));
+        }
+        assert!(d.put(&scope("victim", "only-cell"), "one small cell"));
         for i in 0..neighbour_cells {
-            d.put(&scope(&format!("noisy-{}", i % 64), &format!("k{i}")), "x");
+            assert!(d.put(&scope(&format!("noisy-{}", i % 64), &format!("k{i}")), "x"));
         }
         let mut best = Duration::from_secs(3_600);
         let mut len = 0;
@@ -1747,8 +2051,9 @@ fn cells_of_cost_does_not_scale_with_the_rest_of_the_store() {
     // so `take_while` has neighbours on both sides to stop at.
     let mut d = Deployment::new();
     for t in ["a-before", "victim", "z-after"] {
+        assert!(d.add_tenant(HOME_ORG, t, TenantState::new(0)));
         for i in 0..50 {
-            d.put(&scope(t, &format!("k{i:03}")), t);
+            assert!(d.put(&scope(t, &format!("k{i:03}")), t));
         }
     }
     let cells = d.cells_of("victim");
@@ -1763,13 +2068,14 @@ fn cells_of_cost_does_not_scale_with_the_rest_of_the_store() {
     );
     assert!(d.cells_of("nobody").is_empty());
     // A tenant name that is a *prefix* of another must not swallow it.
-    d.put(&scope("victimX", "k000"), "victimX");
+    assert!(d.add_tenant(HOME_ORG, "victimx", TenantState::new(0)));
+    assert!(d.put(&scope("victimx", "k000"), "victimx"));
     assert_eq!(
         d.cells_of("victim").len(),
         50,
-        "`victimX` is a different tenant, not more of `victim`"
+        "`victimx` is a different tenant, not more of `victim`"
     );
-    assert_eq!(d.cells_of("victimX").len(), 1);
+    assert_eq!(d.cells_of("victimx").len(), 1);
 }
 
 /// **DEFECT 8 — REPAIRED.** `decide` used to read exactly one field off the
@@ -2115,13 +2421,26 @@ fn visually_identical_tenant_names_can_no_longer_be_provisioned() {
     state.allow_model("claude-opus");
     assert!(!d.add_tenant("Memorithm", "fresh", state));
 
-    // The store itself is unchanged and still isolates whatever it is handed:
-    // that half was never the defect.
-    d.put(&scope("acme", "memory-root"), "acme's secret");
-    d.put(&scope("globex", "memory-root"), "globex's secret");
+    // The store isolates the tenants that DO exist, and — the part that is new
+    // — refuses a cell for any of the hostile names above, so a namespace that
+    // could not be provisioned cannot be created through the back door either.
+    let mut state = TenantState::new(10);
+    state.allow_model("claude-opus");
+    assert!(d.add_tenant(HOME_ORG, "globex", state));
+    assert!(d.put(&scope("acme", "memory-root"), "acme's secret"));
+    assert!(d.put(&scope("globex", "memory-root"), "globex's secret"));
     assert_eq!(d.get(&scope("acme", "memory-root")), Some("acme's secret"));
     assert_eq!(
         d.get(&scope("globex", "memory-root")),
         Some("globex's secret")
     );
+    for hostile in ["Acme", "acme ", "\u{0430}cme", "../etc", "-rf", ""] {
+        assert!(
+            !d.put(&scope(hostile, "memory-root"), "smuggled"),
+            "{hostile:?} got a namespace through the store"
+        );
+        assert_eq!(d.get(&scope(hostile, "memory-root")), None);
+    }
+    // The real `acme` is untouched by any of it.
+    assert_eq!(d.get(&scope("acme", "memory-root")), Some("acme's secret"));
 }

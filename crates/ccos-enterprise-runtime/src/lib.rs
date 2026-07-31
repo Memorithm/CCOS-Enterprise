@@ -171,6 +171,21 @@ pub const DEFAULT_AUDIT_CAPACITY: usize = 100_000;
 /// suppression. Bounded for the same reason as the journal.
 pub const DEFAULT_REPLAY_MEMORY: usize = 65_536;
 
+/// Maximum cells one tenant may hold.
+///
+/// The store had no cap on cells, on key bytes, on value bytes or on tenants,
+/// and no delete — so growth was linear, caller-controlled and irreversible,
+/// and a tenant whose token budget was **zero** could still fill it, because
+/// the meter is on `admit` and the store was not on that path at all.
+pub const MAX_CELLS_PER_TENANT: usize = 65_536;
+
+/// Maximum bytes in a cell key.
+pub const MAX_CELL_KEY_BYTES: usize = 1_024;
+
+/// Maximum bytes in a cell value. Generous — a cell holds a memory root, not a
+/// token — but finite, which is the property that was missing.
+pub const MAX_CELL_VALUE_BYTES: usize = 1_048_576;
+
 /// Why a call did not reach Core. Every variant is an announced refusal — the
 /// product never fails open and never fails silently.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -200,6 +215,14 @@ pub enum Refusal {
     /// The tool is an administrative act and the call carried no legible
     /// reason. See [`Deployment::require_justification`].
     JustificationRequired,
+    /// The tenant has filled its cell allowance ([`MAX_CELLS_PER_TENANT`]).
+    ///
+    /// Distinct from [`Refusal::BudgetExhausted`] on purpose: that one means
+    /// "this tenant has spent its tokens", which a new billing period clears,
+    /// and this one means "this tenant is holding as much as it may", which
+    /// only a delete clears. An operator alerting on one must not be woken by
+    /// the other.
+    StorageExhausted,
 }
 
 /// The outcome of one admission decision, as journaled.
@@ -450,10 +473,6 @@ pub struct Call<'a> {
     pub justification: Option<&'a str>,
 }
 
-/// `TenantScope`'s key form: the tenant is part of every key, so there is no
-/// way to name a cell without naming its tenant.
-type TenantScopeKey = (TenantId, String);
-
 /// A running Enterprise deployment.
 pub struct Deployment {
     tenants: BTreeMap<TenantId, TenantState>,
@@ -468,7 +487,13 @@ pub struct Deployment {
     /// reason, which is then journaled with the decision.
     justification_required: BTreeSet<String>,
     /// Tenant-scoped storage, standing in for Core's memory roots.
-    store: BTreeMap<TenantScopeKey, String>,
+    ///
+    /// Nested rather than keyed by `(TenantId, String)`. The flat map copied
+    /// the tenant name into every single key — a 64 KiB name written to 256
+    /// cells retained 256 copies of it — and could only be probed by building
+    /// an owned key, so a 4 MiB `get` that missed still allocated 4 MiB. Here
+    /// the name is held once per tenant and both lookups take a `&str`.
+    store: BTreeMap<TenantId, BTreeMap<String, String>>,
     metrics: CounterRegistry,
     audit: VecDeque<AuditRecord>,
     audit_capacity: usize,
@@ -929,33 +954,209 @@ impl Deployment {
     }
 
     // ── Tenant-scoped storage ────────────────────────────────────────────
+    //
+    // Two ways in, and the difference between them is the point.
+    //
+    // `put_cell`/`get_cell`/`remove_cell` run a cell access through the same
+    // nine gates as any other call, journal it, meter it and bill it. That is
+    // the shape tenant memory traffic has to have: `docs/COGNITIVE_AUDIT.md`
+    // promises a journal of it, and a store reachable without an identity
+    // cannot keep that promise however careful its keys are.
+    //
+    // `put`/`get`/`cells_of` are the storage layer underneath, with no gate in
+    // front. They are public because the stress suite measures this map's own
+    // growth, aliasing and cost characteristics, and running those through the
+    // gates would measure the gates instead — and bill a hundred thousand
+    // tokens to do it. What they are NOT is a way around the governed path
+    // for anything in the product: nothing outside these tests calls them, and
+    // the bounds and the unknown-tenant refusal below apply to both paths, so
+    // the storage layer is never in a state the governed path could not have
+    // produced.
 
-    /// Write through a tenant scope. The scope carries the tenant, so a
-    /// caller cannot address a cell without saying whose it is.
-    pub fn put(&mut self, scope: &TenantScope<String>, value: &str) {
-        self.store.insert(
-            (scope.tenant.clone(), scope.inner.clone()),
-            value.to_string(),
-        );
+    /// Write a cell directly, with **no gate in front**. Returns whether it
+    /// landed.
+    ///
+    /// Refuses a tenant this deployment does not have. That used to be
+    /// accepted and readable, which made `Refusal::UnknownTenant` a property of
+    /// `admit` rather than of the product: a cell could exist under a tenant
+    /// no credential could ever name.
+    pub fn put(&mut self, scope: &TenantScope<String>, value: &str) -> bool {
+        self.write_cell(&scope.tenant, &scope.inner, value).is_ok()
     }
 
-    /// Read through a tenant scope. A scope for tenant B never reaches a cell
-    /// written under tenant A, however identical the inner key.
+    /// Read a cell directly. A scope for tenant B never reaches a cell written
+    /// under tenant A, however identical the inner key.
+    ///
+    /// Allocates nothing, including on a miss: the tenant map is probed by
+    /// `&str` through [`TenantId`]'s `Borrow` impl, so a caller-sized key costs
+    /// a comparison rather than a copy.
     pub fn get(&self, scope: &TenantScope<String>) -> Option<&str> {
         self.store
-            .get(&(scope.tenant.clone(), scope.inner.clone()))
+            .get(scope.tenant.0.as_str())?
+            .get(scope.inner.as_str())
             .map(String::as_str)
     }
 
     /// Every cell visible to a tenant — the shape a cross-tenant leak would
     /// have to show up in.
     pub fn cells_of(&self, tenant: &str) -> Vec<(&str, &str)> {
-        let tenant = TenantId(tenant.to_string());
         self.store
-            .range((tenant.clone(), String::new())..)
-            .take_while(|((t, _), _)| *t == tenant)
-            .map(|((_, k), v)| (k.as_str(), v.as_str()))
+            .get(tenant)
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect()
+    }
+
+    /// How many cells a tenant holds, of [`MAX_CELLS_PER_TENANT`].
+    pub fn cell_count(&self, tenant: &str) -> usize {
+        self.store.get(tenant).map_or(0, BTreeMap::len)
+    }
+
+    /// The shared rule both paths obey. `Err` carries the refusal the governed
+    /// path reports; the direct path reports it as `false`.
+    fn write_cell(&mut self, tenant: &TenantId, key: &str, value: &str) -> Result<(), Refusal> {
+        if !self.tenants.contains_key(tenant) {
+            return Err(Refusal::UnknownTenant);
+        }
+        // Sized like every other caller-controlled string on this path. Before
+        // this, a 4 MiB key and a 4 MiB value were both accepted and retained
+        // for the lifetime of the process.
+        if key.is_empty() || key.len() > MAX_CELL_KEY_BYTES {
+            return Err(Refusal::MalformedRequest("cell_key".to_string()));
+        }
+        if value.len() > MAX_CELL_VALUE_BYTES {
+            return Err(Refusal::MalformedRequest("cell_value".to_string()));
+        }
+        let cells = self.store.entry(tenant.clone()).or_default();
+        // The cap is on *new* keys: overwriting one a tenant already holds
+        // cannot grow the map, and refusing it would make a full tenant unable
+        // to correct its own data.
+        if cells.len() >= MAX_CELLS_PER_TENANT && !cells.contains_key(key) {
+            return Err(Refusal::StorageExhausted);
+        }
+        cells.insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+
+    /// Delete a cell directly. Returns whether it existed.
+    ///
+    /// Its absence was the whole of finding 3: every byte ever written was
+    /// retained for the lifetime of the process, because no `remove`, `evict`
+    /// or `clear` existed anywhere in the API. Overwriting a value with `""`
+    /// returned 7% of the bytes and there was no way to get the rest.
+    pub fn remove(&mut self, scope: &TenantScope<String>) -> bool {
+        let Some(cells) = self.store.get_mut(scope.tenant.0.as_str()) else {
+            return false;
+        };
+        let existed = cells.remove(scope.inner.as_str()).is_some();
+        if cells.is_empty() {
+            // Drop the tenant's map with it, so an emptied tenant costs
+            // nothing — the map, its keys and the tenant name held once.
+            self.store.remove(scope.tenant.0.as_str());
+        }
+        existed
+    }
+
+    /// Delete every cell a tenant holds. Returns how many were removed.
+    pub fn clear_cells(&mut self, tenant: &str) -> usize {
+        self.store.remove(tenant).map_or(0, |cells| cells.len())
+    }
+
+    // ── The governed cell path ───────────────────────────────────────────
+
+    /// Write a cell **through every gate**, journaled, metered and billed.
+    ///
+    /// The tool named on the request is what the deployment governs, so a
+    /// deployment that has not called `govern_tool("memory.put", ..)` refuses
+    /// with [`Refusal::ToolNotGoverned`] like any other ungoverned tool. The
+    /// cell is written only if the call is forwarded, and the tenant it lands
+    /// under is the **verified** one from the request — not a `TenantScope` the
+    /// caller assembled, which is what made `rescope` a silent crossing.
+    pub fn put_cell(&mut self, call: Call<'_>, key: &str, value: &str) -> Outcome {
+        self.cell_call(call, |d, tenant| {
+            d.write_cell(&tenant, key, value).map(|()| None)
+        })
+    }
+
+    /// Read a cell through every gate. Returns the decision and, when
+    /// forwarded, the value.
+    ///
+    /// Owned rather than borrowed because the read is journaled: the record is
+    /// written under the same `&mut` borrow that answers, so there is no way to
+    /// hand back a reference into a deployment the caller must then be able to
+    /// read the journal of.
+    pub fn get_cell(&mut self, call: Call<'_>, key: &str) -> (Outcome, Option<String>) {
+        let mut found = None;
+        let outcome = self.cell_call(call, |d, tenant| {
+            if !d.tenants.contains_key(&tenant) {
+                return Err(Refusal::UnknownTenant);
+            }
+            found = d
+                .store
+                .get(tenant.0.as_str())
+                .and_then(|cells| cells.get(key))
+                .cloned();
+            Ok(found.clone())
+        });
+        // A refusal returns nothing, ever — including the "no such cell" a
+        // caller could otherwise difference against a permission failure to
+        // probe another tenant's key space.
+        //
+        // Today that already holds by construction, because `cell_call` runs
+        // the effect only on `Forwarded` and `found` is therefore untouched on
+        // every refusal — deleting this line changes no test. It is written
+        // out anyway: the property is a security guarantee, and the next
+        // effect that sets state *before* deciding it must refuse would
+        // otherwise leak it silently.
+        if outcome.is_forwarded() {
+            (outcome, found)
+        } else {
+            (outcome, None)
+        }
+    }
+
+    /// Delete a cell through every gate.
+    pub fn remove_cell(&mut self, call: Call<'_>, key: &str) -> Outcome {
+        let scope = TenantScope::new(TenantId(call.request.tenant.clone()), key.to_string());
+        self.cell_call(call, move |d, _| {
+            d.remove(&scope);
+            Ok(None)
+        })
+    }
+
+    /// Run one cell access through `admit`, then perform the effect.
+    ///
+    /// The effect runs **only** on `Forwarded`, and its own refusal (an unknown
+    /// tenant, an oversized key, a full store) replaces the outcome and rolls
+    /// the billing back — a call that did not happen must not be charged for.
+    fn cell_call<F>(&mut self, call: Call<'_>, effect: F) -> Outcome
+    where
+        F: FnOnce(&mut Self, TenantId) -> Result<Option<String>, Refusal>,
+    {
+        let tenant = TenantId(call.request.tenant.clone());
+        let cost = call.cost_tokens;
+        let outcome = self.admit(call);
+        if !outcome.is_forwarded() {
+            return outcome;
+        }
+        match effect(self, tenant.clone()) {
+            Ok(_) => outcome,
+            Err(refusal) => {
+                // Refund and re-journal: the admission said yes and the store
+                // said no, so the trail must show the refusal rather than a
+                // forward that never took effect.
+                if let Some(state) = self.tenants.get_mut(&tenant) {
+                    state.budget.refund(cost);
+                }
+                self.metrics.inc("gateway.cell_rejected", 1);
+                if let Some(record) = self.audit.back_mut() {
+                    record.cost = 0;
+                    record.outcome = Outcome::Refused(refusal.clone());
+                }
+                Outcome::Refused(refusal)
+            }
+        }
     }
 
     // ── The admission decision ───────────────────────────────────────────
@@ -1388,6 +1589,7 @@ fn tag(r: &Refusal) -> &'static str {
         Refusal::VariantNotActivated => "variant_not_activated",
         Refusal::BudgetExhausted => "budget_exhausted",
         Refusal::JustificationRequired => "justification_required",
+        Refusal::StorageExhausted => "storage_exhausted",
     }
 }
 
@@ -1555,7 +1757,11 @@ impl Deployment {
             cells: self
                 .store
                 .iter()
-                .map(|((t, k), v)| (t.0.clone(), k.clone(), v.clone()))
+                .flat_map(|(t, cells)| {
+                    cells
+                        .iter()
+                        .map(move |(k, v)| (t.0.clone(), k.clone(), v.clone()))
+                })
                 .collect(),
         }
     }
@@ -1618,7 +1824,18 @@ impl Deployment {
         }
 
         for (tenant, key, value) in snapshot.cells {
-            d.store.insert((TenantId(tenant), key), value);
+            // Through the same rule the live paths obey, so a snapshot
+            // cannot install a cell state neither path could have produced —
+            // an unknown tenant, an oversized key, or a tenant over its cell
+            // allowance. A snapshot is a file an operator or a bad merge can
+            // edit; it is not a back door.
+            let tenant = TenantId(tenant);
+            if d.write_cell(&tenant, &key, &value).is_err() {
+                return Err(RestoreError::MalformedIdentifier {
+                    what: "cell".to_string(),
+                    value: clamp(&key),
+                });
+            }
         }
 
         // Replay the journal.

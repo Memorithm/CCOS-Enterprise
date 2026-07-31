@@ -31,12 +31,22 @@
 //! * **Every `Refusal` variant round-trips byte for byte**, including the two
 //!   that carry caller-controlled text with newlines, quotes, NULs and RTL.
 //!
-//! ## What BROKE
+//! ## What BROKE, and is now repaired
 //!
-//! * **Nothing stops two `Store` handles opening one root.** Each caches its
-//!   own `next_sequence`, so their appends collide, and the collision is
-//!   detected only on the next *load*. Fail-closed on read, silent on write.
-//!   → [`two_handles_on_one_root_is_undefined_and_undetected`]
+//! * **Nothing stopped two `Store` handles opening one root.** Each cached its
+//!   own `next_sequence`, so their appends collided at the same sequence, and
+//!   the collision was detected only by the next *load* — fail-closed on read,
+//!   silent on write, and by then the journal was unreplayable. Two processes
+//!   pointed at one directory, which is what a restart script or a second
+//!   container does by accident, quietly destroyed the audit trail.
+//!
+//!   `Store::open` now takes an exclusive advisory lock and refuses the second
+//!   opener. The lock is a kernel lock rather than a `create_new` lock *file*
+//!   on purpose: a file would be left behind by any process that died and
+//!   would wedge every later start, which is the defect Core just removed from
+//!   `write_durable`, reintroduced one layer up. Both halves are asserted.
+//!   → [`a_second_handle_on_one_root_is_refused`]
+//!   → [`a_lock_left_by_a_dead_process_does_not_wedge_the_store`]
 
 use std::path::PathBuf;
 
@@ -412,48 +422,86 @@ fn every_refusal_variant_round_trips_through_the_journal() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **GAP, pinned rather than left to be discovered.** There is no lock file, so
-/// nothing stops two `Store` handles opening one root. Each caches its own
-/// `next_sequence` at open, so their appends collide — and the collision is
-/// detected only on the next *load*, by the sequence check, not at the moment
-/// the damage is written.
+/// **GAP, now CLOSED — this test is the guard.**
 ///
-/// This asserts the behaviour that exists today. It is not an endorsement: a
-/// single-writer store should refuse the second opener, and until it does,
-/// running two processes against one root corrupts the journal in a way that is
-/// fail-closed on read but silent on write.
+/// There was no lock, so nothing stopped two `Store` handles opening one root.
+/// Each caches its own `next_sequence` at open, so their appends collided at
+/// the same sequence, and the collision was detected only by the *next reader*
+/// — fail-closed on read, silent on write, and by then the journal was already
+/// unreplayable. Two processes pointed at one directory, which is what a
+/// restart script or a second container does by accident, quietly destroyed
+/// the audit trail.
+///
+/// `Store::open` now takes an exclusive advisory lock and refuses the second
+/// opener with [`StoreError::AlreadyOpen`].
 #[test]
-fn two_handles_on_one_root_is_undefined_and_undetected() {
+fn a_second_handle_on_one_root_is_refused() {
     let dir = scratch("twohandles");
     let mut a = Store::open(&dir).expect("first handle");
     a.save_snapshot(&two_tenant_deployment().snapshot())
         .expect("snapshot");
-
-    let mut b = Store::open(&dir).expect("DEFECT: a second handle opens freely");
-    assert_eq!(a.next_sequence(), 0);
-    assert_eq!(b.next_sequence(), 0, "both believe they start at 0");
-
     a.append(&[forwarded(0, "from-a")]).expect("a writes 0");
-    b.append(&[forwarded(0, "from-b")])
-        .expect("DEFECT: b also writes 0, and nothing notices");
-    drop(a);
-    drop(b);
 
-    // The damage is real, and only the reader catches it.
     let err = match Store::open(&dir) {
-        Ok(_) => panic!("two records at sequence 0 opened cleanly"),
+        Ok(_) => panic!("a second handle opened a live store"),
         Err(e) => e,
     };
     assert!(
-        matches!(
-            err,
-            StoreError::JournalDiscontinuity {
-                expected: 1,
-                found: 0,
-                ..
-            }
-        ),
-        "the collision must at least be fail-closed on read: {err}"
+        matches!(err, StoreError::AlreadyOpen { .. }),
+        "the second opener must be refused at open, not discovered on read: {err}"
     );
+
+    // The first handle is unaffected and keeps writing.
+    a.append(&[forwarded(1, "from-a-again")])
+        .expect("a still writes");
+    assert_eq!(a.next_sequence(), 2);
+
+    // …and once it is dropped, the lock is released and the root reopens.
+    drop(a);
+    let reopened = Store::open(&dir).expect("the lock is released on drop");
+    let loaded = reopened.load().expect("load").expect("store");
+    assert_eq!(loaded.journal.len(), 2, "no collision was ever written");
+    assert_eq!(loaded.journal[0].request_id, "from-a");
+    assert_eq!(loaded.journal[1].request_id, "from-a-again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The failure mode the lock must **not** have: wedging after a crash.
+///
+/// A `store.lock` created with `create_new` would be left behind by any
+/// process that died, and every later start would refuse until an operator
+/// deleted it by hand — exactly the defect Core removed from `write_durable`,
+/// reintroduced one layer up. An advisory kernel lock cannot be stale: the
+/// descriptor closes when the process dies, however it dies.
+///
+/// This test simulates the crash the honest way — the lock file is left on
+/// disk, with content, and no live holder — and asserts the store opens.
+#[test]
+fn a_lock_left_by_a_dead_process_does_not_wedge_the_store() {
+    let dir = scratch("staleLock");
+    {
+        let mut store = Store::open(&dir).expect("open");
+        store
+            .save_snapshot(&two_tenant_deployment().snapshot())
+            .expect("snapshot");
+        store
+            .append(&[forwarded(0, "before-the-crash")])
+            .expect("append");
+        // The process dies here: no clean shutdown, no unlink of the lock.
+    }
+
+    let lock = dir.join("store.lock");
+    assert!(lock.exists(), "the lock file itself survives, as it must");
+    // Give it content too, the way a pid-file convention would have.
+    std::fs::write(&lock, b"12345\n").expect("write");
+
+    let mut store = Store::open(&dir).expect("a dead holder must not wedge the store");
+    assert_eq!(store.next_sequence(), 1, "and the journal is intact");
+    store
+        .append(&[forwarded(1, "after-the-restart")])
+        .expect("append");
+
+    let loaded = store.load().expect("load").expect("store");
+    assert_eq!(loaded.journal.len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }

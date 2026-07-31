@@ -66,6 +66,9 @@ use ccos_enterprise_runtime::{AuditRecord, DeploymentSnapshot};
 pub const SNAPSHOT_FILE: &str = "deployment.json";
 /// Journal file name under the store root.
 pub const JOURNAL_FILE: &str = "audit.jsonl";
+/// Single-writer lock file under the store root. Never read or written — only
+/// the kernel lock held on it means anything. See [`Store::open`].
+pub const LOCK_FILE: &str = "store.lock";
 
 /// Why the store refused. Nothing here is recoverable by guessing.
 #[derive(Debug)]
@@ -96,6 +99,11 @@ pub enum StoreError {
     /// ledger the journal must be replayed onto is missing, so replaying it
     /// would invent one.
     SnapshotMissing { path: PathBuf },
+    /// Another live `Store` already holds this root. The store is
+    /// single-writer: two handles cache independent sequence counters and
+    /// their appends collide, so the second opener is refused rather than
+    /// allowed to corrupt the journal.
+    AlreadyOpen { path: PathBuf },
 }
 
 impl std::fmt::Display for StoreError {
@@ -123,6 +131,12 @@ impl std::fmt::Display for StoreError {
             Self::SnapshotMissing { path } => write!(
                 f,
                 "{}: a journal with no snapshot — there is no ledger to replay onto",
+                path.display()
+            ),
+            Self::AlreadyOpen { path } => write!(
+                f,
+                "{}: another process or handle already has this store open; \
+                 the store is single-writer",
                 path.display()
             ),
         }
@@ -162,25 +176,69 @@ pub struct Loaded {
 /// A durable Enterprise deployment on disk.
 ///
 /// Holds the journal file open for append, so a decision costs one `write` and
-/// one `sync_data` rather than an open/close pair.
+/// one `sync_data` rather than an open/close pair — and holds an exclusive
+/// lock for as long as it lives (see [`Store::open`]).
 pub struct Store {
     root: PathBuf,
     journal: BufWriter<File>,
     /// The next sequence this store expects to append, so a caller cannot
     /// journal decisions out of order or skip one.
     next_sequence: u64,
+    /// Held open, and exclusively locked, for the lifetime of the store. Never
+    /// read or written: the file is a handle for the kernel's lock, nothing
+    /// more. Dropping it releases the lock, and so does the process dying.
+    _lock: File,
 }
 
 impl Store {
-    /// Open (creating if absent) the store rooted at `root`.
+    /// Open (creating if absent) the store rooted at `root`, taking the
+    /// **exclusive single-writer lock**.
     ///
     /// Creating the directory is deliberate and safe: an empty directory is
     /// still an empty *store*, which [`Store::load`] reports as `Ok(None)`.
     /// What is never created is state — a deployment that cannot read its
     /// ledger does not get a blank one.
+    ///
+    /// ## Why a kernel lock and not a lock *file*
+    ///
+    /// Two `Store` handles on one root each cache their own `next_sequence` at
+    /// open, so their appends collide at the same sequence. That damage used
+    /// to be caught only by the *next* reader — fail-closed on read, silent on
+    /// write, and by then the journal is already unreplayable.
+    ///
+    /// The obvious fix, a `store.lock` created with `create_new`, would
+    /// reintroduce exactly the defect Core just removed from `write_durable`:
+    /// a process that dies leaves the file behind, and every later start is
+    /// wedged until an operator deletes it by hand. A crash must not cost
+    /// availability.
+    ///
+    /// [`std::fs::File::try_lock`] is an *advisory kernel* lock instead. It is
+    /// released when the descriptor closes — including when the process dies,
+    /// however it dies — so there is no such thing as a stale one. The file
+    /// itself is never read or written; only the lock on it means anything.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StoreError> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root).map_err(io(&root))?;
+
+        // Take the lock BEFORE reading the journal: the sequence this store
+        // caches must not be computed from a file another writer is extending.
+        let lock_path = root.join(LOCK_FILE);
+        let lock = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(io(&lock_path))?;
+        lock.try_lock().map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => StoreError::AlreadyOpen {
+                path: lock_path.clone(),
+            },
+            std::fs::TryLockError::Error(source) => StoreError::Io {
+                path: lock_path.clone(),
+                source,
+            },
+        })?;
+
         let journal_path = root.join(JOURNAL_FILE);
         let next_sequence = match read_journal(&journal_path)? {
             Some((records, _)) => records.last().map(|r| r.sequence + 1).unwrap_or(0),
@@ -195,6 +253,7 @@ impl Store {
             root,
             journal: BufWriter::new(file),
             next_sequence,
+            _lock: lock,
         })
     }
 

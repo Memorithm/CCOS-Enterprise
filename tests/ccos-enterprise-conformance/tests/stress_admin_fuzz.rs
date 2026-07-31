@@ -32,12 +32,16 @@
 //!   action is byte-identical to one of five literals — so it is **not** an
 //!   attacker-controlled format sink.
 //!
-//! ## What BROKE
+//! ## What BROKE, and what is now REPAIRED
 //!
-//! | # | defect | test |
-//! |---|--------|------|
-//! | A | `JUSTIFICATION_REQUIRED` is matched byte-exactly, so `TENANT.DELETE`, `Tenant.Delete`, `tenant.delete ` (padded), `license.revoKe` (U+212A KELVIN SIGN) and full-width/Cyrillic homoglyphs all **bypass the justification requirement entirely** | [`case_variants_of_every_sensitive_action_bypass_the_gate`], [`padded_and_homoglyph_spellings_bypass_the_gate`] |
-//! | B | `trim()` is a *whitespace* test, not a *visibility* test: a justification of one U+200B (or U+FEFF, U+2060, U+00AD, U+2800, NUL…) is "written" | [`unicode_whitespace_is_caught_but_zero_width_is_not`] |
+//! A and B are closed; the tests that found them are now the guards on the
+//! repair, each keeping its original attack corpus and asserting the opposite
+//! outcome. C through H are open and still pinned.
+//!
+//! | # | defect | state | test |
+//! |---|--------|-------|------|
+//! | A | `JUSTIFICATION_REQUIRED` was matched byte-exactly, so `TENANT.DELETE`, `Tenant.Delete`, `tenant.delete ` (padded), `license.revoKe` (U+212A KELVIN SIGN) and full-width/Cyrillic homoglyphs all **bypassed the justification requirement entirely** | **repaired**: the gate canonicalizes (trim + full Unicode lowercase) before matching, and refuses outright any name it cannot canonicalize — the fail-closed answer for the homoglyph family, which no folding can resolve | [`no_case_variant_of_a_sensitive_action_escapes_the_gate`], [`padded_and_homoglyph_spellings_are_refused`] |
+//! | B | `trim()` is a *whitespace* test, not a *visibility* test: a justification of one U+200B (or U+FEFF, U+2060, U+00AD, U+2800, NUL…) counted as "written" | **repaired**: the gate now asks whether the string draws anything, not whether it survives a trim | [`no_justification_that_draws_nothing_is_accepted`] |
 //! | C | any single non-whitespace byte — `"."` — satisfies "a written justification" | [`a_single_dot_is_a_written_justification`] |
 //! | D | `actor`/`action`/`target` are checked with `is_empty()`, **not** trimmed, so a sensitive act can be attributed to an actor of pure whitespace or of one zero-width character | [`blank_actor_and_target_are_accepted_because_only_the_justification_is_trimmed`] |
 //! | E | no field has any length bound; a 1 MiB (or 128 MiB) justification validates `Ok` | [`one_mebibyte_fields_are_accepted_without_bound`], [`admin_journal_growth_is_unbounded`] |
@@ -45,15 +49,20 @@
 //! | G | nothing in the composed product ever calls `validate`: `Call` has no justification field, `AuditRecord` has no justification field, and `policy.set` — the deployment's one administrative tool — is forwarded and journaled with no "why" | [`the_composed_path_administers_with_no_justification_at_all`] |
 //! | H | the workspace revokes licences on three surfaces demanding three different reasons — a mandatory typed `RevocationReason`, an `Option<String>` satisfied by `"."`, and nothing at all | [`the_three_revocation_surfaces_demand_three_different_reasons`] |
 //!
-//! Defect A is not a theoretical worry about a hypothetical caller: the
+//! Defect A was never a theoretical worry about a hypothetical caller: the
 //! sibling gate in the *same product*, `ccos_enterprise_gateway::classify`,
-//! lowercases and rejects non-canonical names precisely because "matching is
-//! case-insensitive so `RSI.x` cannot slip past a case-normalizing router
-//! downstream" (its own doc comment). The admin gate does neither.
-//! [`the_gateway_defends_against_spellings_the_admin_gate_does_not`] pins the
-//! asymmetry, and [`json_wire_form_reproduces_every_bypass`] shows every
-//! bypass surviving the `Deserialize` impl the type derives — i.e. reachable
-//! by an admin HTTP/MCP API doing the obvious thing.
+//! already lowercased and rejected non-canonical names precisely because
+//! "matching is case-insensitive so `RSI.x` cannot slip past a case-normalizing
+//! router downstream" (its own doc comment). The admin gate did neither, and
+//! the asymmetry was the argument that it was a defect rather than a design
+//! choice. [`both_gates_now_defend_against_the_same_spellings`] guards the
+//! symmetry — and notes that the two gates reach it by separate code, so it is
+//! an equivalence maintained by tests rather than by types.
+//!
+//! [`the_json_wire_form_inherits_the_repairs_and_the_remaining_gaps`] runs the
+//! same attacks through the `Deserialize` impl the type derives — the path an
+//! admin HTTP or MCP API actually takes — and shows A and B closed there too,
+//! with D and E still reachable.
 //!
 //! Every assertion below states the product's **current, real** behaviour.
 //! Where that behaviour is the defect, the assertion pins the defect so a
@@ -62,7 +71,7 @@
 use std::collections::BTreeSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use ccos_enterprise_admin::{validate, AdminAction, JUSTIFICATION_REQUIRED};
+use ccos_enterprise_admin::{is_canonical_action, validate, AdminAction, JUSTIFICATION_REQUIRED};
 use ccos_enterprise_auth::AuthStrength;
 use ccos_enterprise_conformance::{actor, request, two_tenant_deployment, Call};
 use ccos_enterprise_gateway::{classify, Disposition};
@@ -117,7 +126,7 @@ fn required_after_canonicalization(action: &str) -> bool {
 
 /// Characters that render as nothing but are **not** `White_Space`, so
 /// `str::trim` leaves them in place. Verified against `char::is_whitespace`
-/// by [`unicode_whitespace_is_caught_but_zero_width_is_not`] — if a future
+/// by [`no_justification_that_draws_nothing_is_accepted`] — if a future
 /// Unicode table update moves one of these, that test says so.
 const ZERO_WIDTH: &[char] = &[
     '\u{00AD}', // SOFT HYPHEN
@@ -353,7 +362,7 @@ const JUST_SHAPES: &[Just] = &[
 /// concluding the buffer is blank), so the cross-product uses 16 KiB of it and
 /// [`one_mebibyte_fields_are_accepted_without_bound`] carries the full 1 MiB
 /// case. Nothing about the verdict changes with length — that is asserted
-/// there and in [`unicode_whitespace_is_caught_but_zero_width_is_not`].
+/// there and in [`no_justification_that_draws_nothing_is_accepted`].
 const BIG_BLANK: usize = 16 * 1024;
 
 fn just_value(shape: Just) -> Option<String> {
@@ -427,16 +436,17 @@ fn validate_never_panics_over_the_full_hostile_cross_product() {
 
                     let fields_present =
                         !a.actor.is_empty() && !a.action.is_empty() && !a.target.is_empty();
-                    let trims_to_something = a
-                        .justification
-                        .as_deref()
-                        .is_some_and(|j| !j.trim().is_empty());
+                    let comparable = is_canonical_action(&canonical_action(action));
+                    let written = is_a_written_reason(a.justification.as_deref());
 
-                    // P1 — the documented contract, restated: acceptance is
-                    // exactly "three non-empty fields, and a justification
-                    // that survives trim() whenever the action is listed".
-                    let expected =
-                        fields_present && (!required_exactly(action) || trims_to_something);
+                    // P1 — the repaired contract, restated: acceptance is
+                    // exactly "three non-empty fields, an action name the gate
+                    // can compare with the policy list, and — whenever the
+                    // canonicalized name is on that list — a justification
+                    // that renders something a human can read".
+                    let expected = fields_present
+                        && comparable
+                        && (!required_after_canonicalization(action) || written);
                     assert_eq!(
                         result.is_ok(),
                         expected,
@@ -446,8 +456,9 @@ fn validate_never_panics_over_the_full_hostile_cross_product() {
 
                     // P2 — the brief's invariant: a *required* justification is
                     // never satisfied by a blank one. Holds, for every ASCII
-                    // and Unicode whitespace shape.
-                    if required_exactly(action) && !trims_to_something {
+                    // and Unicode whitespace shape — and now for the
+                    // zero-width shapes too.
+                    if required_after_canonicalization(action) && comparable && !written {
                         assert!(
                             result.is_err(),
                             "BLANK JUSTIFICATION SATISFIED A REQUIREMENT: \
@@ -498,64 +509,44 @@ fn validate_never_panics_over_the_full_hostile_cross_product() {
     // ── DEFECT A, found by fuzzing ───────────────────────────────────────
     // A non-empty set here is the finding: these action spellings performed a
     // sensitive administrative act with no reason attached at all. Pinned as
-    // an exact set — a repair must shrink it, and shrinking it fails here.
-    let expected_spelling_bypasses: BTreeSet<String> = JUSTIFICATION_REQUIRED
-        .iter()
-        .flat_map(|s| {
-            let mut v = vec![
-                shout(s),
-                title_segments(s),
-                alternating(s),
-                format!(" {s}"),
-                format!("{s} "),
-                format!("{s}\n"),
-                format!("{s}\t"),
-            ];
-            if s.contains('k') {
-                v.push(kelvin(s));
-            }
-            v
-        })
-        .collect();
-    assert_eq!(
-        spelling_bypasses, expected_spelling_bypasses,
-        "DEFECT A changed shape: these spellings of a listed sensitive action \
-         validate with no justification"
+    // REPAIRED: the set is now empty. Every spelling either canonicalizes onto
+    // the listed name and inherits the requirement, or is refused outright as
+    // a name the gate cannot compare. Both outcomes keep it out of this set.
+    assert!(
+        spelling_bypasses.is_empty(),
+        "these spellings of a listed sensitive action still validate with no \
+         justification: {spelling_bypasses:?}"
     );
-    assert!(spelling_bypasses.len() >= JUSTIFICATION_REQUIRED.len() * 7);
 
-    // Soundness of the attack model: every bypass really is a spelling of a
-    // listed sensitive action. No `tenant.created`, no `xpolicy.disable`.
-    for spelling in &spelling_bypasses {
-        assert!(
-            JUSTIFICATION_REQUIRED.contains(&canonical_action(spelling).as_str()),
-            "attack model produced a false positive: {spelling:?}"
-        );
-    }
-    // Every one of the five listed actions is bypassable, not just one.
+    // Soundness of the attack model, restated for the repaired gate: the
+    // corpus really did contain a re-spelling of every listed action, so the
+    // empty result above is a repair rather than a test that stopped looking.
     for sensitive in JUSTIFICATION_REQUIRED {
         assert!(
-            spelling_bypasses
+            actions
                 .iter()
-                .any(|b| canonical_action(b) == *sensitive),
-            "no bypass found for {sensitive} — has the gate been fixed?"
+                .any(|a| canonical_action(a) == *sensitive && a != sensitive),
+            "the corpus contains no re-spelling of {sensitive}, so the empty \
+             bypass set above proves nothing"
         );
     }
 
-    // ── DEFECT B, also found by fuzzing ──────────────────────────────────
+    // ── DEFECT B, also found by fuzzing, now REPAIRED ────────────────────
     // The fuzz reached this on its own, without being told about zero-width
-    // characters: the byte-exact `tenant.delete` (and all four siblings) are
-    // accepted when the "justification" is a run of `White_Space = No`
-    // invisibles. `trim()` asks whether the string is *whitespace*, not
-    // whether it is *readable*, and those are different questions.
-    //
-    // Exactly one shape does it, and it is the zero-width one — every genuine
-    // whitespace shape, ASCII and Unicode alike, is correctly refused.
-    assert_eq!(
-        blank_reason_bypasses,
-        BTreeSet::from([Just::ZeroWidth]),
-        "DEFECT B changed shape: these justification shapes satisfied a \
-         listed sensitive action while rendering as nothing"
+    // characters: a listed action was accepted when the "justification" was a
+    // run of `White_Space = No` invisibles, because `trim()` asks whether a
+    // string is *whitespace*, not whether it is *readable*, and those are
+    // different questions. The gate now asks the second one.
+    assert!(
+        blank_reason_bypasses.is_empty(),
+        "these justification shapes still satisfied a listed sensitive action \
+         while rendering as nothing: {blank_reason_bypasses:?}"
+    );
+    // …and the corpus really did contain the shape that used to slip through,
+    // so the empty set is a repair and not a narrowed search.
+    assert!(
+        JUST_SHAPES.contains(&Just::ZeroWidth),
+        "the corpus no longer probes the zero-width shape"
     );
 }
 
@@ -574,7 +565,7 @@ fn validate_never_panics_over_the_full_hostile_cross_product() {
 /// **with no justification at all** — the exact hole
 /// `docs/HUMAN_APPROVAL_POLICIES.md` calls "unrecorded approval = denial".
 #[test]
-fn case_variants_of_every_sensitive_action_bypass_the_gate() {
+fn no_case_variant_of_a_sensitive_action_escapes_the_gate() {
     for sensitive in JUSTIFICATION_REQUIRED {
         // The gate works, for the one spelling it knows.
         assert!(
@@ -599,15 +590,18 @@ fn case_variants_of_every_sensitive_action_bypass_the_gate() {
                 "…but only in case: {variant:?} folds to {sensitive}"
             );
 
-            // DEFECT A: accepted, with no justification whatsoever.
+            // REPAIRED: the variant canonicalizes onto the listed name, so
+            // it inherits the requirement instead of escaping it.
             assert!(
-                accepted("root", &variant, "acme", None),
-                "DEFECT A regressed (good!): {variant:?} is now refused without a justification"
+                !accepted("root", &variant, "acme", None),
+                "{variant:?} escaped the justification requirement"
             );
             assert!(
-                accepted("root", &variant, "acme", Some("")),
-                "DEFECT A regressed (good!): {variant:?} + empty justification is now refused"
+                !accepted("root", &variant, "acme", Some("")),
+                "{variant:?} + empty justification was accepted"
             );
+            // …and it is accepted once a real reason is written.
+            assert!(accepted("root", &variant, "acme", Some("contract ended")));
         }
     }
 
@@ -619,18 +613,19 @@ fn case_variants_of_every_sensitive_action_bypass_the_gate() {
     assert_ne!(kelvined, "license.revoke");
     assert_eq!(kelvined.to_lowercase(), "license.revoke");
     assert!(
-        accepted("root", &kelvined, "lic-0001", None),
-        "DEFECT A (Kelvin variant) regressed"
+        !accepted("root", &kelvined, "lic-0001", None),
+        "the Kelvin spelling escaped the requirement"
     );
-    // …and `to_ascii_lowercase` — which is what the gateway crate uses — does
-    // NOT collapse it, so even copying the gateway's defence verbatim would
-    // leave this one open.
+    // Worth noting why the repair catches it: `to_ascii_lowercase` — which is
+    // what the gateway crate uses on tool names — does NOT collapse U+212A, so
+    // copying the gateway's defence verbatim would have left this one open.
+    // The gate uses full Unicode `to_lowercase`, which does.
     assert_ne!(kelvined.to_ascii_lowercase(), "license.revoke");
 }
 
 /// Padding and homoglyphs: the same bypass, reached without touching case.
 #[test]
-fn padded_and_homoglyph_spellings_bypass_the_gate() {
+fn padded_and_homoglyph_spellings_are_refused() {
     // Whitespace padding — what every JSON/CSV/form-encoded wire leaves behind.
     for pad in [
         " tenant.delete",
@@ -643,13 +638,17 @@ fn padded_and_homoglyph_spellings_bypass_the_gate() {
     ] {
         assert_eq!(pad.trim(), "tenant.delete", "the pad must be pure padding");
         assert!(
-            accepted("root", pad, "acme", None),
-            "DEFECT A (padding) regressed for {pad:?}"
+            !accepted("root", pad, "acme", None),
+            "padding escaped the requirement for {pad:?}"
         );
     }
 
     // A NUL or a zero-width character welded onto the end: invisible in every
     // console, and enough to leave the list.
+    // These cannot be folded onto the listed name, so they are refused as
+    // non-canonical instead — the same outcome for the caller, and the only
+    // fail-closed one available: a name the gate cannot compare must not be
+    // assumed harmless.
     for smuggled in [
         "tenant.delete\u{0}",
         "tenant.delete\u{200b}",
@@ -657,8 +656,12 @@ fn padded_and_homoglyph_spellings_bypass_the_gate() {
         "tenant.delete\u{ad}",
     ] {
         assert!(
-            accepted("root", smuggled, "acme", None),
-            "DEFECT A (zero-width/NUL) regressed for {smuggled:?}"
+            !accepted("root", smuggled, "acme", None),
+            "smuggled invisible escaped the gate for {smuggled:?}"
+        );
+        assert!(
+            !accepted("root", smuggled, "acme", Some("a real reason")),
+            "a name the gate cannot compare must be refused even when justified: {smuggled:?}"
         );
     }
 
@@ -668,8 +671,12 @@ fn padded_and_homoglyph_spellings_bypass_the_gate() {
     assert_ne!(cyr, "tenant.delete");
     assert_eq!(cyr.chars().count(), "tenant.delete".chars().count());
     assert!(
-        accepted("root", &cyr, "acme", None),
-        "DEFECT A (homoglyph) regressed"
+        !accepted("root", &cyr, "acme", None),
+        "the Cyrillic homoglyph escaped the gate"
+    );
+    assert!(
+        !is_canonical_action(&cyr),
+        "and it is refused as non-canonical"
     );
 
     // Full-width: NFKC-normalizes back to `tenant.delete`, so any consumer
@@ -678,30 +685,33 @@ fn padded_and_homoglyph_spellings_bypass_the_gate() {
     let wide = fullwidth("tenant.delete");
     assert_ne!(wide, "tenant.delete");
     assert!(
-        accepted("root", &wide, "acme", None),
-        "DEFECT A (full-width) regressed"
+        !accepted("root", &wide, "acme", None),
+        "the full-width spelling escaped the gate"
     );
 
-    // Soundness: genuinely different actions stay exempt for the right reason.
-    for benign in [
-        "tenant.deleted",
-        "xtenant.delete",
-        "tenant.del",
-        "tenant..delete",
-    ] {
+    // Soundness: genuinely different actions stay exempt for the right
+    // reason, and the repair does not over-reach into refusing them.
+    for benign in ["tenant.deleted", "xtenant.delete", "tenant.del"] {
         assert!(
             !required_after_canonicalization(benign),
             "{benign} is not the same act"
         );
-        assert!(accepted("root", benign, "acme", None));
+        assert!(
+            accepted("root", benign, "acme", None),
+            "{benign} was refused"
+        );
     }
+    // `tenant..delete` has an empty segment, so it is not a canonical name and
+    // is refused — a stricter answer than before, and the right one: an empty
+    // segment is exactly the shape a naive join or a trailing dot produces.
+    assert!(!accepted("root", "tenant..delete", "acme", None));
 }
 
 /// The asymmetry that makes DEFECT A a *defect* rather than a design choice:
 /// the sibling gate in the same product already defends against exactly these
 /// spellings, and says in its own doc comment why.
 #[test]
-fn the_gateway_defends_against_spellings_the_admin_gate_does_not() {
+fn both_gates_now_defend_against_the_same_spellings() {
     let rejected = |tool: &str| {
         matches!(
             classify(&request("acme", "root", tool, "r-1")),
@@ -721,11 +731,38 @@ fn the_gateway_defends_against_spellings_the_admin_gate_does_not() {
         Disposition::Forward
     );
 
-    // The admin gate does neither: the same three transformations that the
-    // gateway treats as attacks are, at the administrative gate, a free pass.
-    assert!(accepted("root", "TENANT.DELETE", "acme", None));
-    assert!(accepted("root", " tenant.delete", "acme", None));
-    assert!(accepted("root", "tenant.\u{0}delete", "acme", None));
+    // REPAIRED: the admin gate now does both. The same three transformations
+    // the gateway treats as attacks are refused here too — the asymmetry this
+    // test was written to pin is gone, and the test now guards its absence.
+    assert!(!accepted("root", "TENANT.DELETE", "acme", None));
+    assert!(!accepted("root", " tenant.delete", "acme", None));
+    assert!(!accepted("root", "tenant.\u{0}delete", "acme", None));
+    // The two gates reach the same verdict by different routes, which is worth
+    // stating: the gateway rejects a non-canonical *tool*, the admin gate
+    // rejects a non-canonical *action*. Neither delegates to the other, so
+    // this equivalence is a coincidence maintained by tests, not by types.
+    // With a real reason, the two shapes part company — and the distinction
+    // is the point. A spelling that canonicalizes onto the listed action is a
+    // *valid* way to name it, so it is admitted once justified; a spelling the
+    // gate cannot canonicalize is refused whatever the caller writes.
+    assert!(accepted(
+        "root",
+        "TENANT.DELETE",
+        "acme",
+        Some("a real reason")
+    ));
+    assert!(accepted(
+        "root",
+        " tenant.delete",
+        "acme",
+        Some("a real reason")
+    ));
+    assert!(!accepted(
+        "root",
+        "tenant.\u{0}delete",
+        "acme",
+        Some("a real reason")
+    ));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -746,7 +783,7 @@ fn the_gateway_defends_against_spellings_the_admin_gate_does_not() {
 /// nothing, and `"\u{200b}"` is therefore a **written justification** as far
 /// as `ccos-enterprise-admin` is concerned. So is a lone NUL byte.
 #[test]
-fn unicode_whitespace_is_caught_but_zero_width_is_not() {
+fn no_justification_that_draws_nothing_is_accepted() {
     // (name, char, is White_Space → caught by trim)
     let table: &[(&str, char, bool)] = &[
         ("U+0020 SPACE", '\u{20}', true),
@@ -765,7 +802,8 @@ fn unicode_whitespace_is_caught_but_zero_width_is_not() {
         ("U+202F NARROW NO-BREAK SPACE", '\u{202f}', true),
         ("U+205F MEDIUM MATHEMATICAL SPACE", '\u{205f}', true),
         ("U+3000 IDEOGRAPHIC SPACE", '\u{3000}', true),
-        // ── the hole ──
+        // ── what used to be the hole: NOT `White_Space`, and now refused
+        //    anyway, because the gate tests visibility rather than whitespace
         ("U+0000 NUL", '\u{0}', false),
         ("U+0007 BEL", '\u{7}', false),
         ("U+001B ESC", '\u{1b}', false),
@@ -782,20 +820,23 @@ fn unicode_whitespace_is_caught_but_zero_width_is_not() {
         ("U+FFA0 HALFWIDTH HANGUL FILLER", '\u{ffa0}', false),
     ];
 
-    for (name, c, caught) in table {
+    for (name, c, is_ws) in table {
+        // The `White_Space` column is still asserted, because it is what a
+        // future "optimization" back to `trim()` would rely on — and it is
+        // exactly the set that would silently reopen the hole.
         assert_eq!(
             c.is_whitespace(),
-            *caught,
+            *is_ws,
             "{name}: the Unicode table moved under this test"
         );
 
-        // One copy, and sixty-four copies: length changes nothing.
+        // One copy, and sixty-four copies: length changes nothing. EVERY row
+        // is refused now, whitespace or not — that is the repair.
         for reps in [1usize, 64] {
             let blank: String = std::iter::repeat_n(*c, reps).collect();
-            let refused = !accepted("root", "tenant.delete", "acme", Some(&blank));
-            assert_eq!(
-                refused, *caught,
-                "{name} x{reps}: expected refused={caught}, got refused={refused}"
+            assert!(
+                !accepted("root", "tenant.delete", "acme", Some(&blank)),
+                "{name} x{reps} was accepted as a written justification"
             );
         }
     }
@@ -808,8 +849,8 @@ fn unicode_whitespace_is_caught_but_zero_width_is_not() {
         Some(" \t\u{a0}\u{2007}\u{3000}\u{202f}\n ")
     ));
 
-    // ── DEFECT B ─────────────────────────────────────────────────────────
-    // A justification that draws literally nothing satisfies the requirement.
+    // ── DEFECT B, REPAIRED ───────────────────────────────────────────────
+    // A justification that draws literally nothing is no longer "written".
     for invisible in [
         "\u{200b}", "\u{feff}", "\u{2060}", "\u{ad}", "\u{2800}", "\u{0}",
     ] {
@@ -818,20 +859,31 @@ fn unicode_whitespace_is_caught_but_zero_width_is_not() {
             "the test's own notion of 'blank' is wrong for {invisible:?}"
         );
         assert!(
-            accepted("root", "tenant.delete", "acme", Some(invisible)),
-            "DEFECT B regressed (good!): {invisible:?} is now refused"
+            !accepted("root", "tenant.delete", "acme", Some(invisible)),
+            "{invisible:?} is still accepted as a written justification"
         );
     }
 
-    // And the composite: whitespace *plus* one zero-width character. The
-    // whitespace is trimmed away, the zero-width character is what remains,
-    // so the whole thing counts as written.
+    // And the composite that used to be the sharpest edge: whitespace *plus*
+    // one zero-width character. `trim()` removed the whitespace and left the
+    // invisible behind, so the whole thing counted as written. It does not any
+    // more — the rule is about what the string draws, not what survives a trim.
     let padded_ghost = "   \t\u{a0}\u{200b}\u{3000}  ";
     assert!(renders_blank(padded_ghost));
     assert!(
-        accepted("root", "license.revoke", "lic-0001", Some(padded_ghost)),
-        "DEFECT B (composite) regressed"
+        !accepted("root", "license.revoke", "lic-0001", Some(padded_ghost)),
+        "an invisible padded with whitespace is still accepted"
     );
+    // One legible character among the invisibles is still enough: the gate
+    // guarantees a reason is *readable*, not that it is *good*. Judging the
+    // quality of a written reason is not something a string check can do, and
+    // pretending otherwise would only push operators to type "x".
+    assert!(accepted(
+        "root",
+        "license.revoke",
+        "lic-0001",
+        Some("   \u{200b}breach of contract\u{feff} ")
+    ));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -981,11 +1033,21 @@ fn one_mebibyte_fields_are_accepted_without_bound() {
         Some(&huge_blank)
     ));
 
-    // 1 MiB of zero-width space: accepted, DEFECTS B and E compounding — an
-    // unbounded, invisible, "written" justification.
+    // 1 MiB of zero-width space: now REFUSED. Defect B is closed, so the
+    // compounding with E is gone — an invisible justification is no
+    // justification however many megabytes of it arrive.
     let huge_ghost = repeat_to('\u{200b}', MIB);
     assert!(renders_blank(&huge_ghost));
-    assert!(accepted("root", "tenant.delete", "acme", Some(&huge_ghost)));
+    assert!(!accepted(
+        "root",
+        "tenant.delete",
+        "acme",
+        Some(&huge_ghost)
+    ));
+    // DEFECT E itself is untouched and still pinned: a 1 MiB *legible*
+    // justification is accepted with no length bound anywhere.
+    let huge_real = format!("{}{}", "reason ".repeat(MIB / 7), "x");
+    assert!(accepted("root", "tenant.delete", "acme", Some(&huge_real)));
 
     // A 1 MiB *action* name is likewise unbounded — and it is not sensitive,
     // because it is not byte-equal to any of five short literals.
@@ -1180,7 +1242,7 @@ fn the_composed_path_administers_with_no_justification_at_all() {
 /// `validate`. This test walks that path and shows the bypasses are reachable
 /// from a plain HTTP body — they are not an abstract property of the `const`.
 #[test]
-fn json_wire_form_reproduces_every_bypass() {
+fn the_json_wire_form_inherits_the_repairs_and_the_remaining_gaps() {
     let parse = |body: &str| serde_json::from_str::<AdminAction>(body);
 
     // Baseline: the honest request is correctly refused.
@@ -1213,14 +1275,17 @@ fn json_wire_form_reproduces_every_bypass() {
         parse(r#"{"actor":"root","action":"TENANT.DELETE","target":"acme","unix_time":0}"#)
             .expect("parses");
     assert!(
-        validate(&shouted).is_ok(),
-        "DEFECT A regressed (good!): the mixed-case wire form is now refused"
+        validate(&shouted).is_err(),
+        "the mixed-case wire form still bypasses the requirement"
     );
 
     let padded =
         parse(r#"{"actor":"root","action":"tenant.delete ","target":"acme","unix_time":0}"#)
             .expect("parses");
-    assert!(validate(&padded).is_ok(), "DEFECT A (padding) regressed");
+    assert!(
+        validate(&padded).is_err(),
+        "the padded wire form still bypasses the requirement"
+    );
 
     // ── DEFECT B over the wire ───────────────────────────────────────────
     // Written the way a JSON client actually emits it: the six ASCII
@@ -1233,7 +1298,10 @@ fn json_wire_form_reproduces_every_bypass() {
     assert!(ghost_body.is_ascii(), "the wire bytes are plain ASCII");
     let ghost = parse(&ghost_body).expect("parses");
     assert_eq!(ghost.justification.as_deref(), Some("\u{200b}"));
-    assert!(validate(&ghost).is_ok(), "DEFECT B regressed (good!)");
+    assert!(
+        validate(&ghost).is_err(),
+        "an invisible justification still passes over the wire"
+    );
 
     // ── DEFECT D over the wire ───────────────────────────────────────────
     let anon = parse(
@@ -1342,8 +1410,8 @@ fn the_three_revocation_surfaces_demand_three_different_reasons() {
 
     // 2. The admin gate: the same act, with a full stop for a reason.
     assert!(accepted("root", "license.revoke", "lic-0001", Some(".")));
-    // …or with no reason at all, if the caller shouts.
-    assert!(accepted("root", "LICENSE.REVOKE", "lic-0001", None));
+    // Shouting no longer helps: the spelling bypass is closed.
+    assert!(!accepted("root", "LICENSE.REVOKE", "lic-0001", None));
 
     // 3. The counter's ledger: revocation is a field assignment. `Entry` has
     //    no reason, no justification and no actor — `label` is the only free

@@ -1940,56 +1940,87 @@ fn an_unknown_code_404_deep_copies_the_entire_ledger() {
 // §9  Durability: the atomic write, and how it wedges
 // ═════════════════════════════════════════════════════════════════════
 
-/// **DEFECT 3.** `write_durable` creates `<path>.tmp.<pid>` with
-/// `create_new(true)`. A crash between create and rename leaves that file
-/// behind forever — nothing cleans it, and the name is only pid-unique. When
-/// a process with that pid next serves claims, every single one answers
-/// `500 persistence failure` while `/healthz` keeps answering 200.
+/// **DEFECT 3 — REPAIRED IN CORE, GUARDED HERE.**
+///
+/// `write_durable` used to create `<path>.tmp.<pid>` with `create_new(true)`.
+/// A crash between create and rename left that file behind forever — nothing
+/// cleaned it, and the name was only pid-unique. When a process with that pid
+/// next served claims, every single one answered `500 persistence failure`
+/// while `/healthz` kept answering 200: a total outage the health check could
+/// not see, curable only by an operator deleting a file by hand.
+///
+/// Core now names the temp `<path>.tmp.<pid>.<attempt>` from a monotonic
+/// counter, retrying up to 16 times, and unlinks it from a `Drop` guard on
+/// every failure path. Two independent reasons the wedge cannot recur: the
+/// name a crashed predecessor left is never reused, and a failure cleans up
+/// after itself.
+///
+/// This test keeps the crash debris exactly as it was and asserts the opposite
+/// outcome. It also asserts the guard's *restraint*: a file this call did not
+/// create must never be unlinked, however inconvenient it is.
 #[test]
-fn a_stale_temp_file_wedges_every_future_save() {
+fn a_stale_temp_file_no_longer_wedges_any_future_save() {
     let dir = scratch("wedge");
     let path = dir.join("vault.json");
     let mut v = Vault::new();
     v.entries.insert(key(1), unclaimed("Acme", Some(365)));
     v.save(&path).expect("the first save works");
 
-    // The debris a crashed predecessor leaves behind.
-    let stale = dir.join(format!("vault.json.tmp.{}", std::process::id()));
-    std::fs::write(&stale, b"leftovers from a crash").expect("write");
+    // The debris a crashed predecessor leaves behind — both the name the old
+    // implementation used and the shape the new one uses, so neither can
+    // collide by accident.
+    let stale_old = dir.join(format!("vault.json.tmp.{}", std::process::id()));
+    let stale_new = dir.join(format!("vault.json.tmp.{}.0", std::process::id()));
+    std::fs::write(&stale_old, b"leftovers from a crash").expect("write");
+    std::fs::write(&stale_new, b"leftovers from a crash").expect("write");
 
-    let err = v.save(&path).expect_err("save must now fail");
-    assert_eq!(
-        err.kind(),
-        std::io::ErrorKind::AlreadyExists,
-        "the temp name is not unique per attempt: {err}"
-    );
+    v.save(&path)
+        .expect("a stale temp file must not block a save");
 
-    // Through the counter: the claim is refused with 500, the flip is rolled
-    // back, and the seat stays sellable — but nobody can ever buy it.
+    // Through the counter: claims are served, not refused, and the health
+    // check and the service now agree — which was the whole point.
     let mut counter = counter_for(v, &path);
     for attempt in 0..5 {
         let (status, body) = counter.handle("POST", CLAIM_PATH, &claim_body(&wire(1), &fp(1)), NOW);
-        assert_eq!(status, 500, "attempt {attempt}: {body}");
-        assert!(body.contains("nothing was issued"), "{body}");
-        assert_eq!(
-            counter.vault.entries[&key(1)].status,
-            Status::Unclaimed,
-            "attempt {attempt}: the in-memory flip was correctly rolled back"
+        // Only the first claim can succeed; the seat is single-use, so the
+        // rest are refused on *business* grounds, never on persistence.
+        if attempt == 0 {
+            assert_eq!(status, 200, "attempt {attempt}: {body}");
+        } else {
+            assert_ne!(
+                status, 500,
+                "attempt {attempt} hit a persistence failure: {body}"
+            );
+        }
+        assert!(
+            !body.contains("nothing was issued"),
+            "attempt {attempt}: a persistence failure resurfaced: {body}"
         );
-        // Meanwhile the health check is perfectly happy.
         assert_eq!(counter.handle("GET", "/healthz", "", NOW).0, 200);
     }
-    println!("[§9] one stale temp file: 5/5 claims refused 500, /healthz 200 throughout");
+    println!("[§9] two stale temp files: the first claim is served 200, none refused 500");
 
-    // Manual intervention is the only cure. Nothing in the product does this.
-    std::fs::remove_file(&stale).expect("an operator, eventually");
-    let (status, _) = counter.handle("POST", CLAIM_PATH, &claim_body(&wire(1), &fp(1)), NOW);
-    assert_eq!(
-        status, 200,
-        "and then it works again, as if nothing happened"
+    // The guard is armed only on the file this call created, so a stranger's
+    // debris survives untouched. Deleting it would be a different bug.
+    assert!(
+        stale_old.exists(),
+        "the guard unlinked a file it did not create"
+    );
+    assert!(
+        stale_new.exists(),
+        "the guard unlinked a file it did not create"
     );
 
-    // The on-disk ledger and the in-memory one agree once a save succeeds.
+    // …and no debris of the successful saves is left beside them.
+    let temps: Vec<String> = std::fs::read_dir(&dir)
+        .expect("readdir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp."))
+        .collect();
+    assert_eq!(temps.len(), 2, "a successful save left debris: {temps:?}");
+
+    // The on-disk ledger and the in-memory one agree.
     let on_disk = Vault::load(&path).expect("load");
     assert_eq!(on_disk.entries[&key(1)].status, Status::Claimed);
     assert_eq!(
@@ -2000,16 +2031,26 @@ fn a_stale_temp_file_wedges_every_future_save() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **DEFECT 3, the sharp edge.** `write_durable` does not clean up its own
-/// temp file when the rename fails. So the *first* failure — whatever caused
-/// it, however transient — manufactures the debris that guarantees the second,
-/// third and every subsequent failure. A full disk that clears itself, or a
-/// vault path that is briefly wrong, does not heal: it latches.
+/// **DEFECT 3, the sharp edge — REPAIRED IN CORE, GUARDED HERE.**
+///
+/// `write_durable` did not clean up its own temp file when the rename failed.
+/// So the *first* failure — whatever caused it, however transient —
+/// manufactured the debris that guaranteed the second, third and every
+/// subsequent failure. A full disk that cleared itself, or a vault path that
+/// was briefly wrong, did not heal: it latched, for the life of the process.
+///
+/// The `Drop` guard now unlinks the temp on every early return, including
+/// unwinding. This test keeps the identical transient-failure injection and
+/// asserts recovery instead of latching: the failure is reported once, leaves
+/// nothing behind, and the very next save succeeds once the real cause is
+/// gone.
 #[test]
-fn a_transient_save_failure_becomes_a_permanent_one() {
+fn a_transient_save_failure_no_longer_latches() {
     let dir = scratch("latch");
     // A path that cannot be renamed onto: rename(file, dir) is EISDIR. Stands
-    // in for any one-off write failure — ENOSPC, EROFS, EACCES, a crash.
+    // in for any one-off write failure — ENOSPC, EROFS, EACCES, a crash. It
+    // fails *after* the temp file has been created, written and fsynced, which
+    // is precisely the window the debris used to appear in.
     let path = dir.join("vault.json");
     std::fs::create_dir(&path).expect("the vault path is briefly a directory");
 
@@ -2022,32 +2063,51 @@ fn a_transient_save_failure_becomes_a_permanent_one() {
         "the FIRST failure is the real cause: {first}"
     );
 
-    // The cause is now gone. The failure is not.
-    std::fs::remove_dir(&path).expect("the operator fixes the real problem");
-    let stale = dir.join(format!("vault.json.tmp.{}", std::process::id()));
+    // THE REPAIR: the failed save cleaned up after itself. Nothing in the
+    // directory carries a temp suffix, so there is no latch to inherit.
+    let debris: Vec<String> = std::fs::read_dir(&dir)
+        .expect("readdir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp."))
+        .collect();
     assert!(
-        stale.exists(),
-        "the failed save left its temp file behind — that is the latch"
+        debris.is_empty(),
+        "the failed save left its temp file behind — that is the latch: {debris:?}"
     );
+
+    // Repeat it: three more failures must not accumulate debris either, and
+    // each must still report the real cause rather than `AlreadyExists`.
     for attempt in 0..3 {
-        let again = v
-            .save(&path)
-            .expect_err("every later save fails on debris from the first");
-        assert_eq!(
+        let again = v.save(&path).expect_err("the cause is still there");
+        assert_ne!(
             again.kind(),
             std::io::ErrorKind::AlreadyExists,
-            "attempt {attempt}: {again}"
+            "attempt {attempt} reported debris instead of the cause: {again}"
         );
     }
-    assert!(!path.exists(), "and the ledger was never written at all");
-    println!(
-        "[§9] one transient EISDIR latched into 3/3 permanent AlreadyExists failures \
-         after the cause was removed"
-    );
+
+    // The cause is now gone, and so is the failure.
+    std::fs::remove_dir(&path).expect("the operator fixes the real problem");
+    v.save(&path)
+        .expect("a transient failure must not outlive its cause");
+    let on_disk = Vault::load(&path).expect("load");
+    assert_eq!(on_disk.entries.len(), 1, "and the ledger was written");
+    println!("[§9] one transient EISDIR x4: no debris, and the next save succeeds");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A failed persist must not leak a token and must not leave the ledger in a
+/// state the in-memory one disagrees with. The property is unchanged; the way
+/// this test *forces* the failure had to change.
+///
+/// It used to plant a stale `vault.json.tmp.<pid>` and rely on the wedge above
+/// to make the save fail. Core's repair means that no longer fails at all, so
+/// the test was passing for a reason that had evaporated. Failure is now
+/// injected with EISDIR at the rename — the deepest failure point, after the
+/// temp has been created, written and fsynced, which is the one that used to
+/// leave debris and is the only one worth testing the rollback against.
 #[test]
 fn a_failed_save_never_discloses_a_token_and_never_corrupts_the_file() {
     let dir = scratch("nodisclose");
@@ -2055,24 +2115,64 @@ fn a_failed_save_never_discloses_a_token_and_never_corrupts_the_file() {
     let mut v = Vault::new();
     v.entries.insert(key(1), unclaimed("Acme", Some(365)));
     v.entries.insert(key(2), unclaimed("Beta", Some(365)));
-    v.save(&path).expect("save");
-    let pristine = std::fs::read(&path).expect("read");
 
-    let stale = dir.join(format!("vault.json.tmp.{}", std::process::id()));
-    std::fs::write(&stale, b"x").expect("write");
+    // A directory where the ledger belongs: every save fails at the rename.
+    std::fs::create_dir(&path).expect("the vault path is a directory");
 
     let mut counter = counter_for(v, &path);
     let (status, body) = counter.handle("POST", CLAIM_PATH, &claim_body(&wire(1), &fp(1)), NOW);
-    assert_eq!(status, 500);
+    assert_eq!(status, 500, "{body}");
     assert!(
         !body.contains("token"),
         "a token leaked out of a failed persist: {body}"
     );
     assert!(serde_json::from_str::<ClaimOk>(&body).is_err());
+
+    // The in-memory flip is rolled back, so memory and disk still agree: the
+    // seat is sellable in both, and nobody was charged for a licence that was
+    // never recorded.
     assert_eq!(
-        std::fs::read(&path).expect("read"),
-        pristine,
-        "the ledger on disk was modified by a failed save"
+        counter.vault.entries[&key(1)].status,
+        Status::Unclaimed,
+        "the flip must be rolled back when the persist fails"
+    );
+    assert!(counter.vault.entries[&key(1)].machine.is_none());
+
+    // Nothing was written anywhere: no ledger, and no temp debris to latch on.
+    assert!(path.is_dir(), "the failed save replaced the target");
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+        .expect("readdir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "vault.json")
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a failed persist left files behind: {leftovers:?}"
+    );
+
+    // And once the cause is removed the same request succeeds, writing a
+    // ledger that matches memory exactly — the rollback lost nothing.
+    std::fs::remove_dir(&path).expect("the operator fixes the real problem");
+    let (status, body) = counter.handle("POST", CLAIM_PATH, &claim_body(&wire(1), &fp(1)), NOW);
+    assert_eq!(status, 200, "{body}");
+    let on_disk = Vault::load(&path).expect("load");
+    // `Entry` does not implement `PartialEq`, so compare the fields that carry
+    // the claim: who owns the seat, and on which machine.
+    assert_eq!(
+        on_disk.entries.keys().collect::<Vec<_>>(),
+        counter.vault.entries.keys().collect::<Vec<_>>()
+    );
+    for (k, disk) in &on_disk.entries {
+        let mem = &counter.vault.entries[k];
+        assert_eq!(disk.status, mem.status, "{k}: status drifted from memory");
+        assert_eq!(disk.machine, mem.machine, "{k}: owner drifted from memory");
+    }
+    assert_eq!(on_disk.entries[&key(1)].status, Status::Claimed);
+    assert_eq!(
+        on_disk.entries[&key(2)].status,
+        Status::Unclaimed,
+        "the untouched seat is still sellable"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

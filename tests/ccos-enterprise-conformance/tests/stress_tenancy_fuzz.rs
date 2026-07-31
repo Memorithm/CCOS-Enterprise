@@ -24,8 +24,9 @@
 //! ## What HELD (and why)
 //!
 //! * **Tuple keying genuinely defeats key confusion.** `Deployment`'s store is
-//!   `BTreeMap<(TenantId, String), String>` (`src/lib.rs:223`, type alias at `:210`), and
-//!   tuple equality is componentwise: `("a", "b:c")` and `("a:b", "c")` are two
+//!   `BTreeMap<(TenantId, String), String>` (`src/lib.rs:223`, type alias at
+//!   `:210`), and tuple equality is componentwise: `("a", "b:c")` and
+//!   `("a:b", "c")` are two
 //!   different keys no matter what the separator is. The flattened
 //!   `format!("{tenant}{sep}{key}")` form a naive store would use aliases 8 of
 //!   the 27 corpus pairs with no separator, 5 with `:`, 3 with `::` and 1 each
@@ -55,16 +56,18 @@
 //!   refused with `Refusal::TenantNotOwnedByOrg` at gate 3, before the boundary
 //!   check, before RBAC, before the model allowlist and before the budget.
 //!   Two independent guards, and the second is the load-bearing one: it refuses
-//!   *identically* whether the target cell exists or not, so the refusal cannot
-//!   be turned into an oracle for another tenant's key space the way a bare
-//!   empty result can.
+//!   *identically* whether the target cell exists or not, and whatever tool,
+//!   model, variant, cost or role the foreigner brings, so it cannot be
+//!   differenced into an oracle for another tenant's key space or configuration
+//!   the way a bare empty result can. (It is *not* invariant in whether the
+//!   tenant exists at all — see finding 11.)
 //! * **No truncation, hashing or prefix comparison of keys.** 1 MiB keys are
 //!   stored and compared in full: two that differ only in their final byte are
 //!   two cells, and the same 1 MiB key under two tenants is two cells.
 //!
 //! ## What was REPAIRED (same inputs, opposite expectation)
 //!
-//! Four of the ten findings below have been closed in
+//! Four of the eleven findings in this file have been closed in
 //! `ccos-enterprise-runtime`. The tests that proved them were not deleted or
 //! relaxed: each kept its scenario and now asserts the repair, so a revert
 //! fails here. Where a repair closed only part of a finding, the residue is
@@ -192,6 +195,20 @@
 //!    provisioning surface that lets two admins create indistinguishable
 //!    tenants is the bad news, and `add_tenant` accepts all of them.
 //!    -> [`visually_identical_tenant_names_are_distinct_silent_namespaces`]
+//!
+//! 11. **NEW — the ownership refusal makes tenant names enumerable.** The
+//!     credential binding added in finding 8 answers `UnknownTenant` for a name
+//!     no organization has claimed and `TenantNotOwnedByOrg` for one another
+//!     organization owns (`src/lib.rs:429-436`). Any caller who can present a
+//!     token-strength credential for *any* org can therefore difference the two
+//!     and read off the deployment's tenant table one name at a time, at zero
+//!     cost, from outside every tenant. The comment at `src/lib.rs:425` says
+//!     this ordering exists "so a probe cannot enumerate tenants by their
+//!     refusal" — which holds for the actor check above it, not for this pair.
+//!     Collapsing both to one refusal would close it; the refusal is otherwise
+//!     invariant, which is what makes this the only channel left.
+//!     -> [`rescope_can_never_silently_read_the_source_tenants_data`], last
+//!     assertion
 //!
 //! (Findings 6, 7, 8 and 10 are repaired; see the section above. The residual
 //! halves of 7 and 10 are still open and still pinned by the same tests.)
@@ -869,6 +886,210 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
     }
     assert!(d.cells_of("globex").is_empty());
     assert!(d.cells_of("third").is_empty());
+
+    // ── The second guard ────────────────────────────────────────────────
+    //
+    // The crossings above are refused by the *shape* of the key. On the
+    // governed path the crossing is refused by the *credential*, and it is
+    // refused earlier: before the store, before every tenant-configurable
+    // gate, and without costing the target a token.
+    let mut governed = two_tenant_deployment();
+    // Both fixture tenants hold real data, so an empty result could not be
+    // mistaken for the guard doing its job here.
+    governed.put(&scope("acme", "memory-root"), "ACME CONFIDENTIAL");
+    governed.put(&scope("globex", "memory-root"), "GLOBEX CONFIDENTIAL");
+
+    // mallory is genuinely authenticated and genuinely privileged — `assign`
+    // is keyed on the actor name alone, so she really does hold `writer`'s
+    // permissions. She is simply in the wrong organization, and that alone is
+    // enough. `initech` owns no tenant in this deployment.
+    governed.assign("mallory", "writer");
+    let mallory = actor("initech", "mallory", AuthStrength::Token);
+
+    // Every axis a foreign caller could vary. The last element of each row is
+    // what the *same* probe answers for an actor whose org does own the tenant
+    // — seven different gates between them, which is what makes the uniformity
+    // below a statement about precedence rather than a coincidence.
+    let probes: Vec<(&str, &str, Option<AdvancedQPageVariant>, u64, Outcome)> = vec![
+        ("memory.recall", "claude-opus", None, 1, Outcome::Forwarded),
+        ("memory.ingest", "claude-opus", None, 1, Outcome::Forwarded),
+        (
+            "shell.exec", // forbidden namespace: gate 4
+            "claude-opus",
+            None,
+            1,
+            Outcome::Refused(Refusal::OutsideBoundary(String::new())),
+        ),
+        (
+            "code.execute", // forbidden tool: gate 4
+            "claude-opus",
+            None,
+            1,
+            Outcome::Refused(Refusal::OutsideBoundary(String::new())),
+        ),
+        (
+            "context.summarize", // in the catalogue, no permission declared: gate 5
+            "claude-opus",
+            None,
+            1,
+            Outcome::Refused(Refusal::ToolNotGoverned),
+        ),
+        (
+            "policy.set", // governed, but alice is only a writer: gate 5
+            "claude-opus",
+            None,
+            1,
+            Outcome::Refused(Refusal::PermissionDenied),
+        ),
+        (
+            "memory.recall", // off every allowlist: gate 6
+            "no-such-model",
+            None,
+            1,
+            Outcome::Refused(Refusal::ModelNotAllowed),
+        ),
+        (
+            "memory.recall", // globex's model, not acme's: gate 6
+            "gpt-5",
+            None,
+            1,
+            Outcome::Refused(Refusal::ModelNotAllowed),
+        ),
+        (
+            "memory.recall",
+            "claude-opus",
+            Some(AdvancedQPageVariant::Hierarchical), // acme has this one
+            1,
+            Outcome::Forwarded,
+        ),
+        (
+            "memory.recall",
+            "claude-opus",
+            Some(AdvancedQPageVariant::TemporalWindowed), // …but not this one: gate 6
+            1,
+            Outcome::Refused(Refusal::VariantNotActivated),
+        ),
+        (
+            "memory.recall", // more than the whole budget: gate 8
+            "claude-opus",
+            None,
+            1_000_000,
+            Outcome::Refused(Refusal::BudgetExhausted),
+        ),
+    ];
+
+    // The control: same probes, same tenant, an actor whose org owns it. Each
+    // row lands on the gate its comment names, so all eleven answers differ.
+    // (`OutsideBoundary` carries a message, so shapes are compared by variant.)
+    let mut owned = two_tenant_deployment();
+    let alice = actor("memorithm", "alice", AuthStrength::Token);
+    for (i, (tool, model, variant, cost, expected)) in probes.iter().enumerate() {
+        let req = request("acme", "alice", tool, &format!("r-owned-{i}"));
+        let got = owned.admit(Call {
+            actor: &alice,
+            request: &req,
+            model,
+            cost_tokens: *cost,
+            variant: *variant,
+        });
+        assert_eq!(
+            std::mem::discriminant(&got),
+            std::mem::discriminant(expected),
+            "control row {i} ({tool:?}, {model:?}): expected {expected:?}, got {got:?}"
+        );
+        if let (Outcome::Refused(g), Outcome::Refused(e)) = (&got, expected) {
+            assert_eq!(
+                std::mem::discriminant(g),
+                std::mem::discriminant(e),
+                "control row {i} ({tool:?}, {model:?}) reached the wrong gate: {got:?}"
+            );
+        }
+    }
+
+    // …and the guard: from the wrong organization, against either tenant,
+    // every one of those eleven distinct answers collapses to the same
+    // refusal. Not one gate downstream of ownership was reached, so nothing
+    // about acme's or globex's roles, catalogue, allowlist, activations or
+    // budget is observable through it.
+    for tenant in ["acme", "globex"] {
+        for (i, (tool, model, variant, cost, _)) in probes.iter().enumerate() {
+            let req = request(tenant, "mallory", tool, &format!("r-foreign-{tenant}-{i}"));
+            assert_eq!(
+                governed
+                    .admit(Call {
+                        actor: &mallory,
+                        request: &req,
+                        model,
+                        cost_tokens: *cost,
+                        variant: *variant,
+                    })
+                    .refusal(),
+                Some(&Refusal::TenantNotOwnedByOrg),
+                "a foreign org must be refused on ownership alone, before the gate that would \
+                 have answered for tool {tool:?} / model {model:?} on {tenant}"
+            );
+        }
+    }
+
+    // Nothing was charged, nothing was read, and the cells are untouched:
+    // the refusal landed before the store could have been consulted even if
+    // the store were on the `admit` path at all (it is not — defect 1).
+    assert_eq!(governed.spent("acme"), Some(0), "a refusal costs nothing");
+    assert_eq!(governed.spent("globex"), Some(0));
+    assert_eq!(
+        governed.get(&scope("acme", "memory-root")),
+        Some("ACME CONFIDENTIAL"),
+        "the target's cell is neither returned to the foreigner nor disturbed"
+    );
+
+    // Every one of those attempts is journaled against the tenant it named,
+    // at zero cost — the refusal is announced, not silent.
+    for tenant in ["acme", "globex"] {
+        let trail = governed.audit_of(tenant);
+        assert_eq!(
+            trail.len(),
+            probes.len(),
+            "{tenant}: every attempt is filed"
+        );
+        assert!(
+            trail
+                .iter()
+                .all(|r| !r.outcome.is_forwarded() && r.cost == 0),
+            "{tenant}: a refused crossing must never be billed"
+        );
+    }
+    let metrics: BTreeMap<String, u64> = governed.metrics().into_iter().collect();
+    assert_eq!(
+        metrics.get("gateway.refused.tenant_not_owned"),
+        Some(&((2 * probes.len()) as u64)),
+        "and it moves its own low-cardinality counter"
+    );
+    assert_eq!(metrics.get("gateway.forwarded"), None);
+
+    // STILL OPEN, pinned rather than papered over: the refusal is invariant in
+    // everything *except* whether the tenant exists. `src/lib.rs:429-436`
+    // answers `UnknownTenant` for a name no org has claimed and
+    // `TenantNotOwnedByOrg` for one another org owns, so any authenticated
+    // caller can enumerate the deployment's tenant names by differencing the
+    // two refusals — which is exactly what the comment at `src/lib.rs:425`
+    // ("checked before tenant resolution so a probe cannot enumerate tenants
+    // by their refusal") says the ordering prevents. It prevents it for the
+    // actor check, not for this one. If the two are ever unified, tighten this
+    // assertion instead of deleting it.
+    let req = request("no-such-tenant", "mallory", "memory.recall", "r-probe");
+    assert_eq!(
+        governed
+            .admit(Call {
+                actor: &mallory,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 1,
+                variant: None,
+            })
+            .refusal(),
+        Some(&Refusal::UnknownTenant),
+        "DEFECT: a distinguishable refusal makes tenant names enumerable"
+    );
 }
 
 /// **DEFECT 2.** `crates/ccos-enterprise-tenancy/src/lib.rs:27-28` calls
@@ -885,6 +1106,14 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
 ///   the scope crossed a boundary;
 /// * `audit()` is empty and `metrics()` is empty afterwards, because the store
 ///   is not on the `admit` path at all (defect 1).
+///
+/// The last section shows precisely how narrow the remaining hole is, and it
+/// is the reason this finding is still worth its own test. Presented at the
+/// governed path, the very same crossing is now refused with
+/// [`Refusal::TenantNotOwnedByOrg`] before any tenant state is consulted — and
+/// journaled, and counted. The silent substitution survives *only* on the
+/// ungoverned `get`, so defect 2 is now entirely a consequence of defect 1:
+/// close the store's path into `admit` and it closes with it.
 #[test]
 fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
     let _guard = serialized();
@@ -923,6 +1152,51 @@ fn rescope_into_an_occupied_key_substitutes_silently_and_unaudited() {
         d.metrics().is_empty(),
         "DEFECT: not even a counter moves for tenant memory traffic"
     );
+
+    // A separate deployment, so the emptiness asserted above stays exactly
+    // what it claims: nothing the *store* did produced a record.
+    //
+    // Here `globex` is a real tenant owned by `memorithm`, holding the same
+    // cell under the same inner key. The crossing that succeeds silently above
+    // is refused on the governed path — and refused on ownership, at gate 3,
+    // so the target's roles, allowlist, activations and budget are never
+    // consulted and never charged.
+    let mut governed = two_tenant_deployment();
+    governed.put(&scope("globex", "memory-root"), "GLOBEX CONFIDENTIAL");
+    governed.assign("mallory", "reader");
+    let mallory = actor("initech", "mallory", AuthStrength::Token);
+    let req = request("globex", "mallory", "memory.recall", "r-crossed");
+    assert_eq!(
+        governed
+            .admit(Call {
+                actor: &mallory,
+                request: &req,
+                model: "gpt-5", // globex's own allowlisted model
+                cost_tokens: 1,
+                variant: None,
+            })
+            .refusal(),
+        Some(&Refusal::TenantNotOwnedByOrg),
+        "the governed path refuses the crossing the store performs silently"
+    );
+    assert_eq!(governed.spent("globex"), Some(0), "and bills nobody for it");
+    assert_eq!(
+        governed.get(&scope("globex", "memory-root")),
+        Some("GLOBEX CONFIDENTIAL"),
+        "the cell the foreigner was after is untouched, and was never reached"
+    );
+
+    // Unlike the store crossing, this one leaves a record and moves a counter.
+    let trail = governed.audit_of("globex");
+    assert_eq!(trail.len(), 1, "the attempt is journaled");
+    assert_eq!(trail[0].actor, "mallory", "under the *verified* actor");
+    assert_eq!(trail[0].cost, 0, "at zero cost, as every refusal is");
+    assert_eq!(
+        trail[0].outcome,
+        Outcome::Refused(Refusal::TenantNotOwnedByOrg)
+    );
+    let metrics: BTreeMap<String, u64> = governed.metrics().into_iter().collect();
+    assert_eq!(metrics.get("gateway.refused.tenant_not_owned"), Some(&1));
 }
 
 // ─────────────────────────────────────────────────────────────────────────

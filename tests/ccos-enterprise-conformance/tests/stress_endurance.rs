@@ -5,7 +5,7 @@
 //! production: **does it still tell the truth after two hundred thousand
 //! decisions, and does it survive the two hundred thousand and first?**
 //!
-//! Three properties are hammered, continuously, at every 10 000-call
+//! Four properties are hammered, continuously, at every 10 000-call
 //! checkpoint of a 50-tenant, 200 000-call run:
 //!
 //! 1. **the ledger** — `Deployment::spent(t)` equals, exactly, the sum of the
@@ -13,12 +13,21 @@
 //!    `t` (the expectation is built from the product's own return values, so
 //!    a drift between *deciding* and *accounting* cannot hide behind a
 //!    re-implementation of the decision);
-//! 2. **the journal** — `audit().len()` equals the number of calls, always,
-//!    and every earlier record is byte-identical to what it was hundreds of
-//!    thousands of calls ago (append-only, no rewrite);
+//! 2. **the journal** — bounded now, and honest about it:
+//!    `audit().count() + audit_dropped()` equals the number of calls, always;
+//!    what is retained is exactly the newest `DEFAULT_AUDIT_CAPACITY`
+//!    decisions, contiguous in `sequence` and ending at the call just made;
+//!    and a record still inside that window is byte-identical to what it was
+//!    a hundred thousand calls ago, while a record that left it left through
+//!    the front door — counted, never rewritten;
 //! 3. **the counters** — `gateway.requests == gateway.forwarded +
-//!    gateway.refused`, each equals the journal's own tally, and the eight
-//!    `gateway.refused.*` series sum to `gateway.refused`.
+//!    gateway.refused`, each equals the journal's own tally, the
+//!    `gateway.refused.*` series sum to `gateway.refused`, and
+//!    `audit.dropped` agrees with `audit_dropped()`;
+//! 4. **the journal reconciles the meter** — every record carries the cost it
+//!    was charged (`0` for every refusal), and the retained window matches,
+//!    decision for decision, an independently maintained mirror of the last
+//!    100 000 outcomes the deployment returned.
 //!
 //! plus **determinism**: two `Deployment`s built independently and fed the
 //! byte-identical sequence produce identical audit digests and identical
@@ -37,135 +46,145 @@
 //!   Refusals are free: a drained tenant refused for the rest of the run
 //!   spends nothing more.
 //!   → [`endurance_two_hundred_thousand_admissions_across_fifty_tenants`]
-//! * **The journal is exactly one record per call, append-only.** Never a
-//!   record more, never one fewer, over 200 000 calls; record 0 and record
-//!   9 999 are byte-identical at checkpoint 20 to what they were at
-//!   checkpoint 1. (Which is also precisely the defect — see below.)
 //! * **The counters agree with the journal to the unit**, in aggregate and
-//!   per refusal tag, and the series set stays at exactly 11 names however
+//!   per refusal tag, and the series set stays at exactly 12 names however
 //!   hostile the input: `admit` folds every refusal through a `&'static str`,
 //!   so the one bounded pool in the product stays bounded.
 //! * **Determinism is total.** Two independently built deployments fed the
 //!   same 200 000 steps agreed on every single outcome, produced the same
 //!   SHA-256 audit digest at all 20 checkpoints, and exported byte-identical
-//!   metrics. Every container in the composed path is a `BTree*`; there is no
-//!   hash seed, no clock and no interior nondeterminism to shake loose. Debug
-//!   and release agree to the byte, on outcomes and on measured memory alike.
+//!   metrics. Every container in the composed path is a `BTree*` or a
+//!   `VecDeque`; there is no hash seed, no clock and no interior
+//!   nondeterminism to shake loose. Debug and release agree to the byte, on
+//!   outcomes and on measured memory alike.
 //! * **Nothing rots at 25x the scale.** The `#[ignore]`d 5 000 000-call run
 //!   holds every one of the above at all 20 of its checkpoints — ledger,
-//!   journal length, counters, prefix stability — in 9.7 s (1.95 us per
-//!   admission, flat throughout: no gate degrades as the trail grows).
+//!   journal bound, counters, window stability — in 40.2 s of debug (8.03 us
+//!   per admission) and, from the moment the determinism mirror is dropped at
+//!   call 500 000, **31.6 MiB retained and +0.0 MiB per additional 250 000
+//!   calls, eighteen checkpoints running**. No gate degrades as the run goes
+//!   on, because nothing in the composed path grows with it any more.
 //!   → [`endurance_five_million_admissions`]
 //!
 //! ## What was repaired
 //!
-//! * **A boundary refusal no longer doubles the attacker's bytes.** It used
-//!   to: `classify` formatted the *whole* tool name into
-//!   `Refusal::OutsideBoundary`, `admit` cloned that message into the record
-//!   and returned it, and a merely token-authenticated caller sending a 1 MiB
-//!   tool name therefore retained **2.00 bytes per attacker byte** — twice
-//!   what an anonymous one cost, putting 4 GiB of operator memory 2 GiB of
-//!   request body away. The gateway now refuses any name over
+//! * **The audit trail is bounded, and says what it dropped.** It used to be
+//!   an unbounded `Vec` with no cap, no rotation and no persistence, and an
+//!   *unauthenticated* caller drove it: `admit` journalled after `decide`, on
+//!   every path, so a refusal cost the operator memory exactly like an
+//!   admission did. 1 000 000 calls from an `AuthStrength::Anonymous`
+//!   principal — refused at the very first gate, zero tokens spent, zero
+//!   tenants touched — left 1 000 000 records and a **measured 150.5 MiB** of
+//!   retained heap, growing dead linearly with no plateau anywhere (37.6 MiB
+//!   at 250 000 refusals, 75.3 at 500 000, 150.5 at 1 000 000), and the long
+//!   run reached **1 150.9 MiB at 5 000 000** and was still climbing. Dropping
+//!   the whole `Deployment` was the only thing that freed a byte of it.
+//!   The journal is now a `VecDeque` capped at `DEFAULT_AUDIT_CAPACITY`
+//!   (100 000): the oldest record is evicted, `audit_dropped()` counts every
+//!   eviction, and an `audit.dropped` counter moves with it. Re-measured on
+//!   the identical million-refusal workload: **21.1 MiB retained and flat** —
+//!   21.1 at 250 000 refusals, 21.1 at 500 000, 21.1 at 1 000 000, a steady
+//!   221 B per *retained* record and 22.1 B per call at a million and still
+//!   falling. The main run measures the same shape from the other side: 57.3
+//!   MiB at call 100 000, where the cap engages, and 63.9 MiB at call 200 000
+//!   — the second hundred thousand calls add only replay memory, where they
+//!   used to add a second hundred thousand records. The plateau, not the
+//!   slope, is now the finding.
+//!   → [`unauthenticated_flood_is_bounded_by_the_audit_capacity`],
+//!   [`endurance_five_million_admissions`]
+//! * **Per-record size is no longer attacker-controlled either.** The record
+//!   cloned `request.{tenant,actor,tool}` verbatim, unvalidated and
+//!   untruncated, *before and regardless of* which gate refused the call, so
+//!   the vector was unbounded in two dimensions at once: an anonymous caller
+//!   who never passed the identity gate still got a 1 MiB tool name copied
+//!   into the trail at a measured **1.00 retained bytes per attacker byte**,
+//!   and a token-strength caller cost **2.00**, because
+//!   `Refusal::OutsideBoundary` formatted the whole name into its message and
+//!   `admit` kept that too. 4 GiB of operator memory was 2 GiB of request body
+//!   away. Both copies are gone: `classify` refuses any name over
 //!   `MAX_TOOL_NAME_BYTES` (256) as non-canonical *before* it matches
-//!   anything, so a megabyte-scale name is refused unread with a 35-byte
-//!   constant, and it passes what it does echo through a sanitizer capped at
-//!   64 characters. Re-measured on the identical workload: **1.00 bytes per
-//!   attacker byte**, the same single copy the anonymous path costs, with no
-//!   second one. The cap holds where it bites, too — at the largest name the
-//!   boundary will still classify (256 bytes, canonical, forbidden) the name
-//!   *is* echoed, truncated at 64 characters with an ellipsis, for a 119-byte
-//!   message. The message is now bounded by the template, not by the caller.
-//!   → [`audit_record_size_is_attacker_controlled_but_boundary_refusals_no_longer_double_it`]
+//!   anything and caps what it does echo at 64 characters (119 B at the
+//!   largest name it will still classify, 35 B for a megabyte one), and
+//!   `journal` clamps every identifier it stores to `MAX_IDENTIFIER_BYTES`
+//!   (128) on a character boundary. Re-measured on the identical workload:
+//!   **0.0003 retained bytes per attacker byte** — 32 MiB of tool names now
+//!   retain 10 KiB in total rather than 32 MiB (anonymous) or 64 MiB
+//!   (boundary refusal) — and a record is the same ~300 B whatever the caller
+//!   sends.
+//!   → [`attacker_sized_names_no_longer_size_the_audit_record`]
+//! * **A replayed `request_id` is charged exactly once.** The field is
+//!   documented as an "Idempotency/correlation key"
+//!   (`crates/ccos-enterprise-gateway/src/lib.rs:16`) and `admit` never read
+//!   it: one captured request replayed 10 000 times was billed 10 000 times,
+//!   enough to drain a tenant outright from a single captured frame. A
+//!   `(tenant, request_id)` already decided now returns `Forwarded` without
+//!   charging again and moves `gateway.replayed`. 10 000 replays, 1 token
+//!   billed; the 250-token tenant that used to be drained to its last token
+//!   now spends 5.
+//!   → [`a_replayed_request_id_is_charged_exactly_once`]
+//! * **`spent()` distinguishes "unknown tenant" from "spent nothing".** It
+//!   returned a bare `0` for a tenant that does not exist, so a typo in a
+//!   billing or quota-monitor query read as a healthy, idle tenant forever.
+//!   It returns `Option<u64>` now, and a mistyped tenant is `None`.
+//!   → [`spent_distinguishes_an_unknown_tenant_from_an_idle_one`]
+//! * **The record can explain the meter.** An `AuditRecord` was five fields,
+//!   none of them a cost, so "prove how `spent` reached 1 000" was not merely
+//!   unimplemented but unimplementable from what was stored. It carries
+//!   `cost` (always `0` for a refusal) and a monotonic `sequence` now, and
+//!   this file reconstructs `spent` from the journal alone.
+//!   → [`audit_records_carry_cost_and_sequence_but_still_no_timestamp`]
+//! * **The credential binds the request.** The predecessor authenticated one
+//!   identity and authorized a different, caller-supplied one, and carried an
+//!   `OrgId` on every credential that nothing ever read — so any
+//!   token-strength principal could present another actor's name and another
+//!   tenant's id and act with their permissions against their budget. This
+//!   file's attacker is issued for the org `"nowhere"`, which owns no tenant
+//!   in the fleet: the same principal at token strength is now refused
+//!   `TenantNotOwnedByOrg` even holding a full `writer` role, and a caller who
+//!   borrows another principal's name is refused `ActorMismatch` — both
+//!   before a byte of tenant state is touched, both for zero tokens.
+//!   → asserted in [`unauthenticated_flood_is_bounded_by_the_audit_capacity`]
 //!
-//! ## What BROKE
+//! ## What is still open
 //!
-//! 1. **The audit trail is an unbounded `Vec` with no cap, no rotation and no
-//!    persistence, and an *unauthenticated* caller drives it.**
-//!    `Deployment::admit` pushes an `AuditRecord` *after* `decide`, on every
-//!    path (`tests/ccos-enterprise-conformance/src/lib.rs:271`), so a refusal
-//!    costs the operator memory exactly like an admission does. 1 000 000
-//!    calls from an `AuthStrength::Anonymous` principal — refused at the very
-//!    first gate, zero tokens spent, zero tenants touched — leave 1 000 000
-//!    records and a **measured 150.5 MiB** of retained heap in the governance
-//!    layer (158 B per refusal, on 8-byte request ids), growing dead linearly
-//!    with no plateau anywhere: 37.6 MiB at 250 000 refusals, 75.3 at
-//!    500 000, 150.5 at 1 000 000; the long run reaches **1 150.9 MiB at
-//!    5 000 000** and is still climbing. The registry two
-//!    fields over folds at 4096 series precisely so "a label explosion can
-//!    never exhaust memory"; the `Vec` beside it has no such bound, and it is
-//!    the one an anonymous client can drive. Dropping the whole `Deployment`
-//!    is the only thing that frees a byte of it.
-//!    → [`unauthenticated_flood_grows_the_audit_trail_without_bound`],
-//!    [`endurance_five_million_admissions`]
+//! 1. **There is still no way to shed or export the trail on purpose.** The
+//!    accessors are `audit()`, `audit_of()`, `audit_dropped()` and
+//!    `metrics()` — no `drain`, no export, no persistence — and the record
+//!    still carries **no timestamp**, so age-based retention remains
+//!    unimplementable from what is stored. The cap bounds memory; it is not an
+//!    audit story on its own, because the only thing that ever leaves the
+//!    buffer is the *oldest* evidence and it leaves unread.
+//!    → [`audit_records_carry_cost_and_sequence_but_still_no_timestamp`]
 //!
-//! 2. **Per-record size is *still* attacker-controlled, so the vector is
-//!    unbounded in two dimensions at once.** Only the second dimension's
-//!    doubling was closed (above); the copy underneath it was not. `admit`
-//!    clones `request.{tenant,actor,tool}` into the record verbatim,
-//!    unvalidated and untruncated, *before and regardless of* which gate
-//!    refused the call — so the gateway's 256-byte canonical-name limit
-//!    bounds what the boundary will classify and echo, and bounds nothing
-//!    about what is journaled. An anonymous caller who never passes the
-//!    identity gate still gets a 1 MiB tool name copied into the trail —
-//!    re-measured at **1.00 bytes retained per attacker byte**, and the
-//!    token-authenticated boundary case now costs the same 1.00 rather than
-//!    2.00. 4 GiB of memory is still 4 GiB of request body away; it merely
-//!    takes twice the request body it used to.
-//!    → [`audit_record_size_is_attacker_controlled_but_boundary_refusals_no_longer_double_it`]
-//!
-//! 3. **There is no way to shed the trail short of destroying the
-//!    deployment.** The only accessors are `audit()` (a shared slice),
-//!    `audit_of()` and `metrics()`. No `truncate`, no `drain`, no export, no
-//!    persistence, no size accessor — and the record carries **no timestamp
-//!    and no cost**, so age-based rotation and spend reconstruction are not
-//!    merely unimplemented, they are unimplementable from what is stored.
-//!    → [`audit_records_carry_neither_time_nor_cost_so_rotation_is_impossible`]
-//!
-//! 4. **The one per-tenant audit accessor is O(total trail) and allocates
-//!    8 bytes per match, so flooding the trail also poisons every query
-//!    against it.** `audit_of` filters the whole `Vec`
-//!    (`src/lib.rs:344`): after an attacker parks 200 000 refused calls under
-//!    a tenant, one `audit_of` call allocates 2.1 MB, and the *innocent*
-//!    neighbour's 8-record query still walks all 200 008 (7.4 ms measured in
-//!    debug) because there is no index. The exhaustion vector amplifies
-//!    itself.
+//! 2. **The bound handed the flood a new prize: eviction.** `audit_of` is
+//!    still the only per-tenant view, still O(total trail), still allocating
+//!    8 bytes per match — and now an attacker who parks 200 000 refused calls
+//!    under their own tenant does not merely make the innocent neighbour's
+//!    8-record query walk 100 000 records, it **deletes the neighbour's eight
+//!    records outright** while the meter goes on billing the tokens they were
+//!    the evidence for. The loss is counted, which is precisely why this
+//!    buffer must be flushed somewhere durable. Nothing in the product
+//!    flushes it.
 //!    → [`audit_of_scans_the_whole_trail_and_allocates_per_match`]
 //!
-//! 5. **`request_id` is documented as an "Idempotency/correlation key"
-//!    (`crates/ccos-enterprise-gateway/src/lib.rs:16`) and `admit` never reads
-//!    the field.** Replaying one captured request 20 000 times charges the
-//!    budget every time — enough to drain a tenant outright — and writes
-//!    20 000 audit rows under a single id, so the key an operator would join
-//!    on has cardinality 1 for the whole incident.
-//!    → [`replayed_request_id_is_charged_every_time`]
-//!
-//! 6. **`spent()` cannot distinguish "unknown tenant" from "spent nothing".**
-//!    It returns `0` for a tenant that does not exist (`src/lib.rs:331`), so
-//!    a typo in a billing or quota-monitor query reads as a healthy,
-//!    idle tenant forever. → [`spent_of_an_unknown_tenant_is_indistinguishable_from_zero`]
-//!
-//! 7. **The metrics have no tenant dimension.** All 11 series are
+//! 3. **The metrics have no tenant dimension.** All 12 series are
 //!    deployment-global, so in a 50-tenant install the counters can say *that*
-//!    4 000 calls were refused but never *whose* — the only attribution path
-//!    is the O(n) scan from finding 4. → asserted in
+//!    4 000 calls were refused but never *whose* — and the only attribution
+//!    path is the O(n) scan from finding 2, over a window that no longer holds
+//!    the whole run. → asserted in
 //!    [`endurance_two_hundred_thousand_admissions_across_fifty_tenants`].
 //!
-//! 8. **An "unlimited" tenant's ledger stops being a sum.** `TokenBudget`
+//! 4. **An "unlimited" tenant's ledger stops being a sum.** `TokenBudget`
 //!    saturates on the accounting side, so with `limit == u64::MAX` the
 //!    deployment forwards work it then declines to bill: the invariant this
 //!    whole file rests on — `spent == Σ admitted` — is false past `u64::MAX`,
-//!    silently and permanently.
+//!    silently and permanently. The journal's new `cost` field now *shows* the
+//!    1 006 tokens that were never billed, so the drift is at last provable
+//!    from the trail; it is still a drift, and nothing raises it.
 //!    → [`unlimited_budget_stops_summing_admitted_costs`]
-//!
-//! Not re-litigated here because siblings own it: the authenticated identity
-//! is never bound to `request.actor`, so authorization keys on a caller-
-//! supplied string (see `stress_rbac_scale.rs`, `stress_budget_property.rs`).
-//! This file therefore drives an honest workload — every principal sends its
-//! own name — because the endurance invariants must hold even when nobody is
-//! cheating.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -174,7 +193,7 @@ use std::time::Instant;
 use ccos_enterprise_auth::{AuthStrength, AuthenticatedActor};
 use ccos_enterprise_conformance::{
     actor, request, AuditRecord, Call, Deployment, Outcome, Refusal, TenantState,
-    DEFAULT_AUDIT_CAPACITY, MAX_IDENTIFIER_BYTES,
+    DEFAULT_AUDIT_CAPACITY, DEFAULT_REPLAY_MEMORY, MAX_IDENTIFIER_BYTES,
 };
 use ccos_enterprise_gateway::GatewayRequest;
 use ccos_enterprise_qpages::AdvancedQPageVariant;
@@ -182,13 +201,13 @@ use ccos_enterprise_qpages::AdvancedQPageVariant;
 // ─────────────────────────────────────────────────────────────────────────
 // Measurement harness
 //
-// A counting allocator is the only honest answer to "does the audit trail
-// actually grow without bound". It counts `Layout::size()`, so the numbers
-// are allocator-independent and identical in debug and release but for
-// harness noise. Every test takes `serialized()` so a sibling allocating on
-// another libtest thread cannot pollute a measurement; that makes runtime
-// additive, which is why the scale constants below are tuned to keep the
-// whole non-ignored file well under a minute in debug.
+// A counting allocator is the only honest answer to "is the audit trail
+// actually bounded". It counts `Layout::size()`, so the numbers are
+// allocator-independent and identical in debug and release but for harness
+// noise. Every test takes `serialized()` so a sibling allocating on another
+// libtest thread cannot pollute a measurement; that makes runtime additive,
+// which is why the scale constants below are tuned to keep the whole
+// non-ignored file well under a minute in debug.
 // ─────────────────────────────────────────────────────────────────────────
 
 struct CountingAlloc;
@@ -253,21 +272,25 @@ impl Rng {
     }
 }
 
-/// The organization every fleet tenant belongs to. The credential now binds
-/// the request, so a principal must be issued for this org to reach any of
-/// them — and `ghost`, deliberately issued for `"nowhere"`, must not.
+/// The organization that owns every fleet tenant. The credential binds the
+/// request now, so a principal must be issued for *this* org to reach any of
+/// them — which is why `ghost`, deliberately issued for `"nowhere"`, is a
+/// refusal on two independent grounds rather than one.
 const FLEET_ORG: &str = "memorithm";
 
 const TENANTS: usize = 50;
 const MAIN_CALLS: usize = 200_000;
 const CHECKPOINT: usize = 10_000;
-/// The unauthenticated flood: one million refusals, one million records.
+/// The unauthenticated flood: one million refusals against a bounded journal.
 const FLOOD_CALLS: usize = 1_000_000;
 /// The `#[ignore]`d long run.
 const LONG_CALLS: usize = 5_000_000;
 
 /// Principals. `ghost` never clears the identity gate; `mallory` clears it and
-/// holds no role. Each principal sends its own name (see the module docs).
+/// holds no role. Each principal sends its own name and every credential is
+/// issued for the org that owns the tenants it addresses — the endurance
+/// invariants must hold even when nobody is cheating, and the cheating cases
+/// are pinned deliberately, on their own, below.
 const PRINCIPALS: [(&str, AuthStrength); 5] = [
     ("alice", AuthStrength::Token),
     ("bob", AuthStrength::Token),
@@ -301,9 +324,9 @@ fn tenant_names() -> Vec<String> {
     (0..TENANTS).map(|i| format!("t-{i:02}")).collect()
 }
 
-/// A 50-tenant deployment. Built from scratch each time it is called — the
-/// determinism claim is about two *independently constructed* deployments,
-/// not two clones of one.
+/// A 50-tenant deployment, every tenant owned by [`FLEET_ORG`]. Built from
+/// scratch each time it is called — the determinism claim is about two
+/// *independently constructed* deployments, not two clones of one.
 fn fleet_deployment(names: &[String]) -> Deployment {
     let mut d = Deployment::new();
     d.add_role("reader", &["memory.read"])
@@ -322,7 +345,10 @@ fn fleet_deployment(names: &[String]) -> Deployment {
             st.allow_model("gpt-5")
                 .activate(AdvancedQPageVariant::Hierarchical);
         }
-        d.add_tenant(FLEET_ORG, name, st);
+        assert!(
+            d.add_tenant(FLEET_ORG, name, st),
+            "tenant {name} was provisioned twice"
+        );
     }
     assert!(d.assign("alice", "writer"));
     assert!(d.assign("bob", "reader"));
@@ -377,6 +403,16 @@ fn next_step(rng: &mut Rng) -> Step {
     }
 }
 
+/// The tenant name a step addresses. Index [`TENANTS`] is the tenant that was
+/// never provisioned.
+fn tenant_label(index: usize, names: &[String]) -> &str {
+    if index == TENANTS {
+        "ghost-tenant"
+    } else {
+        &names[index]
+    }
+}
+
 /// Overwrite in place: the request is re-used across steps so the workload's
 /// own allocation noise does not swamp the trail measurement.
 fn set_str(dst: &mut String, src: &str) {
@@ -384,13 +420,12 @@ fn set_str(dst: &mut String, src: &str) {
     dst.push_str(src);
 }
 
+/// Fill one request, giving every call its own `request_id`. That is not
+/// cosmetic any more: a repeated `(tenant, request_id)` is suppressed as a
+/// replay and **not billed**, so a workload that reused one id would quietly
+/// stop testing the meter it exists to test.
 fn fill_request(req: &mut GatewayRequest, step: &Step, names: &[String], seq: usize) {
-    let tenant: &str = if step.tenant == TENANTS {
-        "ghost-tenant"
-    } else {
-        &names[step.tenant]
-    };
-    set_str(&mut req.tenant, tenant);
+    set_str(&mut req.tenant, tenant_label(step.tenant, names));
     set_str(&mut req.actor, PRINCIPALS[step.principal].0);
     set_str(&mut req.tool, TOOLS[step.tool]);
     req.request_id.clear();
@@ -400,47 +435,91 @@ fn fill_request(req: &mut GatewayRequest, step: &Step, names: &[String], seq: us
 // ─────────────────────────────────────────────────────────────────────────
 // Audit digest
 //
-// Rolling, so the cost of digesting is O(records) over the *whole run*
-// rather than O(records × checkpoints): each checkpoint absorbs only the
-// suffix appended since the last one. That is only sound if the trail is
-// append-only, which is exactly why prefix stability is asserted separately
-// (`stable_prefix`) rather than assumed.
+// Rolling, so the cost of digesting is O(records) over the *whole run* rather
+// than O(records × checkpoints): each checkpoint absorbs only the records
+// appended since the last one — keyed on `sequence` rather than on a position,
+// because positions move now that the buffer evicts from the front. That is
+// only sound while checkpoints are closer together than the buffer is deep,
+// which `absorb` asserts rather than assumes, and while records inside the
+// window are never rewritten, which `stable_or_dropped` pins separately.
 // ─────────────────────────────────────────────────────────────────────────
 
 #[derive(Default)]
 struct RollingDigest {
     state: u64,
-    absorbed: usize,
+    /// The next `sequence` this digest has not yet absorbed.
+    next: u64,
+    absorbed: u64,
 }
 
 impl RollingDigest {
-    fn absorb<'a>(&mut self, records: impl Iterator<Item = &'a AuditRecord>) {
-        let records: Vec<&AuditRecord> = records.collect();
-        assert!(
-            records.len() >= self.absorbed,
-            "the audit trail shrank: {} records now, {} already digested",
-            records.len(),
-            self.absorbed
-        );
-        for r in &records[self.absorbed..] {
-            fnv_field(&mut self.state, r.request_id.as_bytes());
-            fnv_field(&mut self.state, r.tenant.as_bytes());
-            fnv_field(&mut self.state, r.actor.as_bytes());
-            fnv_field(&mut self.state, r.tool.as_bytes());
-            absorb_outcome(&mut self.state, &r.outcome);
+    fn absorb<'a>(&mut self, journal: impl Iterator<Item = &'a AuditRecord>) {
+        let resume = self.next;
+        let mut oldest: Option<u64> = None;
+        for r in journal {
+            oldest.get_or_insert(r.sequence);
+            if r.sequence < resume {
+                continue;
+            }
+            assert_eq!(
+                r.sequence, self.next,
+                "the journal skipped a sequence: expected {}, found {}",
+                self.next, r.sequence
+            );
+            absorb_record(&mut self.state, r);
+            self.next += 1;
+            self.absorbed += 1;
         }
-        self.absorbed = records.len();
+        if let Some(oldest) = oldest {
+            assert!(
+                oldest <= resume,
+                "records were evicted between checkpoints and never digested: \
+                 oldest retained sequence {oldest}, digest resumed at {resume}"
+            );
+        }
     }
 
     /// A real SHA-256, through the product's own primitive, over the rolling
     /// state and the record count — so "identical digests" means identical
     /// trails, not merely identical lengths.
     fn hex(&self) -> String {
-        let mut blob = [0u8; 16];
-        blob[..8].copy_from_slice(&self.state.to_le_bytes());
-        blob[8..].copy_from_slice(&(self.absorbed as u64).to_le_bytes());
-        ccos_enterprise_governance::vendor::token_sha256(&blob)
+        digest_hex(self.state, self.absorbed)
     }
+}
+
+/// The digest of everything a deployment *still holds*. Used where the rolling
+/// form cannot be: when checkpoints are further apart than the buffer is deep,
+/// the only history two deployments provably share is the window they both
+/// still retain.
+fn window_digest(d: &Deployment) -> String {
+    let mut state = 0u64;
+    let mut records = 0u64;
+    for r in d.audit() {
+        absorb_record(&mut state, r);
+        records += 1;
+    }
+    digest_hex(state, records)
+}
+
+fn digest_hex(state: u64, records: u64) -> String {
+    let mut blob = [0u8; 16];
+    blob[..8].copy_from_slice(&state.to_le_bytes());
+    blob[8..].copy_from_slice(&records.to_le_bytes());
+    ccos_enterprise_governance::vendor::token_sha256(&blob)
+}
+
+/// Every field of a record, `sequence` and `cost` included: the two the
+/// predecessor did not have, and the two an operator reconciles a meter
+/// against a journal with. A digest that ignored them would not notice a
+/// deployment that mis-billed a call it correctly forwarded.
+fn absorb_record(state: &mut u64, r: &AuditRecord) {
+    fnv_field(state, &r.sequence.to_le_bytes());
+    fnv_field(state, r.request_id.as_bytes());
+    fnv_field(state, r.tenant.as_bytes());
+    fnv_field(state, r.actor.as_bytes());
+    fnv_field(state, r.tool.as_bytes());
+    fnv_field(state, &r.cost.to_le_bytes());
+    absorb_outcome(state, &r.outcome);
 }
 
 fn fnv_bytes(state: &mut u64, bytes: &[u8]) {
@@ -463,23 +542,28 @@ fn absorb_outcome(state: &mut u64, o: &Outcome) {
         Outcome::Refused(r) => {
             fnv_field(state, b"refused");
             fnv_field(state, tag_of(r).as_bytes());
-            // The boundary refusal carries a message; digest it too, so a
-            // change in what an operator is told changes the digest.
-            if let Refusal::OutsideBoundary(why) = r {
-                fnv_field(state, why.as_bytes());
+            // Two refusals carry a message; digest it too, so a change in what
+            // an operator is told changes the digest.
+            match r {
+                Refusal::OutsideBoundary(why) | Refusal::MalformedRequest(why) => {
+                    fnv_field(state, why.as_bytes())
+                }
+                _ => {}
             }
         }
     }
 }
 
 /// Mirror of the deployment's private `tag` fn: the metric-name mapping has to
-/// be restated here to check the counters against the journal at all.
+/// be restated here to check the counters against the journal at all. The
+/// three names at the top are new — the credential binding and the identifier
+/// validation did not exist when this file was written.
 fn tag_of(r: &Refusal) -> &'static str {
     match r {
-        Refusal::Unauthenticated => "unauthenticated",
         Refusal::ActorMismatch => "actor_mismatch",
         Refusal::TenantNotOwnedByOrg => "tenant_not_owned",
         Refusal::MalformedRequest(_) => "malformed_request",
+        Refusal::Unauthenticated => "unauthenticated",
         Refusal::UnknownTenant => "unknown_tenant",
         Refusal::OutsideBoundary(_) => "outside_boundary",
         Refusal::ToolNotGoverned => "tool_not_governed",
@@ -487,6 +571,14 @@ fn tag_of(r: &Refusal) -> &'static str {
         Refusal::ModelNotAllowed => "model_not_allowed",
         Refusal::VariantNotActivated => "variant_not_activated",
         Refusal::BudgetExhausted => "budget_exhausted",
+    }
+}
+
+/// The journal's own word for an outcome, forwarded included.
+fn outcome_tag(o: &Outcome) -> &'static str {
+    match o {
+        Outcome::Forwarded => "forwarded",
+        Outcome::Refused(r) => tag_of(r),
     }
 }
 
@@ -504,11 +596,6 @@ struct Ledger {
     forwarded: u64,
     refused: u64,
     tags: BTreeMap<&'static str, u64>,
-    /// One entry per decision, in decision order: `None` for a forward,
-    /// `Some(tag)` for a refusal. The journal is bounded, so a full-trail
-    /// reconciliation has to compare the retained window against the ledger's
-    /// *tail* — which needs the per-decision trace, not just the totals.
-    trace: Vec<Option<&'static str>>,
 }
 
 impl Ledger {
@@ -519,7 +606,6 @@ impl Ledger {
             forwarded: 0,
             refused: 0,
             tags: BTreeMap::new(),
-            trace: Vec::new(),
         }
     }
 
@@ -530,15 +616,54 @@ impl Ledger {
                 self.forwarded += 1;
                 assert!(step.tenant < TENANTS, "an unknown tenant cannot be charged");
                 self.spent[step.tenant] += u128::from(step.cost);
-                self.trace.push(None);
             }
             Outcome::Refused(r) => {
                 self.refused += 1;
                 *self.tags.entry(tag_of(r)).or_insert(0) += 1;
-                self.trace.push(Some(tag_of(r)));
             }
         }
     }
+}
+
+/// One decision as the *test* saw it, to be matched against the record the
+/// deployment kept. Plain `Copy` data on purpose: the mirror is preallocated
+/// before any memory measurement starts, so maintaining it allocates nothing
+/// and cannot be mistaken for the trail it is measuring.
+#[derive(Clone, Copy)]
+struct Decision {
+    sequence: u64,
+    tenant: usize,
+    cost: u64,
+    tag: &'static str,
+}
+
+/// The last [`DEFAULT_AUDIT_CAPACITY`] decisions: what a correctly bounded
+/// journal must still be holding, maintained independently of it.
+struct Window {
+    decisions: VecDeque<Decision>,
+}
+
+impl Window {
+    fn new() -> Self {
+        Self {
+            decisions: VecDeque::with_capacity(DEFAULT_AUDIT_CAPACITY + 1),
+        }
+    }
+
+    fn push(&mut self, d: Decision) {
+        while self.decisions.len() >= DEFAULT_AUDIT_CAPACITY {
+            self.decisions.pop_front();
+        }
+        self.decisions.push_back(d);
+    }
+}
+
+/// The ledger of a tenant the fleet provisioned. `spent` returns `None` for a
+/// tenant that does not exist, a distinction this harness never wants to paper
+/// over — so it is an assertion, not an `unwrap_or(0)`.
+fn spent_of(d: &Deployment, name: &str) -> u64 {
+    d.spent(name)
+        .unwrap_or_else(|| panic!("fleet tenant {name} vanished from the deployment"))
 }
 
 fn metric(export: &[(String, u64)], name: &str) -> u64 {
@@ -547,14 +672,6 @@ fn metric(export: &[(String, u64)], name: &str) -> u64 {
         .find(|(n, _)| n == name)
         .map(|(_, v)| *v)
         .unwrap_or(0)
-}
-
-/// The ledger of a tenant the fleet provisioned. `spent` returns `None` for a
-/// tenant that does not exist, which is a distinction this harness never wants
-/// to paper over — so it is an assertion, not an `unwrap_or(0)`.
-fn spent_of(d: &Deployment, name: &str) -> u64 {
-    d.spent(name)
-        .unwrap_or_else(|| panic!("fleet tenant {name} vanished from the deployment"))
 }
 
 /// Every invariant this file exists to defend, checked against one deployment.
@@ -574,33 +691,44 @@ fn check_invariants(d: &Deployment, l: &Ledger, names: &[String], at: usize) {
         );
     }
 
-    // 2. The journal: one record per call until the buffer's capacity, then
-    //    exactly the capacity — and the drop count makes up the difference, so
-    //    `retained + dropped == calls` holds at every checkpoint.
+    // 2. The journal: bounded, contiguous, and accounting for every call as
+    //    either retained or announced-dropped. What used to be "one record per
+    //    call, forever" is now "the newest `DEFAULT_AUDIT_CAPACITY` decisions,
+    //    and a counter for everything the cap shed".
     let retained = d.audit().count() as u64;
+    let dropped = d.audit_dropped();
+    let cap = DEFAULT_AUDIT_CAPACITY as u64;
+    assert_eq!(
+        retained + dropped,
+        l.calls,
+        "call {at}: {retained} retained + {dropped} dropped != {} calls",
+        l.calls
+    );
     assert_eq!(
         retained,
-        l.calls.min(DEFAULT_AUDIT_CAPACITY as u64),
-        "call {at}: audit trail length diverged from the call count"
+        l.calls.min(cap),
+        "call {at}: the buffer is not holding the newest {cap} decisions"
     );
     assert_eq!(
-        retained + d.audit_dropped(),
-        l.calls,
-        "call {at}: retained + dropped must account for every call"
+        dropped,
+        l.calls.saturating_sub(cap),
+        "call {at}: the drop counter does not match what the cap must have shed"
     );
-    // The retained window is the newest, dense and monotonic in `sequence`.
-    let seqs: Vec<u64> = d.audit().map(|r| r.sequence).collect();
+    let mut expected_sequence = l.calls - retained;
+    for r in d.audit() {
+        assert_eq!(
+            r.sequence, expected_sequence,
+            "call {at}: the retained window is not contiguous in sequence"
+        );
+        expected_sequence += 1;
+    }
     assert_eq!(
-        seqs.last().copied(),
-        l.calls.checked_sub(1),
-        "call {at}: the newest record is not the last decision"
-    );
-    assert!(
-        seqs.windows(2).all(|w| w[0] + 1 == w[1]),
-        "call {at}: the retained window is not contiguous"
+        expected_sequence, l.calls,
+        "call {at}: the newest retained record is not the call just decided"
     );
 
-    // 3. The counters, against the journal.
+    // 3. The counters, against the journal. Counters are cumulative: unlike
+    //    the journal they must still describe the calls the buffer dropped.
     let m = d.metrics();
     let requests = metric(&m, "gateway.requests");
     let forwarded = metric(&m, "gateway.forwarded");
@@ -619,6 +747,18 @@ fn check_invariants(d: &Deployment, l: &Ledger, names: &[String], at: usize) {
         refused, l.refused,
         "call {at}: refused counter != journal's refused count"
     );
+    assert_eq!(
+        metric(&m, "audit.dropped"),
+        dropped,
+        "call {at}: the audit.dropped counter disagrees with audit_dropped()"
+    );
+    assert_eq!(
+        metric(&m, "gateway.replayed"),
+        0,
+        "call {at}: a replay was suppressed, but every request id in this \
+         workload is distinct — an unbilled forward would silently hollow out \
+         every billing assertion in this file"
+    );
     let mut tag_total = 0u64;
     for (tag, count) in &l.tags {
         let series = format!("gateway.refused.{tag}");
@@ -634,13 +774,13 @@ fn check_invariants(d: &Deployment, l: &Ledger, names: &[String], at: usize) {
         "call {at}: per-tag counters do not sum to gateway.refused"
     );
 
-    // DEFECT (finding 7): every series is deployment-global. With 50 tenants
-    // in this deployment, not one counter name mentions a tenant — the
+    // STILL OPEN (finding 3): every series is deployment-global. With 50
+    // tenants in this deployment, not one counter name mentions a tenant — the
     // metrics can say 4 000 calls were refused, never whose. Asserting the
     // real shape so that adding a tenant dimension trips here loudly.
     assert!(
-        m.len() <= 16,
-        "call {at}: expected at most 16 global series, got {}",
+        m.len() <= 12,
+        "call {at}: expected at most 12 global series, got {}",
         m.len()
     );
     for (name, _) in &m {
@@ -653,34 +793,51 @@ fn check_invariants(d: &Deployment, l: &Ledger, names: &[String], at: usize) {
     }
 }
 
-/// A record cloned early and re-checked later: proof the trail is appended to
-/// and never rewritten or compacted in place.
-///
-/// The buffer is bounded, so a record CAN legitimately leave the window — by
-/// eviction from the front, never by rewriting. The check is therefore keyed
-/// on `sequence` rather than on position: if the record is still retained it
-/// must be byte-identical, and if it is gone it must be gone because it was
-/// evicted (i.e. older than the oldest retained sequence), not because it was
-/// replaced.
-fn stable_prefix(d: &Deployment, sample: &[(u64, AuditRecord)], at: usize) {
-    let oldest = d.audit().next().map(|r| r.sequence).unwrap_or(u64::MAX);
-    for (seq, expected) in sample {
-        match d.audit().find(|r| r.sequence == *seq) {
+/// Records cloned early and re-checked much later: proof that the trail is
+/// appended to and never rewritten, compacted or reordered. A record that has
+/// left the bounded window is allowed to be gone — but only if the deployment
+/// counted its departure, and only if everything older than the window went
+/// with it.
+fn stable_or_dropped(d: &Deployment, sample: &[AuditRecord], at: usize) {
+    let oldest = d.audit().next().map(|r| r.sequence);
+    for expected in sample {
+        match d.audit().find(|r| r.sequence == expected.sequence) {
             Some(found) => assert_eq!(
                 found, expected,
-                "call {at}: audit record {seq} was rewritten under us"
+                "call {at}: audit record {} was rewritten under us",
+                expected.sequence
             ),
-            None => assert!(
-                *seq < oldest,
-                "call {at}: audit record {seq} vanished but was not evicted \
-                 (oldest retained is {oldest})"
-            ),
+            None => {
+                let oldest = oldest.expect("a non-empty journal");
+                assert!(
+                    expected.sequence < oldest,
+                    "call {at}: record {} vanished from inside the retained \
+                     window (oldest retained is {oldest})",
+                    expected.sequence
+                );
+                assert!(
+                    d.audit_dropped() > expected.sequence,
+                    "call {at}: record {} left the buffer without being counted \
+                     ({} dropped)",
+                    expected.sequence,
+                    d.audit_dropped()
+                );
+            }
         }
     }
 }
 
 fn mib(bytes: usize) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
+}
+
+/// A retained-heap ceiling that is a function of the product's caps and of
+/// nothing else — in particular, not of how many calls were made. Deliberately
+/// generous per unit (a record measures ~300 B, a remembered request id
+/// ~130 B): what is asserted is the *shape* of the bound, and the printed
+/// tables carry the sharp numbers.
+fn bounded_heap_ceiling(deployments: usize) -> usize {
+    deployments * (DEFAULT_AUDIT_CAPACITY * 512 + DEFAULT_REPLAY_MEMORY * 256)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -690,23 +847,33 @@ fn mib(bytes: usize) -> f64 {
 /// 200 000 admissions across 50 tenants, on two independently built
 /// deployments fed the identical sequence, with every invariant re-checked at
 /// each of the 20 checkpoints.
+///
+/// The journal is bounded at [`DEFAULT_AUDIT_CAPACITY`] now, so this run
+/// crosses the cap at call 100 000 and spends its whole second half evicting.
+/// The strongest thing it can say about the trail is therefore no longer "one
+/// record per call, forever" but "the newest 100 000 decisions, contiguous,
+/// byte-exact, every departure counted, and every retained record carrying the
+/// cost the meter actually charged" — and the memory table printed here is the
+/// measurement that makes the bound a fact rather than a claim.
 #[test]
 fn endurance_two_hundred_thousand_admissions_across_fifty_tenants() {
     let _guard = serialized();
     let names = tenant_names();
     let principals: Vec<AuthenticatedActor> = PRINCIPALS
         .iter()
-        .map(|(name, strength)| actor("memorithm", name, *strength))
+        .map(|(name, strength)| actor(FLEET_ORG, name, *strength))
         .collect();
 
     let mut a = fleet_deployment(&names);
     let mut b = fleet_deployment(&names);
     let mut ledger = Ledger::new();
+    let mut window = Window::new();
     let mut roll_a = RollingDigest::default();
     let mut roll_b = RollingDigest::default();
     let mut rng = Rng::new(0x5EED_0001_C0DE_F00D);
     let mut req = request("", "", "", "");
-    let mut sample: Vec<(u64, AuditRecord)> = Vec::new();
+    let mut sample: Vec<AuditRecord> = Vec::new();
+    let mut growth: Vec<(usize, usize)> = Vec::with_capacity(MAIN_CALLS / CHECKPOINT);
     let mut exhausted_tenants = 0usize;
 
     let started = Instant::now();
@@ -734,6 +901,15 @@ fn endurance_two_hundred_thousand_admissions_across_fifty_tenants() {
             "call {seq}: two identical deployments disagreed on the same request"
         );
         ledger.record(&step, &out_a);
+        window.push(Decision {
+            sequence: seq as u64,
+            tenant: step.tenant,
+            // Every request id in this run is distinct, so a forwarded call is
+            // a charged call: nothing here is a suppressed replay, which
+            // `check_invariants` re-asserts against `gateway.replayed`.
+            cost: if out_a.is_forwarded() { step.cost } else { 0 },
+            tag: outcome_tag(&out_a),
+        });
 
         if (seq + 1) % CHECKPOINT == 0 {
             check_invariants(&a, &ledger, &names, seq + 1);
@@ -756,19 +932,13 @@ fn endurance_two_hundred_thousand_admissions_across_fifty_tenants() {
             );
 
             if sample.is_empty() {
-                // Keyed by `sequence`, not by position: the buffer is bounded,
-                // so position drifts once eviction starts while the sequence
-                // of a given decision never does.
-                let first = a.audit().next().expect("at least one record").clone();
-                let later = a
-                    .audit()
-                    .nth(CHECKPOINT - 1)
-                    .expect("record in range")
-                    .clone();
-                sample.push((first.sequence, first));
-                sample.push((later.sequence, later));
+                let first = a.audit().next().expect("a non-empty journal").clone();
+                let last = a.audit().last().expect("a non-empty journal").clone();
+                sample.push(first);
+                sample.push(last);
             }
-            stable_prefix(&a, &sample, seq + 1);
+            stable_or_dropped(&a, &sample, seq + 1);
+            growth.push((seq + 1, live_bytes().saturating_sub(base_bytes)));
         }
     }
     let elapsed = started.elapsed();
@@ -808,14 +978,14 @@ fn endurance_two_hundred_thousand_admissions_across_fifty_tenants() {
          the run never tested life after exhaustion"
     );
 
-    // The bounded pool stayed bounded, exactly: three aggregate series plus
-    // one per refusal kind, and not a name more after 200 000 hostile calls.
+    // The bounded pool stayed bounded, exactly: three aggregate series, one
+    // per refusal kind, and the drop counter — not a name more after 200 000
+    // hostile calls. `gateway.replayed` is absent because every request id in
+    // this run is distinct, which is what keeps the billing assertions honest.
     let final_series: Vec<String> = a.metrics().into_iter().map(|(n, _)| n).collect();
     assert_eq!(
         final_series,
         vec![
-            // The journal's eviction counter: a bounded buffer must say what
-            // it dropped, and 200 000 calls overrun the 100 000-record cap.
             "audit.dropped",
             "gateway.forwarded",
             "gateway.refused",
@@ -833,130 +1003,166 @@ fn endurance_two_hundred_thousand_admissions_across_fifty_tenants() {
     );
 
     // A final full-journal audit: the incremental expectation above is only as
-    // good as its agreement with what is actually stored. The journal is
-    // bounded at `DEFAULT_AUDIT_CAPACITY`, so what must agree is the retained
-    // *window* against the ledger's tail — decision for decision, not merely
-    // in aggregate. That is a stricter check than the unbounded version it
-    // replaces: it would catch eviction from the wrong end, a duplicated
-    // record, or a reordered one, none of which a total could see.
+    // good as its agreement with what is actually stored. The window the
+    // deployment kept must be, decision for decision, the last 100 000 answers
+    // it gave — same order, same sequences, same tenants, same costs.
     let retained = a.audit().count();
-    assert_eq!(retained, MAIN_CALLS.min(DEFAULT_AUDIT_CAPACITY));
+    assert_eq!(retained, DEFAULT_AUDIT_CAPACITY);
+    assert_eq!(retained, window.decisions.len());
     assert_eq!(
-        retained as u64 + a.audit_dropped(),
-        ledger.calls,
-        "retained + dropped must account for every call"
+        a.audit_dropped() as usize,
+        MAIN_CALLS - DEFAULT_AUDIT_CAPACITY,
+        "the cap shed exactly the overflow, and counted every record of it"
     );
-    let tail = &ledger.trace[ledger.trace.len() - retained..];
     let mut journal_forwarded = 0u64;
     let mut journal_tags: BTreeMap<&'static str, u64> = BTreeMap::new();
-    let mut journal_ids = 0u64;
-    for (offset, r) in a.audit().enumerate() {
-        let expected = tail[offset];
+    let mut journal_cost = 0u128;
+    let mut phantom_rows = 0u64;
+    for (r, expected) in a.audit().zip(window.decisions.iter()) {
+        assert_eq!(r.sequence, expected.sequence, "the retained window slipped");
+        assert_eq!(
+            outcome_tag(&r.outcome),
+            expected.tag,
+            "record {} disagrees with the outcome the deployment returned",
+            r.sequence
+        );
+        assert_eq!(
+            r.cost, expected.cost,
+            "record {} was journalled at a cost the deployment never charged",
+            r.sequence
+        );
+        assert_eq!(r.tenant, tenant_label(expected.tenant, &names));
+        assert!(
+            r.request_id.starts_with("r-"),
+            "record {} lost its correlation id",
+            r.sequence
+        );
         match &r.outcome {
-            Outcome::Forwarded => {
-                journal_forwarded += 1;
-                assert_eq!(expected, None, "record {offset} should have been refused");
-            }
-            Outcome::Refused(x) => {
-                *journal_tags.entry(tag_of(x)).or_insert(0) += 1;
-                assert_eq!(
-                    expected,
-                    Some(tag_of(x)),
-                    "record {offset} carries the wrong refusal"
-                );
-            }
+            Outcome::Forwarded => journal_forwarded += 1,
+            Outcome::Refused(x) => *journal_tags.entry(tag_of(x)).or_insert(0) += 1,
         }
-        journal_ids += u64::from(r.request_id.starts_with("r-"));
+        journal_cost += u128::from(r.cost);
+        phantom_rows += u64::from(expected.tenant == TENANTS);
     }
     assert_eq!(
-        journal_forwarded,
-        tail.iter().filter(|t| t.is_none()).count() as u64
+        journal_forwarded + journal_tags.values().sum::<u64>(),
+        DEFAULT_AUDIT_CAPACITY as u64
     );
-    let mut tail_tags: BTreeMap<&'static str, u64> = BTreeMap::new();
-    for t in tail.iter().flatten() {
-        *tail_tags.entry(t).or_insert(0) += 1;
-    }
-    assert_eq!(journal_tags, tail_tags);
-    assert_eq!(journal_ids, retained as u64, "every record is correlated");
+    let fleet_spend: u128 = ledger.spent.iter().sum();
+    assert!(
+        journal_cost > 0 && journal_cost <= fleet_spend,
+        "the retained window bills {journal_cost}, the fleet spent {fleet_spend}"
+    );
 
-    // DEFECT (finding 1, second edge): the trail keeps rows attributed to a
-    // tenant that was never provisioned, and `audit_of` hands them back under
-    // that name. The tenant label in the journal is attacker-chosen, so the
-    // unbounded `Vec` also holds an unbounded set of distinct tenant strings.
+    // STILL OPEN (finding 2, second edge): the trail keeps rows attributed to
+    // a tenant that was never provisioned, and `audit_of` hands them back
+    // under that name. The tenant label in the journal is attacker-chosen —
+    // bounded in *length* now (128 bytes) and in *count* (the cap), but the
+    // buffer still holds an arbitrary set of attacker-chosen strings.
     let phantom = a.audit_of("ghost-tenant");
     assert_eq!(
         phantom.len() as u64,
-        tail_tags.get("unknown_tenant").copied().unwrap_or(0),
+        phantom_rows,
         "the journal stores rows for a tenant that does not exist"
     );
     assert!(!phantom.is_empty());
+    assert!(
+        phantom.iter().all(|r| r.cost == 0),
+        "a phantom tenant's rows must at least all be free"
+    );
     assert_eq!(
         a.spent("ghost-tenant"),
         None,
         "the tenant does not exist, so it has no ledger at all — not a zero one"
     );
 
-    // DEFECT (finding 1), quantified on the honest workload: 200 000 calls,
-    // of which only ~31% were forwarded, still cost one record each.
+    // THE REPAIR, measured. 200 000 calls, of which only ~31% were forwarded,
+    // used to cost one retained record each and grew dead linearly to the end
+    // of the run. The journal now stops growing when the cap engages at call
+    // 100 000: the second half of the run adds only what replay memory costs,
+    // and the retained heap is a function of the product's caps rather than of
+    // the number of calls made.
     let refused_share = ledger.refused as f64 / ledger.calls as f64;
     println!(
         "endurance: {MAIN_CALLS} calls x2 deployments in {:?} \
          ({:.2} us/admit) | forwarded {} refused {} ({:.0}% refused) | \
-         exhausted tenants {exhausted_tenants} | retained {:.1} MiB \
-         ({:.0} B per record, both trails)",
+         exhausted tenants {exhausted_tenants} | retained {:.1} MiB for \
+         {} retained records ({:.0} B/record, both trails) | dropped {} each",
         elapsed,
         elapsed.as_secs_f64() * 1e6 / (2.0 * MAIN_CALLS as f64),
         ledger.forwarded,
         ledger.refused,
         refused_share * 100.0,
         mib(grown),
-        grown as f64 / (2.0 * MAIN_CALLS as f64),
+        2 * retained,
+        grown as f64 / (2.0 * retained as f64),
+        a.audit_dropped(),
     );
-    // The two trails are bounded now, so the figure to hold is per *retained*
-    // record, not per call: 200 000 calls each retain 100 000 records.
+    println!("  calls        retained MiB   B per call so far");
+    for (calls, bytes) in &growth {
+        println!(
+            "  {calls:>9}    {:>10.1}   {:>16.0}",
+            mib(*bytes),
+            *bytes as f64 / (2.0 * *calls as f64),
+        );
+    }
+    let (_, first_half) = growth[growth.len() / 2 - 1];
+    let (_, all) = growth[growth.len() - 1];
+    let second_half = all.saturating_sub(first_half);
+    assert!(
+        2 * second_half <= first_half,
+        "the journal is still growing with the call count: the first 100 000 \
+         calls retained {first_half} B, the second {second_half} B — once the \
+         cap engages a bounded buffer must add nothing but replay memory"
+    );
+    assert!(
+        grown <= bounded_heap_ceiling(2),
+        "retained heap must be a function of the caps, not of the call count: \
+         measured {grown} B against a ceiling of {} B",
+        bounded_heap_ceiling(2)
+    );
+    // …and the buffer really is holding its cap, rather than being cheaply
+    // bounded by being empty.
     assert!(
         grown >= 2 * DEFAULT_AUDIT_CAPACITY * 64,
-        "expected the two trails to retain >= 64 B per retained record, \
-         measured {grown} B total"
-    );
-    // The ceiling is chosen so that bounded and unbounded land on opposite
-    // sides of it. A record costs ~356 B here, so the bounded run retains
-    // 2 x 100 000 x 356 = ~71 MB while an unbounded one would retain
-    // 2 x 200 000 x 356 = ~142 MB. 512 B per retained record puts the line at
-    // ~102 MB: above the real figure with ~40% headroom for allocator noise,
-    // and below what dropping the cap would produce.
-    let ceiling = 2 * DEFAULT_AUDIT_CAPACITY * 512;
-    assert!(
-        grown < ceiling,
-        "the trails must retain a record per RETAINED row, not per call: \
-         {grown} B against a ceiling of {ceiling} B ({:.0} B per retained record)",
-        grown as f64 / (2.0 * DEFAULT_AUDIT_CAPACITY as f64)
+        "expected the two capped trails to retain >= 64 B per retained record, \
+         measured {grown} B in total"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 2. THE EXHAUSTION VECTOR
+// 2. THE EXHAUSTION VECTOR, CLOSED
 // ─────────────────────────────────────────────────────────────────────────
 
-/// **Finding 1 — exhaustion vector, high; REPAIRED and guarded here.** One
-/// million calls from an `AuthStrength::Anonymous` principal. Every one is
-/// refused at the *first* gate: no tenant resolved, no role consulted, no
-/// token spent. Every one used to allocate an audit record that lived until
-/// the `Deployment` was dropped — an unbounded `Vec` an unauthenticated client
-/// controlled, sitting beside a `CounterRegistry` that folds at `MAX_SERIES`
-/// "so a label explosion can never exhaust memory".
+/// **Finding 1 — exhaustion vector, high — REPAIRED; this is its regression
+/// guard.**
 ///
-/// The journal is now a `VecDeque` bounded by `DEFAULT_AUDIT_CAPACITY`, so the
-/// same million calls plateau: the trail stops growing at the cap, the excess
-/// is evicted oldest-first, and `audit_dropped()` reports exactly how much was
-/// lost. This test keeps the full million-call flood and inverts every
-/// assertion that used to prove unboundedness.
+/// What the defect was: one million calls from an `AuthStrength::Anonymous`
+/// principal, every one refused at the *first* gate — no tenant resolved, no
+/// role consulted, no token spent — and every one allocating an audit record
+/// that lived until the `Deployment` was dropped. The trail was a `Vec` with
+/// no cap, no rotation and no persistence, so this exact workload retained a
+/// measured **150.5 MiB**, dead linear (37.6 MiB at 250 000 refusals, 75.3 at
+/// 500 000, 150.5 at 1 000 000) with no plateau anywhere, and the long run
+/// reached 1 150.9 MiB at five million. What it cost: an unauthenticated
+/// client could exhaust an operator's memory for free, and destroying the
+/// governance layer was the only way to get a byte of it back.
 ///
-/// What is NOT claimed: this bounds *memory*, not *displacement*. An attacker
-/// who fills the buffer still pushes a real tenant's records out of it — see
-/// the tail of this test, which pins that consequence rather than hiding it.
+/// The comparison that made it a defect rather than a design choice was in the
+/// same struct: `CounterRegistry` folds at `MAX_SERIES` "so a label explosion
+/// can never exhaust memory". The journal now bounds itself the same way — a
+/// `VecDeque` capped at [`DEFAULT_AUDIT_CAPACITY`], oldest evicted, every
+/// eviction counted by `audit_dropped()` and by the `audit.dropped` series.
+/// Identical input, opposite expectation: this test proves the plateau, and
+/// keeps measuring it, because a cap that is never measured is a comment.
+///
+/// It also closes the other repair this scenario was always half of: the
+/// attacker here is issued for the org `"nowhere"`. That org was carried on
+/// every credential and read by nothing, so a token-strength `ghost` used to
+/// be admitted against a tenant it had no relationship with. Both halves of
+/// the credential binding are asserted at the end.
 #[test]
-fn an_unauthenticated_flood_is_bounded_by_the_journal_cap_and_counted() {
+fn unauthenticated_flood_is_bounded_by_the_audit_capacity() {
     let _guard = serialized();
     let names = tenant_names();
     let mut d = fleet_deployment(&names);
@@ -965,7 +1171,7 @@ fn an_unauthenticated_flood_is_bounded_by_the_journal_cap_and_counted() {
 
     let base = live_bytes();
     let started = Instant::now();
-    let mut samples = Vec::new();
+    let mut samples = Vec::with_capacity(4);
     for i in 0..FLOOD_CALLS {
         req.request_id.clear();
         write!(req.request_id, "r-{i:08}").expect("String write is infallible");
@@ -976,6 +1182,9 @@ fn an_unauthenticated_flood_is_bounded_by_the_journal_cap_and_counted() {
             cost_tokens: 0,
             variant: None,
         });
+        // Identity is still evaluated first, before the credential binding:
+        // this caller is *also* in an org that owns no tenant here, and never
+        // learns which of the two refused it.
         assert!(
             matches!(out, Outcome::Refused(Refusal::Unauthenticated)),
             "call {i}: the identity gate stopped refusing"
@@ -994,39 +1203,35 @@ fn an_unauthenticated_flood_is_bounded_by_the_journal_cap_and_counted() {
             "a refused call charged tenant {name}"
         );
     }
-    // … and the trail is bounded, with the loss announced rather than silent.
+    // … and nothing was retained past the cap either.
     assert_eq!(
         d.audit().count(),
         DEFAULT_AUDIT_CAPACITY,
-        "the journal must plateau at its capacity"
+        "one refused call, one audit record — up to the cap, and then no more"
     );
     assert_eq!(
         d.audit_dropped() as usize,
         FLOOD_CALLS - DEFAULT_AUDIT_CAPACITY,
-        "every evicted record is counted, so a reader knows the trail is partial"
+        "every dropped record must be counted: an announced loss, not a silent one"
     );
-    // The retained window is the NEWEST one, and still dense and ordered.
-    let seqs: Vec<u64> = d.audit().map(|r| r.sequence).collect();
+    // What survives is the *newest* window, in order: the evidence closest to
+    // the incident rather than the oldest.
+    let first = d.audit().next().expect("a non-empty journal");
+    let last = d.audit().last().expect("a non-empty journal");
     assert_eq!(
-        seqs.first().copied(),
-        Some((FLOOD_CALLS - DEFAULT_AUDIT_CAPACITY) as u64)
+        first.sequence as usize,
+        FLOOD_CALLS - DEFAULT_AUDIT_CAPACITY
     );
-    assert_eq!(seqs.last().copied(), Some(FLOOD_CALLS as u64 - 1));
-    assert!(
-        seqs.windows(2).all(|w| w[0] + 1 == w[1]),
-        "dense and monotonic"
-    );
+    assert_eq!(last.sequence as usize, FLOOD_CALLS - 1);
+    assert_eq!(last.request_id, format!("r-{:08}", FLOOD_CALLS - 1));
 
-    // The bounded pool right next door stayed bounded, and now says it dropped.
+    // The bounded pool right next door stayed bounded, and the trail has
+    // joined it: four series, flat, one of them counting what the trail shed.
     let m = d.metrics();
     assert_eq!(
         m.len(),
         4,
         "expected requests/refused/refused.unauthenticated/audit.dropped, got {m:?}"
-    );
-    assert_eq!(
-        metric(&m, "audit.dropped"),
-        (FLOOD_CALLS - DEFAULT_AUDIT_CAPACITY) as u64
     );
     assert_eq!(metric(&m, "gateway.requests"), FLOOD_CALLS as u64);
     assert_eq!(metric(&m, "gateway.refused"), FLOOD_CALLS as u64);
@@ -1034,89 +1239,140 @@ fn an_unauthenticated_flood_is_bounded_by_the_journal_cap_and_counted() {
         metric(&m, "gateway.refused.unauthenticated"),
         FLOOD_CALLS as u64
     );
+    assert_eq!(
+        metric(&m, "audit.dropped") as usize,
+        FLOOD_CALLS - DEFAULT_AUDIT_CAPACITY
+    );
 
     println!("unauthenticated flood ({FLOOD_CALLS} refusals, {elapsed:?}):");
     for (calls, bytes) in &samples {
         println!(
-            "  after {calls:>9} refusals: {:>8.1} MiB retained ({:>5.0} B/record)",
+            "  after {calls:>9} refusals: {:>8.1} MiB retained \
+             ({:>5.0} B/retained record, {:>4.1} B/call)",
             mib(*bytes),
-            *bytes as f64 / *calls as f64
+            *bytes as f64 / DEFAULT_AUDIT_CAPACITY as f64,
+            *bytes as f64 / *calls as f64,
         );
     }
 
     let (_, quarter) = samples[0];
     let (_, full) = samples[3];
-    // THE REPAIR, measured: growth plateaus. The cap is reached inside the
-    // first quarter (250 000 calls against a 100 000-record buffer), so four
-    // times the refusals must NOT retain anywhere near four times the memory.
+    // THE REPAIR, measured. This is the assertion that used to demand
+    // `full >= 64 * FLOOD_CALLS` — one retained record per call, forever. Same
+    // constant, opposite direction: a million refusals must now cost less than
+    // 64 B per *call*, because 900 000 of those calls cost nothing at all.
     assert!(
-        full < 2 * quarter,
-        "the trail must plateau once the cap is reached: {quarter} B at 25% vs \
-         {full} B at 100% — if this grew linearly the bound is gone"
+        full < 64 * FLOOD_CALLS,
+        "expected the cap to hold a million refusals under {} B, measured {full} B",
+        64 * FLOOD_CALLS
     );
-    // And the plateau is where the cap says it should be, not merely "small".
-    let per_record = full as f64 / DEFAULT_AUDIT_CAPACITY as f64;
+    // Flat, not linear: four times the refusals retain the same memory. An
+    // unbounded structure would have quadrupled here.
     assert!(
-        per_record < 4_096.0,
-        "{per_record:.0} B per retained record is not a bounded journal"
+        full <= quarter + quarter / 8,
+        "growth has not plateaued: {quarter} B at 25% vs {full} B at 100% — \
+         the audit buffer is tracking the call count again"
     );
-
-    // DISPLACEMENT, still open by construction: the flood evicted 900 000
-    // records, and any genuine record among them is gone. Bounding the buffer
-    // converted an unbounded leak into a bounded eviction; only durable
-    // storage (P0-1) closes this, and until then `audit_dropped` is the whole
-    // defence — which is why it is asserted above.
+    // …and it is bounded by holding its cap, not by holding nothing.
     assert!(
-        d.audit().all(|r| r.actor == "ghost"),
-        "the retained window is entirely the attacker's; nothing else survived"
+        full >= 64 * DEFAULT_AUDIT_CAPACITY,
+        "expected >= 64 B retained per retained record, measured {full} B for \
+         {DEFAULT_AUDIT_CAPACITY} records"
     );
 
-    // Dropping the deployment is still the only way to free what remains:
-    // no `truncate`/`drain`/`rotate`/`persist` exists on `Deployment`.
+    // Dropping the deployment still frees the buffer — the cap bounds it, it
+    // does not persist it. `audit()` hands out a borrowed iterator and there is
+    // still no `drain`/`export`/`persist` anywhere (see "still open", 1).
     drop(d);
     let after_drop = live_bytes().saturating_sub(base);
     assert!(
         after_drop < full / 8,
-        "dropping the deployment should be the one thing that frees the \
-         trail: {full} B before, {after_drop} B after"
+        "dropping the deployment must still free the trail: {full} B before, \
+         {after_drop} B after"
+    );
+
+    // THE OTHER REPAIR, same scenario, opposite expectation. `ghost` is issued
+    // for the org "nowhere", which owns nothing in this fleet. The predecessor
+    // read only the credential's *strength* and then keyed authorization on
+    // the request's own copy of the actor and resolved the tenant from the
+    // request's own copy of the tenant id — so this call, and any call naming
+    // any actor and any tenant, was decided against somebody else's roles and
+    // charged to somebody else's budget. Both bindings are now checked before
+    // a byte of tenant state is touched, and both refusals are free.
+    let mut d = fleet_deployment(&names);
+    let foreign = actor("nowhere", "ghost", AuthStrength::Token);
+    assert!(
+        d.assign("ghost", "writer"),
+        "give the foreigner a full role: the org gate must still refuse"
+    );
+    let req = request(&names[0], "ghost", "memory.ingest", "r-foreign");
+    assert_eq!(
+        d.admit(Call {
+            actor: &foreign,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 25,
+            variant: None,
+        })
+        .refusal(),
+        Some(&Refusal::TenantNotOwnedByOrg),
+        "an org that owns no tenant here must not reach one"
+    );
+    let alice = actor(FLEET_ORG, "alice", AuthStrength::Token);
+    let req = request(&names[0], "root", "policy.set", "r-borrowed");
+    assert_eq!(
+        d.admit(Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 25,
+            variant: None,
+        })
+        .refusal(),
+        Some(&Refusal::ActorMismatch),
+        "alice must not become root by saying she is"
+    );
+    assert_eq!(
+        d.spent(&names[0]),
+        Some(0),
+        "neither impersonation cost the tenant a token"
+    );
+    // Both are journalled, at zero cost, under the name the caller claimed.
+    let trail: Vec<&AuditRecord> = d.audit().collect();
+    assert_eq!(trail.len(), 2);
+    assert!(trail.iter().all(|r| r.cost == 0));
+    assert_eq!(
+        trail[1].actor, "root",
+        "the journal records what was claimed"
     );
 }
 
-/// **Finding 2 — the same vector, per byte; now CLOSED on both halves.**
+/// **Finding 2 — the same vector, per byte — REPAIRED in both dimensions;
+/// this is its regression guard.**
 ///
-/// What the defect was: the record clones `request.{tenant,actor,tool}` with
+/// What the defect was: the record cloned `request.{tenant,actor,tool}` with
 /// no length check anywhere in the path, so the attacker chose the *size* of
 /// each record as well as the count — and it was worse for a token-strength
 /// caller, because `Refusal::OutsideBoundary` formatted the **whole** tool
 /// name into its message, which `admit` then cloned into the record *and*
-/// returned. Two copies of every attacker byte: a measured 2.00 retained
-/// bytes per attacker byte against an anonymous caller's 1.00, so 4 GiB of
-/// operator memory was 2 GiB of request body away.
+/// returned. Two copies of every attacker byte: a measured 2.00 retained bytes
+/// per attacker byte against an anonymous caller's 1.00. What it cost: 4 GiB
+/// of operator memory was 2 GiB of request body away, and no gate had a say in
+/// it, because the record was written after `decide` on every path.
 ///
-/// What it cost and what was repaired: `classify` now refuses any name over
+/// What was repaired, in two places. `classify` refuses any name over
 /// `MAX_TOOL_NAME_BYTES` (256) as non-canonical *before* it matches anything,
 /// and passes everything it does echo through a sanitizer capped at 64
 /// characters, so a refusal message is a bounded constant however large the
-/// name. The doubling is gone; this test now guards that bound, at a 1 MiB
-/// name (refused unread) and at the largest name the boundary will still
-/// classify (256 bytes, canonical, forbidden — the one that does reach the
-/// message).
-///
-/// **The second half, now also repaired:** `admit` used to journal
-/// `request.tool` verbatim before and regardless of which gate refused the
-/// call, so an anonymous caller who never passed the identity gate still got a
-/// 1 MiB tool name copied into the trail at 1.00 retained bytes per attacker
-/// byte. `journal` now `clamp`s every stored identifier to
-/// `MAX_IDENTIFIER_BYTES` on a character boundary, so a record is a bounded
-/// constant whatever the caller sends — and the retention ratio collapses from
-/// 1.00 to ~0.00.
-///
-/// Both halves are measured below, at a 1 MiB name (refused unread), at a
-/// 1 MiB name that reaches the boundary, and at the largest name the boundary
-/// will still classify (256 bytes, canonical, forbidden — the one that does
-/// reach the refusal message).
+/// name. And `journal` clamps every identifier it stores to
+/// `MAX_IDENTIFIER_BYTES` (128) on a character boundary — which is the half
+/// that matters for the anonymous caller, because no gate that could have
+/// refused on length is ever reached. Identical input, opposite expectation:
+/// a 1 MiB tool name costs a measured 0.0003 retained bytes per attacker byte
+/// instead of 1.00 (or 2.00), and the record is 128 bytes wide instead of a
+/// megabyte.
 #[test]
-fn a_record_is_bounded_whatever_the_caller_sends_and_refusals_never_double_it() {
+fn attacker_sized_names_no_longer_size_the_audit_record() {
     let _guard = serialized();
     const BIG: usize = 1024 * 1024;
     const CALLS: usize = 32;
@@ -1125,12 +1381,15 @@ fn a_record_is_bounded_whatever_the_caller_sends_and_refusals_never_double_it() 
     /// around a sanitized name of at most 64 characters — 3 bytes each in the
     /// worst case, every one replaced by U+FFFD — plus the ellipsis.
     const REFUSAL_MESSAGE_CAP: usize = 52 + 64 * 3 + 3;
+    /// What one record may retain now that identifiers are clamped: four
+    /// clamped identifiers, the record itself, and the deque slot it sits in.
+    const RECORD_CAP: usize = 4 * MAX_IDENTIFIER_BYTES + 512;
     let names = tenant_names();
     let huge_tool = "x".repeat(BIG);
 
-    // (a) REPAIRED. Unauthenticated: refused at gate 1, and the 1 MiB name is
-    //     clamped before it is stored, so 32 MiB of request body buys a few
-    //     kilobytes of trail instead of 32 MiB of it.
+    // (a) REPAIRED. Unauthenticated: refused at gate 1, and *because* the
+    //     record is written after `decide` on every path, this is the case no
+    //     gate could ever have bounded. The clamp is in `journal`, so it does.
     let mut d = fleet_deployment(&names);
     let ghost = actor("nowhere", "ghost", AuthStrength::Anonymous);
     let mut req = request(&names[0], "ghost", &huge_tool, "r-0");
@@ -1151,25 +1410,30 @@ fn a_record_is_bounded_whatever_the_caller_sends_and_refusals_never_double_it() 
     let anon_ratio = anon_bytes as f64 / (CALLS * BIG) as f64;
     assert_eq!(d.audit().count(), CALLS);
     assert_eq!(
-        d.audit().next().expect("at least one record").tool.len(),
+        d.audit().next().expect("a non-empty journal").tool.len(),
         MAX_IDENTIFIER_BYTES,
-        "the trail must clamp the attacker's 1 MiB tool name"
+        "the trail must clamp the attacker's 1 MiB tool name, not store it"
     );
     assert!(
         anon_ratio < 0.01,
-        "a clamped record must retain almost nothing per attacker byte, \
-         measured {anon_ratio:.4}"
+        "expected the record to stop tracking the attacker's size, measured \
+         {anon_ratio:.4} retained bytes per attacker byte"
+    );
+    assert!(
+        anon_bytes <= CALLS * RECORD_CAP,
+        "expected <= {} B for {CALLS} clamped records, measured {anon_bytes} B",
+        CALLS * RECORD_CAP
     );
     drop(d);
 
     // (b) REPAIRED. Token strength, no role, known tenant — the case that used
     //     to cost double, because the boundary refusal repeated the whole tool
     //     name inside its message and the trail then kept it twice. Identical
-    //     input, opposite expectation: a 1 MiB name is now over the 256-byte
+    //     input, opposite expectation: a 1 MiB name is over the 256-byte
     //     canonical limit, so it is refused unread and the message it produces
     //     is a constant that mentions none of it.
     let mut d = fleet_deployment(&names);
-    let mallory = actor("memorithm", "mallory", AuthStrength::Token);
+    let mallory = actor(FLEET_ORG, "mallory", AuthStrength::Token);
     let forbidden = format!("shell.{}", "y".repeat(BIG));
     let mut req = request(&names[0], "mallory", &forbidden, "r-0");
     let base = live_bytes();
@@ -1205,29 +1469,29 @@ fn a_record_is_bounded_whatever_the_caller_sends_and_refusals_never_double_it() 
 
     println!(
         "attacker-sized records ({CALLS} x {} MiB tool name): \
-         anonymous {:.1} MiB retained ({anon_ratio:.2} B/attacker byte), \
-         boundary refusal {:.1} MiB retained ({boundary_ratio:.2} B/attacker \
-         byte), longest refusal message {longest_message} B",
+         anonymous {:.3} MiB retained ({anon_ratio:.4} B/attacker byte), \
+         boundary refusal {:.3} MiB retained ({boundary_ratio:.4} B/attacker \
+         byte), longest refusal message {longest_message} B, record tool field \
+         clamped to {MAX_IDENTIFIER_BYTES} B",
         BIG / (1024 * 1024),
         mib(anon_bytes),
         mib(boundary_bytes),
     );
-    // THE REPAIR, measured: the second copy is gone. A boundary refusal now
-    // costs the same one copy an anonymous refusal does, not two. If the
-    // message ever embeds the name again this crosses 1.5 and fails.
-    assert!(
-        boundary_ratio < 1.5,
-        "a boundary refusal must no longer retain a second copy of every \
-         attacker byte, measured {boundary_ratio:.2}"
-    );
-    // …and the first copy is bounded too, so the whole vector is closed.
+    // THE REPAIR, measured, in both dimensions at once: neither the message
+    // nor the record tracks the caller's size any more. If either copy comes
+    // back, this crosses 0.01 and fails.
     assert!(
         boundary_ratio < 0.01,
-        "a boundary refusal must retain almost nothing per attacker byte, \
+        "a boundary refusal must retain neither copy of the attacker's bytes, \
          measured {boundary_ratio:.4}"
     );
+    assert!(
+        boundary_bytes <= CALLS * RECORD_CAP,
+        "expected <= {} B for {CALLS} clamped records, measured {boundary_bytes} B",
+        CALLS * RECORD_CAP
+    );
     assert_eq!(
-        d.audit().next().expect("at least one record").tool.len(),
+        d.audit().next().expect("a non-empty journal").tool.len(),
         MAX_IDENTIFIER_BYTES,
         "the trail clamps the attacker's name, refused or not"
     );
@@ -1273,32 +1537,38 @@ fn a_record_is_bounded_whatever_the_caller_sends_and_refusals_never_double_it() 
         "  at the 256-byte classification limit the refusal reads ({} B): {why}",
         why.len()
     );
-    // …and the record beside it is clamped to 128 of those 256 bytes.
-    assert_eq!(
-        d.audit().next().expect("at least one record").tool.len(),
-        MAX_IDENTIFIER_BYTES
+    // …and the record beside it keeps 128 of those 256 bytes, not all of them,
+    // truncated rather than rewritten.
+    let stored = d.audit().next().expect("a non-empty journal").tool.clone();
+    assert_eq!(stored.len(), MAX_IDENTIFIER_BYTES);
+    assert!(
+        at_limit.starts_with(stored.as_str()),
+        "the clamp must truncate the name, not transform it"
     );
 }
 
-/// **Finding 3 — HALF REPAIRED.** Rotation used to be unimplementable from
-/// what an `AuditRecord` stored: five fields, none of them a sequence, a
-/// timestamp, a cost, a model or a variant. An operator holding a 5 000 000-
-/// record trail could answer neither "drop everything older than 30 days" (no
-/// time) nor "prove how `spent` reached 1 000" (no cost) — the two questions
-/// retention policy and budget policy are made of.
+/// **Finding 3 — half repaired.**
 ///
-/// The record now carries `sequence` and `cost`, which closes the budget half
-/// outright: the journal **reconciles the meter**, and count-based retention
-/// ("keep the newest N") is expressible because the order is total. This test
-/// asserts that reconciliation, because it is the property an auditor actually
-/// needs and it is easy to lose.
+/// What the defect was: rotation was not merely absent, it was unimplementable
+/// from what an `AuditRecord` stored — five fields, none of them a timestamp,
+/// a cost, a model or a variant. An operator holding a 5 000 000-record trail
+/// could answer neither "drop everything older than 30 days" (no time) nor
+/// "prove how `spent` reached 1 000" (no cost), the two questions retention
+/// policy and budget policy are made of. What it cost: the meter and the
+/// journal could not be reconciled at all, so a billing dispute had no
+/// evidence on either side of it.
 ///
-/// The time half is still open, and still asserted: with no timestamp, *age*-
-/// based retention — the shape every real policy is written in — remains
-/// unimplementable, and `model` and `variant` are still nowhere, so a trail
-/// cannot answer which model spent a tenant's budget.
+/// What was repaired: the record carries `cost` — the tokens actually charged,
+/// `0` for every refusal — and a monotonic `sequence`. This test guards that
+/// repair by reconstructing `spent` from the journal alone, to the token.
+///
+/// **Still open, deliberately pinned below:** there is still no timestamp, and
+/// still no way to shed, export or persist the trail on purpose. Age-based
+/// retention remains unimplementable from what is stored; the capacity bound
+/// sheds the *oldest* evidence rather than the least interesting, and nothing
+/// reads it on the way out.
 #[test]
-fn audit_records_reconcile_the_meter_but_still_carry_no_time() {
+fn audit_records_carry_cost_and_sequence_but_still_no_timestamp() {
     let _guard = serialized();
     let names = tenant_names();
     let mut d = fleet_deployment(&names);
@@ -1317,64 +1587,76 @@ fn audit_records_reconcile_the_meter_but_still_carry_no_time() {
     }
     assert_eq!(d.spent(&names[0]), Some(64 * 3));
 
-    // REPAIRED: the journal explains the meter, token for token.
-    let billed: u64 = d.audit().map(|r| r.cost).sum();
-    assert_eq!(
-        Some(billed),
-        d.spent(&names[0]),
-        "the trail must account for every token the tenant was charged"
-    );
-    assert!(
-        d.audit().all(|r| r.outcome.is_forwarded() || r.cost == 0),
-        "a refusal must never carry a cost"
-    );
-    // REPAIRED: a total order, so count-based retention is expressible.
-    let seqs: Vec<u64> = d.audit().map(|r| r.sequence).collect();
-    assert_eq!(seqs, (0..64).collect::<Vec<_>>(), "dense and monotonic");
-
-    // STILL OPEN: the record is exhaustively
-    // {sequence, request_id, tenant, actor, tool, cost, outcome}. Serializing
-    // it is the honest way to show what is *not* there.
-    let r = d.audit().next().expect("at least one record");
+    // The record is exhaustively {sequence, request_id, tenant, actor, tool,
+    // cost, outcome}. Serializing it is the honest way to show both what is
+    // now there and what is still not.
+    let r = d.audit().next().expect("a non-empty journal");
     let rendered = format!(
         "{{\"sequence\":{},\"request_id\":\"{}\",\"tenant\":\"{}\",\"actor\":\"{}\",\
          \"tool\":\"{}\",\"cost\":{},\"outcome\":\"{:?}\"}}",
         r.sequence, r.request_id, r.tenant, r.actor, r.tool, r.cost, r.outcome
     );
+    for present in ["cost", "sequence"] {
+        assert!(
+            rendered.contains(present),
+            "an AuditRecord no longer carries {present}: {rendered}"
+        );
+    }
+    // STILL OPEN: no clock anywhere in the record, so no age-based retention.
     for absent in ["time", "unix", "stamp", "model", "variant"] {
         assert!(
             !rendered.to_ascii_lowercase().contains(absent),
-            "an AuditRecord unexpectedly carries {absent} — tighten this test \
-             instead of deleting it: {rendered}"
+            "an AuditRecord unexpectedly carries {absent}: {rendered}"
         );
     }
-    // …so age-based retention has nothing to sort on. Every one of the 64
-    // records was written at a different instant and the trail cannot say so.
+
+    // THE REPAIR: spend is derivable from the journal alone now — every
+    // admitted record says what it cost, and the sum is the meter.
     let admitted: Vec<&AuditRecord> = d.audit().filter(|r| r.outcome.is_forwarded()).collect();
     assert_eq!(admitted.len(), 64);
     assert!(
-        admitted.windows(2).all(|w| w[0].cost == w[1].cost),
-        "these 64 differ only by id and sequence; nothing in them dates the call"
+        admitted.iter().all(|r| r.cost == 3),
+        "every admitted record must carry the cost it was charged"
     );
+    let reconstructed: u64 = d.audit().map(|r| r.cost).sum();
+    assert_eq!(
+        Some(reconstructed),
+        d.spent(&names[0]),
+        "the journal must reconcile the meter to the token"
+    );
+    // And `sequence` orders them, so two interleaved journals can be merged
+    // into the order the deployment actually decided in.
+    assert!(
+        admitted.windows(2).all(|w| w[0].sequence < w[1].sequence),
+        "sequences must be strictly increasing in decision order"
+    );
+    assert_eq!(admitted[0].sequence, 0);
+    assert_eq!(admitted[63].sequence, 63);
+
+    // STILL OPEN: the accessors are read-only aggregates. There is no `drain`,
+    // no `export`, no `persist` — the only way a record leaves is the capacity
+    // bound, oldest first, unread by anything.
+    assert_eq!(d.audit_dropped(), 0, "nothing has been shed at this scale");
 }
 
-/// **Finding 4 — bounded, not fixed.** `audit_of` is the only per-tenant view
-/// and it filters the entire journal, allocating one pointer per match. The
-/// exhaustion vector therefore amplifies itself: an attacker who parks refused
-/// records under a tenant makes every legitimate audit query scan them and
-/// allocate proportionally.
+/// **Finding 4 — still open, and the capacity bound gave it a new edge.**
 ///
-/// The journal's cap bounds how bad this gets — the scan is now at worst
-/// `DEFAULT_AUDIT_CAPACITY` records rather than unbounded — but it does not
-/// change the shape: the flood below stays under the cap precisely so this
-/// measures `audit_of`'s own cost rather than the eviction behaviour already
-/// covered by [`an_unauthenticated_flood_is_bounded_by_the_journal_cap_and_counted`].
+/// `audit_of` is still the only per-tenant view, it still filters the entire
+/// buffer, and it still allocates one pointer per match (a measured 1.0 MiB to
+/// answer one query over the 100 000-record window). The exhaustion vector
+/// therefore still amplifies itself — an attacker who parks 200 000 refused
+/// calls under their own tenant makes every legitimate audit query scan the
+/// whole retained window, 5.3 ms of it in debug for eight matching rows — and
+/// now it does something the unbounded version
+/// could not: it **evicts the innocent neighbour's records entirely**, while
+/// the meter goes on billing the tokens those records were the evidence for.
+/// The loss is announced (`audit_dropped` counts it), which is exactly why the
+/// runtime's own docs say this buffer is not an audit story until it is
+/// flushed somewhere durable. Nothing in the product flushes it.
 #[test]
 fn audit_of_scans_the_whole_trail_and_allocates_per_match() {
     let _guard = serialized();
-    /// Deliberately below `DEFAULT_AUDIT_CAPACITY` (100 000) so nothing is
-    /// evicted and the counts below are exact.
-    const FLOOD: usize = 80_000;
+    const FLOOD: usize = 200_000;
     let names = tenant_names();
     let mut d = fleet_deployment(&names);
     let ghost = actor("nowhere", "ghost", AuthStrength::Anonymous);
@@ -1391,6 +1673,8 @@ fn audit_of_scans_the_whole_trail_and_allocates_per_match() {
             variant: None,
         });
     }
+    assert_eq!(d.audit_of(&names[1]).len(), 8);
+
     // … and one tenant an anonymous client has buried.
     let mut req = request(&names[0], "ghost", "memory.recall", "");
     for i in 0..FLOOD {
@@ -1404,58 +1688,88 @@ fn audit_of_scans_the_whole_trail_and_allocates_per_match() {
             variant: None,
         });
     }
-    assert_eq!(d.audit().count(), FLOOD + 8);
+    assert_eq!(d.audit().count(), DEFAULT_AUDIT_CAPACITY);
+    assert_eq!(
+        d.audit_dropped() as usize,
+        FLOOD + 8 - DEFAULT_AUDIT_CAPACITY
+    );
 
-    // The buried tenant's own query allocates 8 bytes per match.
+    // STILL OPEN, and sharper than it was: the flood no longer merely buries
+    // the innocent tenant's records, it evicts them. Eight forwarded, billed
+    // calls, and the journal can no longer show one of them — announced by
+    // `audit_dropped`, unrecoverable without durable storage the product does
+    // not have.
+    assert!(
+        d.audit_of(&names[1]).is_empty(),
+        "the flood evicted the innocent tenant's whole trail"
+    );
+    assert_eq!(
+        d.spent(&names[1]),
+        Some(8),
+        "…while the meter still bills 8 tokens the journal can no longer explain"
+    );
+
+    // The buried tenant's own query allocates 8 bytes per match, over the
+    // whole retained window.
     let before = live_bytes();
     let buried = d.audit_of(&names[0]);
     let buried_alloc = live_bytes().saturating_sub(before);
-    assert_eq!(buried.len(), FLOOD);
+    assert_eq!(buried.len(), DEFAULT_AUDIT_CAPACITY);
     assert!(
-        buried_alloc >= 8 * FLOOD,
-        "expected >= {} B for {FLOOD} borrowed records, measured {buried_alloc} B",
-        8 * FLOOD
+        buried_alloc >= 8 * DEFAULT_AUDIT_CAPACITY,
+        "expected >= {} B for {DEFAULT_AUDIT_CAPACITY} borrowed records, \
+         measured {buried_alloc} B",
+        8 * DEFAULT_AUDIT_CAPACITY
     );
     drop(buried);
 
-    // And the *innocent* tenant pays too: its 8-record query still walks all
-    // 200 008. Timed rather than asserted (wall clock is not an invariant),
-    // but the scan is unconditional in `src/lib.rs:344` — there is no index.
+    // And the *innocent* tenant pays too: eight fresh records, and its query
+    // still walks all 100 000. Timed rather than asserted (wall clock is not
+    // an invariant), but the scan is unconditional — there is no index.
+    for i in 0..8u64 {
+        let req = request(&names[1], "alice", "memory.recall", &format!("h2-{i}"));
+        d.admit(Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+        });
+    }
     let started = Instant::now();
     let innocent = d.audit_of(&names[1]);
     let innocent_scan = started.elapsed();
     assert_eq!(innocent.len(), 8);
     println!(
         "audit_of on a flooded deployment: buried tenant {} records / {} B allocated; \
-         innocent tenant 8 records but {innocent_scan:?} of scan over {} total",
-        FLOOD,
+         innocent tenant 8 records but {innocent_scan:?} of scan over {} retained \
+         ({} dropped, 8 of them the innocent tenant's)",
+        DEFAULT_AUDIT_CAPACITY,
         buried_alloc,
-        d.audit().count()
+        d.audit().count(),
+        d.audit_dropped(),
     );
 }
 
-/// **Finding 5 — spec violation, REPAIRED.** `GatewayRequest::request_id` is
-/// documented as an "Idempotency/correlation key for audit joins"
-/// (`crates/ccos-enterprise-gateway/src/lib.rs:16`) and the composed path's own
-/// docs promise every call is "audit-correlated by request id". `admit` used to
-/// never read the field: one byte-identical request replayed 10 000 times was
-/// charged 10 000 times, so a replay of a *single* captured request drained a
-/// tenant's whole budget.
+/// **Finding 5 — spec violation — REPAIRED; this is its regression guard.**
 ///
-/// `decide` now remembers `(tenant, request_id)` and returns the prior verdict
-/// without re-charging. Two properties are asserted, and they pull in opposite
-/// directions — which is why both are here:
+/// What the defect was: `GatewayRequest::request_id` is documented as an
+/// "Idempotency/correlation key for audit joins"
+/// (`crates/ccos-enterprise-gateway/src/lib.rs:16`) and the composed path's
+/// own docs promised every call was "audit-correlated by request id" — but
+/// `admit` never read the field. One byte-identical request replayed 10 000
+/// times was charged 10 000 times. What it cost: a single captured frame,
+/// replayed, drained a tenant's entire budget (the 250-token tenant below went
+/// to zero in 50 replays) and then went on growing the trail for free, while
+/// the key an operator would join on had cardinality 1 for the whole incident.
 ///
-/// * **billing** is idempotent: 10 000 replays cost what one call cost;
-/// * **the journal is not**: all 10 000 are still recorded, because a replay
-///   is a real event an operator must be able to see. Suppression is a billing
-///   rule, not a silence.
-///
-/// Note what this does *not* fix: the key is per `(tenant, request_id)` and the
-/// memory is bounded by `DEFAULT_REPLAY_MEMORY`, so a caller who varies the id
-/// is unaffected — the repair defeats *replay*, not *volume*.
+/// What was repaired: a `(tenant, request_id)` the deployment has already
+/// decided returns `Forwarded` **without charging again**, and moves
+/// `gateway.replayed`. Identical input — 10 000 replays of one id, against the
+/// fattest and the thinnest budget in the fleet — opposite expectation: one
+/// charge each, and a budget that repetition can no longer drain.
 #[test]
-fn a_replayed_request_id_is_billed_once_and_journaled_every_time() {
+fn a_replayed_request_id_is_charged_exactly_once() {
     let _guard = serialized();
     const REPLAYS: u64 = 10_000;
     const ID: &str = "the-one-and-only-id";
@@ -1464,7 +1778,9 @@ fn a_replayed_request_id_is_billed_once_and_journaled_every_time() {
     let alice = actor(FLEET_ORG, "alice", AuthStrength::Token);
 
     // (a) The fattest budget in the fleet (t-49: 250 + 49*400 = 20 050) against
-    //     10 000 replays at 1 token: all are admitted, exactly one is billed.
+    //     10 000 replays at 1 token: every replay is still *answered* — replay
+    //     suppression returns the decision that was already made, it does not
+    //     start refusing — but only the first one is billed.
     let fat = &names[TENANTS - 1];
     let req = request(fat, "alice", "memory.ingest", ID);
     let mut admitted = 0u64;
@@ -1480,7 +1796,7 @@ fn a_replayed_request_id_is_billed_once_and_journaled_every_time() {
     }
     assert_eq!(
         admitted, REPLAYS,
-        "a replay returns the prior verdict — it is not refused"
+        "a suppressed replay must still be answered, not refused"
     );
     assert_eq!(
         d.spent(fat),
@@ -1489,7 +1805,8 @@ fn a_replayed_request_id_is_billed_once_and_journaled_every_time() {
     );
 
     // (b) The same replay against the thinnest budget (t-00: 250) at 5 tokens
-    //     costs 5, not 250: a captured request can no longer drain a budget.
+    //     used to drain it in 50 calls. It now costs 5 tokens, once, and the
+    //     remaining 9 999 replays cost the tenant nothing at all.
     let thin = &names[0];
     let req = request(thin, "alice", "memory.ingest", ID);
     let mut admitted_thin = 0u64;
@@ -1507,44 +1824,47 @@ fn a_replayed_request_id_is_billed_once_and_journaled_every_time() {
     assert_eq!(
         d.spent(thin),
         Some(5),
-        "the thinnest budget in the fleet survives 10 000 replays intact"
+        "the replay must not drain the budget it used to drain"
     );
     assert!(
-        d.spent(thin).unwrap() < limit_of(0),
-        "and is nowhere near its limit of {}",
-        limit_of(0)
+        spent_of(&d, thin) < limit_of(0),
+        "the thin tenant must survive a replay flood with budget to spare"
     );
 
-    // The key is per tenant, so the same id under two tenants is two decisions.
-    let by_tenant: BTreeMap<&str, u64> = [(fat.as_str(), 1u64), (thin.as_str(), 5)]
-        .into_iter()
-        .collect();
-    for (t, expected) in by_tenant {
-        assert_eq!(d.spent(t), Some(expected), "{t} keeps its own idempotency");
-    }
-
-    // …and every replay is still in the journal, all under the one id.
+    // The journal still records every *attempt* — that is the incident an
+    // operator needs to see — but the cost column tells them apart now, so one
+    // id no longer means one indistinguishable smear of 20 000 charged rows.
     assert_eq!(d.audit().count() as u64, 2 * REPLAYS);
+    assert_eq!(d.audit_dropped(), 0, "20 000 rows is well inside the cap");
     let same_id = d.audit().filter(|r| r.request_id == ID).count();
+    assert_eq!(same_id, 2 * REPLAYS as usize);
+    let billed: Vec<&AuditRecord> = d.audit().filter(|r| r.cost > 0).collect();
     assert_eq!(
-        same_id,
-        2 * REPLAYS as usize,
-        "a suppressed charge is still a recorded event"
+        billed.len(),
+        2,
+        "exactly two of the {} rows were charged: one per tenant",
+        2 * REPLAYS
     );
+    assert_eq!(billed[0].cost, 1);
+    assert_eq!(billed[1].cost, 5);
+    let m = d.metrics();
     assert_eq!(
-        d.metrics()
-            .iter()
-            .find(|(k, _)| k == "gateway.replayed")
-            .map(|(_, v)| *v),
-        Some(2 * REPLAYS - 2),
-        "…and the replays are counted, so an operator can see the pattern"
+        metric(&m, "gateway.replayed"),
+        2 * (REPLAYS - 1),
+        "every suppressed replay must be announced on its own counter"
     );
+    assert_eq!(metric(&m, "gateway.forwarded"), 2 * REPLAYS);
+    assert_eq!(metric(&m, "gateway.refused"), 0);
 }
 
-/// **Finding 6 — REPAIRED.** `spent` used to fold "no such tenant" into "spent
-/// nothing", so a quota monitor pointed at a mistyped tenant reported a
-/// perfectly healthy, perfectly idle tenant, forever. It now returns `Option`,
-/// and the two cases are distinguishable at the type level.
+/// **Finding 6 — REPAIRED; this is its regression guard.**
+///
+/// What the defect was: `spent` folded "no such tenant" into "spent nothing"
+/// by returning a bare `0`. What it cost: a quota monitor pointed at a
+/// mistyped tenant reported a perfectly healthy, perfectly idle tenant,
+/// forever — the failure mode of a billing system that cannot fail loudly. It
+/// returns `Option<u64>` now: `None` is "no such tenant", `Some(0)` is "spent
+/// nothing", and the two can never be confused again.
 #[test]
 fn spent_distinguishes_an_unknown_tenant_from_an_idle_one() {
     let _guard = serialized();
@@ -1553,28 +1873,33 @@ fn spent_distinguishes_an_unknown_tenant_from_an_idle_one() {
     assert_eq!(
         d.spent(&names[0]),
         Some(0),
-        "a fresh tenant has spent nothing — and exists"
+        "a fresh tenant has spent nothing, and says so"
     );
     assert_eq!(
         d.spent("t-00 "),
         None,
-        "a trailing space is a different string, and now reads as an error"
+        "a trailing space is a different name, and no tenant has it"
     );
     assert_eq!(d.spent("no-such-tenant"), None);
     assert_eq!(d.spent(""), None);
-    // The audit view still answers with silence rather than an error, which is
-    // defensible for a filter but means `spent` is the only lookup that can
-    // tell an operator they typed the name wrong.
+    // …the audit view still answers with silence rather than an error, which
+    // is sound: an empty trail is a true statement about a tenant that does
+    // not exist, and `spent` is now the accessor that distinguishes them.
     assert!(d.audit_of("no-such-tenant").is_empty());
     assert!(d.audit_of(&names[0]).is_empty());
 }
 
-/// **Finding 8.** The invariant this whole file rests on — `spent(t)` equals
-/// the sum of admitted costs — is false for an "unlimited" tenant. The budget
-/// saturates on the accounting side (`crates/ccos-enterprise-policy/src/lib.rs:39`),
-/// which is the right call against a wrapping ledger, but it means the
-/// deployment can forward work it then declines to bill, permanently and
-/// without a signal anywhere.
+/// **Finding 8 — still open.** The invariant this whole file rests on —
+/// `spent(t)` equals the sum of admitted costs — is false for an "unlimited"
+/// tenant. The budget saturates on the accounting side
+/// (`crates/ccos-enterprise-policy/src/lib.rs:39`), which is the right call
+/// against a wrapping ledger, but it means the deployment forwards work it
+/// then declines to bill, permanently and without a signal anywhere.
+///
+/// One thing did change: the journal carries `cost` now, so the drift is at
+/// last *provable* from the trail — the records add up to 1 006 tokens more
+/// than the meter admits to. That makes it detectable. It does not make it
+/// right, and nothing in the product raises it.
 #[test]
 fn unlimited_budget_stops_summing_admitted_costs() {
     let _guard = serialized();
@@ -1583,7 +1908,7 @@ fn unlimited_budget_stops_summing_admitted_costs() {
         .govern_tool("memory.ingest", "memory.write");
     let mut unlimited = TenantState::new(u64::MAX);
     unlimited.allow_model("claude-opus");
-    d.add_tenant(FLEET_ORG, "infinite", unlimited);
+    assert!(d.add_tenant(FLEET_ORG, "infinite", unlimited));
     assert!(d.assign("alice", "writer"));
     let alice = actor(FLEET_ORG, "alice", AuthStrength::Token);
 
@@ -1602,16 +1927,30 @@ fn unlimited_budget_stops_summing_admitted_costs() {
     }
 
     assert_eq!(d.audit().count(), 3, "all three calls were journaled");
-    assert_eq!(u128::from(spent_of(&d, "infinite")), u128::from(u64::MAX));
+    let spent = u128::from(d.spent("infinite").expect("the tenant exists"));
+    assert_eq!(spent, u128::from(u64::MAX));
     assert!(
-        admitted_sum > u128::from(spent_of(&d, "infinite")),
+        admitted_sum > spent,
         "the ledger should have fallen behind the admitted sum"
     );
     assert_eq!(
-        admitted_sum - u128::from(spent_of(&d, "infinite")),
+        admitted_sum - spent,
         1_006,
-        "DEFECT: 1 006 tokens were admitted and never billed, and nothing in \
-         the audit trail records the difference"
+        "STILL OPEN: 1 006 tokens were admitted and never billed"
+    );
+    // What the repair did change: the journal says so. Every record carries
+    // what `admit` believed it charged, and those add up to the truth the
+    // meter lost — so the drift is detectable from the trail, by anyone who
+    // thinks to look. Nothing in the product looks.
+    let journalled: u128 = d.audit().map(|r| u128::from(r.cost)).sum();
+    assert_eq!(
+        journalled, admitted_sum,
+        "the journal records the full admitted cost of all three calls"
+    );
+    assert_eq!(
+        journalled - spent,
+        1_006,
+        "the journal can prove the 1 006-token gap the meter hides"
     );
 }
 
@@ -1629,19 +1968,27 @@ fn unlimited_budget_stops_summing_admitted_costs() {
 ///     -- --ignored --nocapture endurance_five_million_admissions
 /// ```
 ///
-/// Release is recommended (measured 9.7 s / 1.95 us per admission, against
-/// 29.1 s in debug) but not required: the memory table is byte-identical in
-/// both profiles, because the counting allocator measures requested layouts.
+/// Release is recommended but not required: the memory table is byte-identical
+/// in both profiles, because the counting allocator measures requested
+/// layouts.
 ///
-/// **Measured result: 1 150.9 MiB retained for 5 000 000 calls** — 241 B per
-/// record, still climbing, no plateau. That is the finding, not an accident,
-/// which is also why the determinism cross-check runs its *second* deployment
-/// over the first 500 000 steps only and then drops it: holding two
-/// 5 000 000-record trails at once would cost 2.3 GiB, and this test should
-/// document the exhaustion rather than perform it. (The first two rows of the
-/// growth table therefore include the mirror; from 750 000 on it is one
-/// trail.) The stepped rows are `Vec` capacity doublings — at 4 250 000
-/// records the trail reallocates and briefly holds ~1.6 GiB.
+/// This run used to be the loudest statement of finding 1 — **1 150.9 MiB
+/// retained for 5 000 000 calls**, 241 B per record, still climbing, no
+/// plateau — and its determinism mirror had to be dropped early, because
+/// holding two 5 000 000-record trails at once cost 2.3 GiB. Twenty-five times
+/// the main run's scale now costs the same bounded window the main run does:
+/// **31.6 MiB from call 500 000 to call 5 000 000, +0.0 MiB per additional
+/// 250 000 calls at every one of the last eighteen checkpoints**, 40.2 s in
+/// debug (8.03 us per admission, flat throughout). The mirror is still dropped
+/// at 500 000 — the comparison is complete by then — but it is now a
+/// convenience rather than a necessity: the first row of the table (64.5 MiB)
+/// is the only one that holds two deployments, and two capped deployments cost
+/// what two unbounded ones never could.
+///
+/// Note the one thing the cap costs here: checkpoints are 250 000 calls apart
+/// and the buffer is 100 000 deep, so the rolling digest cannot be used — the
+/// only history two deployments provably share is the window they both still
+/// hold, and [`window_digest`] is what compares it.
 #[test]
 #[ignore = "5M admissions; run explicitly, see the doc comment for the command"]
 fn endurance_five_million_admissions() {
@@ -1652,18 +1999,16 @@ fn endurance_five_million_admissions() {
     let names = tenant_names();
     let principals: Vec<AuthenticatedActor> = PRINCIPALS
         .iter()
-        .map(|(name, strength)| actor("memorithm", name, *strength))
+        .map(|(name, strength)| actor(FLEET_ORG, name, *strength))
         .collect();
 
     let mut a = fleet_deployment(&names);
     let mut mirror = Some(fleet_deployment(&names));
     let mut ledger = Ledger::new();
-    let mut roll_a = RollingDigest::default();
-    let mut roll_b = RollingDigest::default();
     let mut rng = Rng::new(0x5EED_0001_C0DE_F00D);
     let mut req = request("", "", "", "");
-    let mut sample: Vec<(u64, AuditRecord)> = Vec::new();
-    let mut growth: Vec<(usize, usize)> = Vec::new();
+    let mut sample: Vec<AuditRecord> = Vec::new();
+    let mut growth: Vec<(usize, usize)> = Vec::with_capacity(LONG_CALLS / CHECK_EVERY);
 
     let base = live_bytes();
     let started = Instant::now();
@@ -1692,55 +2037,61 @@ fn endurance_five_million_admissions() {
 
         if seq + 1 == MIRROR_UNTIL {
             let b = mirror.take().expect("mirror still running");
-            roll_a.absorb(a.audit());
-            roll_b.absorb(b.audit());
             assert_eq!(
-                roll_a.hex(),
-                roll_b.hex(),
-                "audit digests diverged over the mirrored prefix"
+                window_digest(&a),
+                window_digest(&b),
+                "audit digests diverged between two identical deployments"
             );
             assert_eq!(a.metrics(), b.metrics(), "metric exports diverged");
-            // The mirror is dropped here, on purpose: see the doc comment.
+            assert_eq!(
+                a.audit_dropped(),
+                b.audit_dropped(),
+                "two identical deployments shed different amounts"
+            );
             drop(b);
         }
 
         if (seq + 1) % CHECK_EVERY == 0 {
             check_invariants(&a, &ledger, &names, seq + 1);
-            roll_a.absorb(a.audit());
             if sample.is_empty() {
-                let first = a.audit().next().expect("at least one record").clone();
-                let later = a
-                    .audit()
-                    .nth(CHECK_EVERY - 1)
-                    .expect("record in range")
-                    .clone();
-                sample.push((first.sequence, first));
-                sample.push((later.sequence, later));
+                let first = a.audit().next().expect("a non-empty journal").clone();
+                let last = a.audit().last().expect("a non-empty journal").clone();
+                sample.push(first);
+                sample.push(last);
             }
-            stable_prefix(&a, &sample, seq + 1);
+            stable_or_dropped(&a, &sample, seq + 1);
             growth.push((seq + 1, live_bytes().saturating_sub(base)));
         }
     }
     let elapsed = started.elapsed();
 
+    // THE REPAIR at 25x the scale: the cap engaged at call 100 000 and held
+    // for the remaining 4 900 000.
     assert_eq!(
         a.audit().count(),
-        LONG_CALLS,
-        "no cap engaged at five million"
+        DEFAULT_AUDIT_CAPACITY,
+        "the cap must hold at five million"
+    );
+    assert_eq!(
+        a.audit_dropped() as usize,
+        LONG_CALLS - DEFAULT_AUDIT_CAPACITY,
+        "and every one of the dropped records must be counted"
     );
     assert_eq!(ledger.tags.len(), 8);
 
     println!(
         "five-million-call endurance run in {elapsed:?} ({:.2} us/admit); \
-         final digest {}",
+         final window digest {} over {} retained records, {} dropped",
         elapsed.as_secs_f64() * 1e6 / LONG_CALLS as f64,
-        roll_a.hex()
+        window_digest(&a),
+        a.audit().count(),
+        a.audit_dropped(),
     );
-    println!("  calls        retained MiB   B/record   MiB per additional 250k");
+    println!("  calls        retained MiB   B/call so far   MiB per additional 250k");
     let mut previous = 0usize;
     for (calls, bytes) in &growth {
         println!(
-            "  {calls:>9}    {:>10.1}   {:>8.0}   {:>10.1}",
+            "  {calls:>9}    {:>10.1}   {:>13.1}   {:>10.1}",
             mib(*bytes),
             *bytes as f64 / *calls as f64,
             mib(bytes.saturating_sub(previous)),
@@ -1748,16 +2099,27 @@ fn endurance_five_million_admissions() {
         previous = *bytes;
     }
 
-    // Growth is linear all the way out: the last quarter of the run costs at
-    // least as much as the first did. Nothing rotates, nothing plateaus.
-    let (_, first_quarter) = growth[LONG_CALLS / CHECK_EVERY / 4 - 1];
+    // Flat all the way out: the last quarter of the run costs nothing the
+    // first quarter did not already pay for. Nothing accumulates.
+    let (_, first_quarter) = growth[growth.len() / 4 - 1];
     let (_, all) = growth[growth.len() - 1];
     assert!(
-        all >= 3 * first_quarter,
-        "expected linear growth to five million: {first_quarter} B at 25%, {all} B at 100%"
+        all <= first_quarter + first_quarter / 8,
+        "expected a plateau to five million: {first_quarter} B at 25%, {all} B at 100%"
     );
     assert!(
-        all >= 64 * LONG_CALLS,
-        "expected >= 64 B retained per record, measured {all} B"
+        all < 64 * LONG_CALLS,
+        "expected the cap to hold five million calls under {} B, measured {all} B",
+        64 * LONG_CALLS
+    );
+    assert!(
+        all <= bounded_heap_ceiling(1),
+        "retained heap must be a function of the caps, not of the call count: \
+         measured {all} B against a ceiling of {} B",
+        bounded_heap_ceiling(1)
+    );
+    assert!(
+        all >= 64 * DEFAULT_AUDIT_CAPACITY,
+        "expected >= 64 B retained per retained record, measured {all} B"
     );
 }

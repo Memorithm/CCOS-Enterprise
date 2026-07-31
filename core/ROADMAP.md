@@ -2,9 +2,10 @@
 
 Prioritized roadmap from the audit. Effort: S/M/L.
 
-> **CCOS_EXTENDED (premium fusion)** is tracked separately: architecture &
-> phasing in [`docs/FUSION_PLAN.md`](docs/FUSION_PLAN.md) (P0–P6 ✅), audit in
-> [`docs/AUDIT_FUSION_2026-07.md`](docs/AUDIT_FUSION_2026-07.md).
+> **CCOS_EXTENDED is archived.** Its plan and audit documents
+> (`docs/FUSION_PLAN.md`, `docs/AUDIT_FUSION_2026-07.md`) are kept as history,
+> not as a roadmap. Three products remain — CCOS Core, CCOS Enterprise, CCOS
+> Research Lab — and they are independent of one another.
 
 ## 🚀 Direction — unbounded working memory (frugality × available RAM)
 

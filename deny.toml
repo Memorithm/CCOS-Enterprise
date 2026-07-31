@@ -3,7 +3,14 @@
 # Enterprise boundary forbids (no premium-crate git sources here, ever).
 
 [graph]
-all-features = true
+# NOT `all-features`. Core carries opt-in Pro features of its own — `octasoma`
+# pulls a premium engine over git — and Enterprise must never enable them
+# (§4.2). Turning every feature on would resolve exactly the graph the product
+# boundary forbids, and then ask this gate to bless it. The gate checks the
+# graph Enterprise actually ships: Core at `default-features = false`, plus the
+# one optional Enterprise feature (`license-verify`), whose `ed25519-dalek`
+# arrives non-optionally through the license server regardless.
+all-features = false
 targets = [
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
@@ -28,15 +35,18 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
-# ccos-core is an external path dependency here (not a workspace member), so
-# `private.ignore` does not reach it — allow the house license explicitly.
+# `private.ignore` only reaches crates marked `publish = false`; neither Core
+# package is, so both house licenses are allowed explicitly. Core is a
+# workspace member now rather than an external path dependency, which changes
+# nothing about the licences themselves — only about which check would
+# otherwise have skipped them.
 exceptions = [
     { name = "ccos-core", allow = ["LicenseRef-TarekZekriti-Dual"] },
+    { name = "ccos-memory-runtime", allow = ["LicenseRef-CheckupAuto-Dual"] },
 ]
 
 [licenses.private]
-# Workspace crates (and the unpublished ccos-core path dependency) carry the
-# repository's source-available/custom commercial terms — reviewed in
+# Workspace crates carry the repository's source-available/custom commercial terms — reviewed in
 # LICENSING.md rather than treated as third-party OSI dependencies.
 ignore = true
 registries = []

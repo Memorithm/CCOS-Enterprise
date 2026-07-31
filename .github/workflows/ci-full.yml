@@ -74,7 +74,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
-      - run: cargo check --workspace --all-features
+      # NOT `--all-features` across the whole workspace. Core is a member now,
+      # and it carries opt-in Pro features of its own — `octasoma` pulls a
+      # premium engine over git. Turning every feature on would build exactly
+      # what §4.2 forbids. Core packages are excluded from *selection*, so they
+      # still build as dependencies with precisely the features Enterprise asks
+      # for (`default-features = false`); only Enterprise's own feature matrix
+      # is swept, which is the one this gate exists to cover.
+      - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
 
   # ── Expansion contract (charter §41): authentication · RBAC · tenant
   # isolation · cross-tenant leakage · encryption · key rotation · quota ·

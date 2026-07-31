@@ -22,11 +22,41 @@ The product boundary below is unchanged, and is now enforced on the
 **dependency graph** rather than by repository separation — a stronger check,
 since a crate cannot satisfy it merely by living somewhere else.
 
+### How an improvement travels between the three products
+
+Because Core was brought in with `git subtree` and not copied, the sharing is
+a command rather than a manual port:
+
+```sh
+git subtree pull --prefix=core <core-remote> main   # take an upstream Core improvement
+git subtree push --prefix=core <core-remote> <branch>  # send one back upstream
+```
+
+This is what makes the three products independent *and* mutually beneficial at
+the same time. Enterprise's kernel can change without asking upstream Core's
+permission, and upstream Core can change without breaking Enterprise, because
+neither is resolving the other at build time. An improvement crosses when
+somebody decides it should — which is the point, not a limitation. The cost is
+the honest one: a subtree that has diverged makes the next pull a merge, and
+that merge is where the decision gets made.
+
 ## Product boundary
 
+There are three products, and they are independent of one another: **CCOS
+Core**, **CCOS Enterprise**, **CCOS Research Lab**. An improvement made in one
+is carried to the others deliberately; a fundamental change to one does not
+reach them. (`CCOS` and `CCOS_EXTENDED` are archived and are not part of the
+lineup — where their names survive in a source comment it is provenance for
+code that came from them, not a live dependency.)
+
 - **Never** contains or depends on: `ccos-rsi`, `forge-core`, `ccos-forge`,
-  recursive self-improvement, autonomous patch promotion, generated-code
-  execution, self-modification, or CCOS Research Lab.
+  `octasoma`, recursive self-improvement, autonomous patch promotion,
+  generated-code execution, self-modification, or CCOS Research Lab.
+- Core ships opt-in Pro features of its own that reach premium engines
+  (`octasoma` pulls one over git). Enterprise takes Core at
+  `default-features = false` and **CI never sweeps Core's feature matrix** —
+  a `--all-features` build across the workspace would resolve precisely what
+  this boundary forbids. Core's own suite still runs, at default features.
 - The gateway (`ccos-enterprise-gateway`) is an **allowlist**: a tool traverses
   only if it is in the exposed catalogue (`memory.*`, `context.*`, `policy.*`,
   `audit.*`, `system.health`; `ccos.*` accepted as an alias). Research

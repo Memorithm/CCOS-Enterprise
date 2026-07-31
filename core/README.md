@@ -27,11 +27,22 @@ rails.
 
 ---
 
-## CCOS_EXTENDED — the premium fused edition
+## Optional Pro engines — read this before enabling one
 
-This repository is **CCOS_EXTENDED**: CCOS (the hub, unchanged by default) fused
-with the org's three other engines, each vendored as a workspace crate and
-reachable only behind an opt-in cargo feature **plus** the offline Pro license:
+> **Correction.** This section used to open "This repository is
+> **CCOS_EXTENDED**", and described four engines "each vendored as a workspace
+> crate". Neither is true of this tree: `CCOS_EXTENDED` is **archived**, and no
+> SLHAv2, OctaSoma, CERVO/RSI or scirust source is present here. What survives
+> is the *feature wiring* — `octasoma` is an optional dependency fetched over
+> git — so the table below documents what a feature would pull in, not what
+> ships.
+>
+> **In CCOS Enterprise, none of these may be enabled** (product boundary
+> §4.2). Enterprise depends on this crate at `default-features = false`, and
+> its CI deliberately never sweeps this feature matrix.
+
+The engines below are reachable only behind an opt-in cargo feature **plus**
+the offline Pro license:
 
 | Fused source | Crate(s) | Feature | What it adds |
 |---|---|---|---|

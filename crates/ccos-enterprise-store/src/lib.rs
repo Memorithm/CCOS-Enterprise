@@ -237,31 +237,62 @@ impl Store {
     /// that is the whole contract. Records must continue this store's
     /// sequence exactly — a caller that skips or repeats one is refused rather
     /// than silently writing a journal that cannot be replayed.
+    ///
+    /// **A refused batch writes nothing.** The whole batch is validated and
+    /// serialized before a single byte reaches the writer, because the naive
+    /// loop — check, write, check, write — has a nasty failure: a batch whose
+    /// second record is out of order would already have buffered the first,
+    /// and returning `Err` without flushing does not unbuffer it. The next
+    /// successful append would then flush that orphan, and a caller who was
+    /// told "nothing was written" and retried the batch would duplicate it.
+    /// Validate-then-write makes the error mean what it says.
     pub fn append(&mut self, records: &[AuditRecord]) -> Result<(), StoreError> {
         let path = self.journal_path();
+
+        // Phase 1: nothing is written until the entire batch is known good.
+        let mut expected = self.next_sequence;
+        let mut buffer: Vec<u8> = Vec::new();
         for record in records {
-            if record.sequence != self.next_sequence {
+            if record.sequence != expected {
                 return Err(StoreError::JournalDiscontinuity {
                     path,
                     line: 0,
-                    expected: self.next_sequence,
+                    expected,
                     found: record.sequence,
                 });
             }
-            let mut line = serde_json::to_vec(record).map_err(|e| StoreError::JournalCorrupt {
+            let line = serde_json::to_vec(record).map_err(|e| StoreError::JournalCorrupt {
                 path: path.clone(),
                 line: 0,
                 detail: format!("cannot be serialized: {e}"),
             })?;
-            line.push(b'\n');
-            self.journal.write_all(&line).map_err(io(&path))?;
-            self.next_sequence += 1;
+            // A record that serialized with an embedded newline would split
+            // into two lines and corrupt the framing of every later read.
+            // `serde_json` escapes newlines, so this cannot happen — which is
+            // exactly why it is worth asserting rather than assuming.
+            if line.contains(&b'\n') {
+                return Err(StoreError::JournalCorrupt {
+                    path,
+                    line: 0,
+                    detail: "a serialized record contains a raw newline, which \
+                             would break the one-record-per-line framing"
+                        .to_string(),
+                });
+            }
+            buffer.extend_from_slice(&line);
+            buffer.push(b'\n');
+            expected += 1;
         }
+
+        // Phase 2: one write, one sync, then the sequence advances.
+        self.journal.write_all(&buffer).map_err(io(&path))?;
         self.journal.flush().map_err(io(&path))?;
         // `sync_data` rather than `sync_all`: the file's length is data, and
         // an append never changes anything else in its metadata that a replay
         // depends on.
-        self.journal.get_ref().sync_data().map_err(io(&path))
+        self.journal.get_ref().sync_data().map_err(io(&path))?;
+        self.next_sequence = expected;
+        Ok(())
     }
 
     /// Read the durable state back.
@@ -324,11 +355,27 @@ fn read_journal(path: &Path) -> Result<Option<(Vec<AuditRecord>, usize)>, StoreE
         None => (&bytes[..0], bytes.len()),
     };
 
+    // `committed` ends with the final newline, so splitting on it always
+    // yields one trailing empty element. That one is an artefact of the split
+    // and is dropped. Every *other* empty element is a blank line in the
+    // middle of the file, which an append cannot produce — so it is corruption,
+    // not whitespace to be tolerant of. Skipping blank lines silently is how a
+    // hand-edited journal reads as valid.
+    let mut lines: Vec<&[u8]> = committed.split(|b| *b == b'\n').collect();
+    let trailing = lines.pop();
+    debug_assert!(matches!(trailing, None | Some(&[])));
+
     let mut records: Vec<AuditRecord> = Vec::new();
     let mut expected = 0u64;
-    for (index, line) in committed.split(|b| *b == b'\n').enumerate() {
+    for (index, line) in lines.into_iter().enumerate() {
         if line.is_empty() {
-            continue;
+            return Err(StoreError::JournalCorrupt {
+                path: path.to_path_buf(),
+                line: index + 1,
+                detail: "blank line: an append never writes one, so the file \
+                         has been edited or damaged"
+                    .to_string(),
+            });
         }
         let record: AuditRecord =
             serde_json::from_slice(line).map_err(|e| StoreError::JournalCorrupt {
@@ -698,6 +745,155 @@ mod tests {
             "…but the trail must start at the beginning, not at the checkpoint"
         );
         assert_eq!(restored.metrics(), d.metrics(), "and so must the counters");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refused batch must write nothing at all — not "nothing visible yet".
+    ///
+    /// The first version of `append` checked and wrote record by record, so a
+    /// batch whose second record was out of order had already buffered the
+    /// first. Returning `Err` did not unbuffer it, the next successful append
+    /// flushed the orphan, and a caller who was told nothing was written and
+    /// retried the batch duplicated its first record. This pins the repair on
+    /// the far side of a real reopen, which is the only place the buffer can
+    /// no longer hide anything.
+    #[test]
+    fn a_refused_batch_leaves_no_orphan_behind_it() {
+        let dir = scratch("orphan-batch");
+        let mut store = Store::open(&dir).expect("open");
+        store
+            .save_snapshot(&two_tenant_deployment().snapshot())
+            .expect("snapshot");
+
+        let good = AuditRecord {
+            sequence: 0,
+            request_id: "r-0".into(),
+            tenant: "acme".into(),
+            actor: "alice".into(),
+            tool: "memory.ingest".into(),
+            cost: 1,
+            outcome: Outcome::Forwarded,
+        };
+        let mut skips = good.clone();
+        skips.sequence = 7; // 1 is expected after `good`
+        skips.request_id = "r-7".into();
+
+        let err = store
+            .append(&[good.clone(), skips])
+            .expect_err("the batch skips a sequence");
+        assert!(
+            matches!(
+                err,
+                StoreError::JournalDiscontinuity {
+                    expected: 1,
+                    found: 7,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert_eq!(
+            store.next_sequence(),
+            0,
+            "a refused batch must not advance the sequence"
+        );
+
+        // The store is still usable, and the retried batch is not duplicated.
+        store.append(&[good]).expect("the corrected batch");
+        drop(store);
+
+        let reopened = Store::open(&dir).expect("reopen");
+        let loaded = reopened.load().expect("load").expect("store");
+        assert_eq!(
+            loaded.journal.len(),
+            1,
+            "exactly one record survived — the refused batch wrote nothing"
+        );
+        assert_eq!(loaded.journal[0].request_id, "r-0");
+        assert_eq!(reopened.next_sequence(), 1);
+        let text = std::fs::read_to_string(dir.join(JOURNAL_FILE)).expect("read");
+        assert_eq!(text.lines().count(), 1, "one line on disk: {text:?}");
+        assert!(!text.contains("r-7"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A blank line in the middle of the journal is damage, not whitespace.
+    /// The first version skipped empty lines silently, so a hand-edited file
+    /// read as valid.
+    #[test]
+    fn a_blank_line_in_the_middle_is_corruption_not_whitespace() {
+        let dir = scratch("blank");
+        let mut store = Store::open(&dir).expect("open");
+        let mut d = two_tenant_deployment();
+        store.save_snapshot(&d.snapshot()).expect("snapshot");
+        run(
+            &mut d,
+            &mut store,
+            &[("acme", "r-1", 10), ("acme", "r-2", 20)],
+        );
+        drop(store);
+
+        let journal = dir.join(JOURNAL_FILE);
+        let text = std::fs::read_to_string(&journal).expect("read");
+        let lines: Vec<&str> = text.lines().collect();
+        std::fs::write(&journal, format!("{}\n\n{}\n", lines[0], lines[1])).expect("write");
+
+        let err = match Store::open(&dir) {
+            Ok(_) => panic!("a blank line must not read as a valid journal"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, StoreError::JournalCorrupt { line: 2, .. }),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The framing assumption, asserted rather than assumed: a refusal message
+    /// carrying a raw newline would split one record across two lines and
+    /// desynchronise every later read. `serde_json` escapes it — this is the
+    /// test that notices if that ever stops being true.
+    #[test]
+    fn a_hostile_refusal_message_cannot_break_the_line_framing() {
+        let dir = scratch("framing");
+        let mut store = Store::open(&dir).expect("open");
+        let d = two_tenant_deployment();
+        store.save_snapshot(&d.snapshot()).expect("snapshot");
+
+        let hostile = AuditRecord {
+            sequence: 0,
+            request_id: "r\n{\"sequence\":99}\n".into(),
+            tenant: "acme".into(),
+            actor: "a\"lice\\".into(),
+            tool: "memory.\u{202e}recall\u{0000}".into(),
+            cost: 0,
+            outcome: Outcome::Refused(Refusal::OutsideBoundary(
+                "line one\nline two\r\n\"quoted\"".into(),
+            )),
+        };
+        store
+            .append(std::slice::from_ref(&hostile))
+            .expect("append");
+        drop(store);
+
+        let text = std::fs::read_to_string(dir.join(JOURNAL_FILE)).expect("read");
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "the record spread across more than one line: {text:?}"
+        );
+
+        let store = Store::open(&dir).expect("reopen");
+        let loaded = store.load().expect("load").expect("store");
+        assert_eq!(
+            loaded.journal.len(),
+            1,
+            "the injected record did not appear"
+        );
+        assert_eq!(
+            loaded.journal[0], hostile,
+            "a hostile record must round-trip byte for byte"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

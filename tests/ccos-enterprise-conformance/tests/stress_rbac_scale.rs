@@ -55,22 +55,32 @@
 //!
 //! ## What is still BROKEN
 //!
-//! 2. **`add_role` silently REPLACES a same-named role**, rewriting the grant
-//!    of every actor already holding it — downward (silent mass revocation)
-//!    and upward (silent mass escalation). It returns `()`, so a caller
-//!    cannot even detect the collision, and `Deployment::add_role` journals
-//!    nothing: escalating every `reader` to `policy.admin` leaves an empty
-//!    audit trail, and no `ccos_enterprise_admin::JUSTIFICATION_REQUIRED`
-//!    entry covers role mutation.
-//!    → [`add_role_silently_replaces_and_rewrites_every_holders_grant`]
+//! 2. **`add_role` silently REPLACED a same-named role** — the *replacement*
+//!    is now repaired, the *silence* is not. It rewrote the grant of every
+//!    actor already holding it, downward as a mass revocation and upward as a
+//!    mass escalation, and returned `()` so no caller could detect the
+//!    collision. `add_role` now returns `bool` and refuses a name already
+//!    taken; changing a live role is `redefine_role`, named for what it does
+//!    and reporting what it hit, so a mass privilege change is no longer one
+//!    typo away from a provisioning script.
+//!
+//!    **Still broken**: role mutation journals nothing, and no
+//!    `ccos_enterprise_admin::JUSTIFICATION_REQUIRED` entry covers it. Layer 6
+//!    now demands a reason for administrative *tool calls*, which makes this
+//!    gap sharper rather than smaller — the call must be justified, and the
+//!    role edit granting the right to make it need not be.
+//!    → [`add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act`],
+//!    [`redefining_a_role_escalates_every_holder_with_an_empty_audit_trail`]
 //!
 //! 3. **`RoleBook` is unbounded in every dimension.** No cap on roles, on
 //!    actors, on roles-per-actor, or on name length — while the sibling
 //!    `CounterRegistry` caps itself at `MAX_SERIES = 4096` precisely so "a
 //!    label explosion can never exhaust memory". One actor absorbs 500 000
 //!    roles without a single refusal (246 950 557 B, 493 B per role +
-//!    assignment), and 500 000 distinct principals cost 195 980 545 B — none
-//!    of which can ever be removed, since no removal API exists.
+//!    assignment), and 500 000 distinct principals cost 195 980 545 B. They
+//!    can at least be *removed* now (defect 6), and the reclaim is measured —
+//!    but nothing stops them being created in the first place, which is the
+//!    half that matters against an admin API an attacker can drive.
 //!
 //!    Worse than the memory: `allows()` is an O(assignments) scan that a
 //!    denied check cannot short-circuit, so after that one admin burst
@@ -98,18 +108,25 @@
 //!    No document promises otherwise — the defect is that none says so either.
 //!    → [`role_grants_are_deployment_global_not_tenant_scoped`]
 //!
-//! 6. **No de-provisioning path exists.** There is no `unassign`, `revoke`,
-//!    `remove_role` or `remove_actor`. Once assigned, an actor holds a role
-//!    for the lifetime of the process; the only lever is redefining the role,
-//!    which hits every holder (defect 2).
-//!    → [`a_grant_can_never_be_withdrawn_from_a_single_actor`]
+//! ## What was BROKEN and is now REPAIRED
 //!
-//! 7. **Empty strings are valid principals and valid roles** — in `RoleBook`.
-//!    `""` still names a grantable role and a grantable actor. The composed
-//!    path no longer *reaches* it: `MalformedRequest` refuses an empty
-//!    `actor`, `tenant` or `request_id` before any lookup. Containment one
-//!    layer up, not a fix at the source.
-//!    → [`the_empty_string_is_a_grantable_role_and_a_grantable_principal`]
+//! 6. **No de-provisioning path existed.** There was no `unassign`, `revoke`,
+//!    `remove_role` or `remove_actor`, so an actor held a role for the
+//!    lifetime of the process and offboarding one agent meant de-provisioning
+//!    every colleague who shared its role. Worse, it did not stick: restoring
+//!    the colleagues restored the departed actor, because the assignment had
+//!    never been removable. All three exist now, `remove_role` purges the
+//!    grants with it so a re-created name grants nobody, and the reclaim is
+//!    measured rather than assumed.
+//!    → [`a_grant_can_be_withdrawn_from_one_actor_without_touching_the_others`]
+//!
+//! 7. **Empty strings were valid principals and valid roles.** `""` named a
+//!    grantable role and a grantable actor. `RoleBook` now refuses to create
+//!    or grant it, and `decide` still refuses an empty `actor`, `tenant` or
+//!    `request_id` as `MalformedRequest` before any lookup. Two independent
+//!    defences, both asserted, because either alone would be a single point
+//!    of failure.
+//!    → [`the_empty_string_is_neither_a_grantable_role_nor_a_grantable_principal`]
 //!
 //! Run the whole file:
 //! `cargo test -p ccos-enterprise-conformance --test stress_rbac_scale`
@@ -484,9 +501,15 @@ fn rolebook_has_no_cap_one_actor_absorbs_half_a_million_roles() {
     );
 }
 
-/// The other half of the same vector: distinct *actors* are uncapped too, and
-/// an actor entry is created by the first successful `assign` and never
-/// removed. 500 000 principals, none of whom can ever be deleted.
+/// The other half of the same vector: distinct *actors* are uncapped. 500 000
+/// principals, at ~391 B each.
+///
+/// The "and none can ever be removed" half is **repaired** — `remove_actor`
+/// and `unassign` exist now, and the test drains a sample to prove the memory
+/// is genuinely reclaimable rather than merely hidden. The *cap* is still
+/// missing, which is the part that matters for an unauthenticated flood: an
+/// admin API that can assign can still fill memory faster than an operator
+/// can drain it.
 #[test]
 fn rolebook_has_no_cap_on_distinct_actors_and_none_can_be_removed() {
     let _guard = serialized();
@@ -516,12 +539,23 @@ fn rolebook_has_no_cap_on_distinct_actors_and_none_can_be_removed() {
         assert!(book.allows(&format!("ghost-{i:07}"), &perm("memory.read")));
     }
 
-    // The only lever an operator has is redefining the shared role, which
-    // de-provisions all 500 000 at once — see
-    // `a_grant_can_never_be_withdrawn_from_a_single_actor`.
-    book.add_role(role("reader", &[]));
+    // Precise removal now exists: one principal, without touching the rest.
+    assert!(book.remove_actor("ghost-0000000"));
     assert!(!book.allows("ghost-0000000", &perm("memory.read")));
+    assert!(
+        book.allows("ghost-0000001", &perm("memory.read")),
+        "removing one principal must not disturb its neighbours"
+    );
+
+    // And the wholesale lever still exists, deliberately named: removing the
+    // role purges all 500 000 grants with it, and the memory comes back.
+    assert!(book.remove_role("reader"));
     assert!(!book.allows("ghost-0499999", &perm("memory.read")));
+    let after = live_bytes().saturating_sub(before);
+    assert!(
+        after < retained / 4,
+        "removal must actually reclaim: {retained} B before, {after} B after"
+    );
 }
 
 /// **FINDING (exhaustion-vector).** `assign` stores a full `String` copy of
@@ -579,52 +613,76 @@ fn assignment_storage_is_quadratic_in_admin_calls() {
 // 4. Duplicate role names: silent replacement
 // ─────────────────────────────────────────────────────────────────────────
 
-/// **FINDING (bug / spec-violation).** `add_role` is `insert`, keyed on
-/// `role.name`. A second role with the same name REPLACES the first and
-/// instantly rewrites the effective grant of every actor already holding it:
+/// **FINDING (bug / spec-violation) — REPAIRED.** `add_role` was `insert`,
+/// keyed on `role.name`. A second role with the same name REPLACED the first
+/// and instantly rewrote the effective grant of every actor already holding
+/// it — downward as a silent mass **revocation** no caller could detect,
+/// upward as a silent mass **escalation** every holder gained retroactively.
+/// It returned `()`, so the collision was invisible: the signature could not
+/// report it.
 ///
-/// * downward — silent mass **revocation** (an outage no caller can detect);
-/// * upward — silent mass **escalation** (every holder gains the new
-///   permissions retroactively).
+/// `add_role` now returns `bool` and refuses a name already taken, changing
+/// nothing. Redefinition is still reachable — a role's permission set has to
+/// be changeable — but only through
+/// [`RoleBook::redefine_role`](ccos_enterprise_rbac::RoleBook::redefine_role),
+/// which is named for what it does and reports what it hit. A mass privilege
+/// change can no longer be reached by a typo in a provisioning script.
 ///
-/// `add_role` returns `()`, so the collision is invisible to the caller; the
-/// signature cannot report it. Nothing journals it either — see
+/// What is **not** fixed, and is still asserted below: redefinition journals
+/// nothing. See
 /// [`redefining_a_role_escalates_every_holder_with_an_empty_audit_trail`].
 #[test]
-fn add_role_silently_replaces_and_rewrites_every_holders_grant() {
+fn add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act() {
     let _guard = serialized();
     let mut book = RoleBook::default();
 
-    book.add_role(role("editor", &["memory.read", "memory.write"]));
+    assert!(book.add_role(role("editor", &["memory.read", "memory.write"])));
     assert!(book.assign("alice", "editor"));
     assert!(book.assign("bob", "editor"));
     assert!(book.allows("alice", &perm("memory.write")));
     assert!(book.allows("bob", &perm("memory.write")));
 
-    // Re-adding under the same name is accepted, unremarked, and REPLACES —
-    // it does not merge. Both holders silently lose `memory.write`.
-    book.add_role(role("editor", &["memory.read"]));
+    // Re-adding under the same name is refused and changes nothing. The
+    // return value is the signal the old signature could not carry.
+    assert!(
+        !book.add_role(role("editor", &["memory.read"])),
+        "a live role was silently replaced"
+    );
+    assert!(
+        book.allows("alice", &perm("memory.write")),
+        "a refused add_role revoked a live grant anyway"
+    );
+    assert!(book.allows("bob", &perm("memory.write")));
+
+    // The deliberate lever still works, and still hits every holder at once —
+    // which is what a role *is*, and why it needs its own name.
+    assert!(
+        book.redefine_role(role("editor", &["memory.read"])),
+        "redefine_role must report that it replaced something"
+    );
+    assert!(!book.allows("alice", &perm("memory.write")));
+    assert!(!book.allows("bob", &perm("memory.write")));
     assert!(book.allows("alice", &perm("memory.read")));
-    assert!(
-        !book.allows("alice", &perm("memory.write")),
-        "DEFECT: re-adding a narrower role silently revoked a live grant"
-    );
-    assert!(
-        !book.allows("bob", &perm("memory.write")),
-        "…for every holder at once, with no signal to anyone"
-    );
+
+    // Redefining a name that does not exist reports `false` and defines it,
+    // so a caller can tell "changed an existing role" from "created one".
+    assert!(!book.redefine_role(role("brand-new", &["x"])));
+    assert!(book.has_role("brand-new"));
+
     assert_eq!(
         stored_role_names(&book).len(),
-        1,
-        "the first definition is gone, not shadowed"
+        2,
+        "editor plus brand-new; nothing is shadowed"
     );
 
-    // The same lever runs the other way: one call, and every existing holder
-    // is an administrator. No re-assignment is needed.
-    book.add_role(role("editor", &["memory.read", "policy.admin"]));
+    // The lever runs the other way too: one call, and every existing holder
+    // is an administrator. No re-assignment is needed. That is not a defect —
+    // it is what a role means — but it is why the call had to stop being
+    // reachable by accident.
+    assert!(book.redefine_role(role("editor", &["memory.read", "policy.admin"])));
     assert!(
         book.allows("alice", &perm("policy.admin")),
-        "DEFECT: redefinition retroactively escalates every holder"
+        "redefinition must reach every holder, immediately"
     );
     assert!(book.allows("bob", &perm("policy.admin")));
     assert!(
@@ -632,31 +690,47 @@ fn add_role_silently_replaces_and_rewrites_every_holders_grant() {
         "and simultaneously drops what the previous definition granted"
     );
 
-    // Emptying a role is the closest thing to deletion, and it neither
-    // removes the role nor the assignments — the grant just becomes nothing.
-    book.add_role(role("editor", &[]));
+    // Emptying a role used to be the closest thing to deletion, and it left
+    // both the role and its assignments behind — so refilling it re-granted
+    // everyone with no re-assignment step. `remove_role` is the real thing
+    // now, and it purges the grants: re-creating the name later grants nobody.
+    assert!(book.redefine_role(role("editor", &[])));
     assert!(!book.allows("alice", &perm("memory.read")));
-    assert_eq!(
-        stored_role_names(&book),
-        BTreeSet::from(["editor".to_string()])
-    );
     assert_eq!(
         stored_actors(&book),
         BTreeSet::from(["alice".to_string(), "bob".to_string()]),
-        "assignments to an emptied role are retained forever"
+        "emptying is not removing: the assignments are still there"
+    );
+    assert!(book.redefine_role(role("editor", &["memory.read"])));
+    assert!(
+        book.allows("alice", &perm("memory.read")),
+        "…so refilling re-grants"
     );
 
-    // Refilling it re-grants everyone, still with no re-assignment step.
-    book.add_role(role("editor", &["memory.read"]));
-    assert!(book.allows("alice", &perm("memory.read")));
-    assert!(book.allows("bob", &perm("memory.read")));
+    // Removal, by contrast, is final.
+    assert!(book.remove_role("editor"));
+    assert!(!book.has_role("editor"));
+    assert!(stored_actors(&book).is_empty(), "the grants went with it");
+    assert!(book.add_role(role("editor", &["memory.read", "policy.admin"])));
+    assert!(
+        !book.allows("alice", &perm("memory.read")),
+        "re-creating a removed role must not resurrect its old holders"
+    );
+    assert!(!book.allows("bob", &perm("policy.admin")));
+    assert!(!book.remove_role("editor-that-never-was"));
 }
 
-/// The same defect through the product path, with the audit trail that is
-/// supposed to catch it: `Deployment::add_role` escalates every `reader` to
-/// `policy.admin` and journals **nothing**. `ccos_enterprise_admin`'s
-/// `JUSTIFICATION_REQUIRED` list does not cover role mutation either, so
-/// there is no surface on which this act could have demanded a reason.
+/// The half that is **still open**, through the product path: redefinition is
+/// now a deliberate act with its own name, but it journals **nothing**.
+/// `Deployment::redefine_role` escalates every `reader` to `policy.admin` and
+/// leaves an empty audit trail, and `ccos_enterprise_admin`'s
+/// `JUSTIFICATION_REQUIRED` list does not cover role mutation, so there is
+/// still no surface on which this act demands a reason.
+///
+/// Layer 6 now exists in the composed path for *tool calls*
+/// (`Deployment::require_justification`), which makes the gap sharper rather
+/// than smaller: an administrative tool call must be justified, and the role
+/// edit that grants somebody the right to make it need not be.
 #[test]
 fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
     let _guard = serialized();
@@ -680,7 +754,7 @@ fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
     let audit_before = d.audit().count();
 
     // One call. No justification, no actor, no target, no record.
-    d.add_role("reader", &["memory.read", "policy.admin"]);
+    assert!(d.redefine_role("reader", &["memory.read", "policy.admin"]));
     assert_eq!(
         d.audit().count(),
         audit_before,
@@ -727,20 +801,19 @@ fn redefining_a_role_escalates_every_holder_with_an_empty_audit_trail() {
 // 5. Adversarial names
 // ─────────────────────────────────────────────────────────────────────────
 
-/// **FINDING (robustness) — still true in `RoleBook`, now contained in the
-/// composed path.** `""` is a valid role name and a valid actor name; nothing
-/// in `RoleBook` rejects either, and the second half of this test used to show
-/// the consequence: a `GatewayRequest` whose `actor` field was empty reached a
-/// governed tool and was billed, once `""` held a role.
+/// **FINDING (robustness) — REPAIRED at the source, and still contained one
+/// layer up.** `""` was a valid role name and a valid actor name; nothing in
+/// `RoleBook` rejected either, and once `""` held a role a `GatewayRequest`
+/// whose `actor` field was empty reached a governed tool and was billed.
 ///
-/// `decide` now rejects an empty (or over-long) `tenant`, `actor` or
-/// `request_id` with `MalformedRequest` before any lookup, so the nameless
-/// principal can no longer be *addressed* over the wire. The underlying
-/// `RoleBook` hazard is unchanged and is still asserted here: the containment
-/// is one layer up, and a future caller that reaches `RoleBook` by another
-/// route inherits the original behaviour.
+/// Two independent defences now, and both are asserted because either alone
+/// would be a single point of failure. `RoleBook::add_role` and
+/// `RoleBook::assign` refuse the empty string, so the nameless principal
+/// cannot be *created*; and `decide` rejects an empty `tenant`, `actor` or
+/// `request_id` as `MalformedRequest` before any lookup, so it could not be
+/// *addressed* even if some other route created it.
 #[test]
-fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
+fn the_empty_string_is_neither_a_grantable_role_nor_a_grantable_principal() {
     let _guard = serialized();
     let mut book = RoleBook::default();
 
@@ -748,28 +821,25 @@ fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
     assert!(!book.assign("alice", ""), "unknown role, even empty");
     assert!(!book.assign("", ""), "…for the empty actor too");
 
-    // …but `Role::default()` has an empty name, so `add_role(Role::default())`
-    // creates it, and from then on it grants like any other role.
-    book.add_role(Role::default());
-    assert!(book.assign("alice", ""), "DEFECT: '' is a grantable role");
-    assert!(
-        !book.allows("alice", &perm("anything")),
-        "…granting nothing yet"
-    );
+    // `Role::default()` has an empty name, and creating it is now refused —
+    // which is what closes the whole family, because every later step
+    // depended on the nameless role existing.
+    assert!(!book.add_role(Role::default()), "'' must not be a role");
+    assert!(!book.redefine_role(role("", &["policy.admin"])));
+    assert!(!book.has_role(""));
+    assert!(!book.assign("alice", ""), "'' is still not grantable");
+    assert!(!book.allows("alice", &perm("policy.admin")));
 
-    book.add_role(role("", &["policy.admin"]));
-    assert!(
-        book.allows("alice", &perm("policy.admin")),
-        "DEFECT: the nameless role now confers administration"
-    );
-
-    // The empty *actor* is a principal in its own right.
-    book.add_role(role("reader", &["memory.read"]));
-    assert!(book.assign("", "reader"), "DEFECT: '' is a grantable actor");
-    assert!(book.allows("", &perm("memory.read")));
+    // The empty *actor* is refused too, even for a role that does exist.
+    assert!(book.add_role(role("reader", &["memory.read"])));
+    assert!(!book.assign("", "reader"), "'' must not be a principal");
+    assert!(!book.allows("", &perm("memory.read")));
+    // A real actor is unaffected, and matching is still exact.
+    assert!(book.assign("alice", "reader"));
+    assert!(book.allows("alice", &perm("memory.read")));
     assert!(
         !book.allows(" ", &perm("memory.read")),
-        "at least it is exact"
+        "a space is not a name either, and is not alice"
     );
 
     // …but the composed path no longer honours it. The empty actor is refused
@@ -791,7 +861,12 @@ fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
         Some(&Refusal::MalformedRequest("actor".into())),
         "the empty actor is not a principal the gateway will address"
     );
-    assert!(d.assign("", "reader"), "the grant itself is still accepted");
+    // The grant is refused too now — that is the second defence, at the
+    // source rather than at the wire.
+    assert!(
+        !d.assign("", "reader"),
+        "the nameless principal must not be grantable"
+    );
     let anon = request("acme", "", "memory.recall", "r-anon-2");
     assert_eq!(
         d.admit(Call {
@@ -804,7 +879,7 @@ fn the_empty_string_is_a_grantable_role_and_a_grantable_principal() {
         })
         .refusal(),
         Some(&Refusal::MalformedRequest("actor".into())),
-        "granting '' a role does not make it reachable"
+        "the empty actor is refused at the wire regardless"
     );
     assert_eq!(d.spent("acme"), Some(0), "and nothing was billed");
 
@@ -1041,8 +1116,8 @@ fn many_roles_confer_exactly_the_union_and_nothing_adjacent() {
 fn re_adding_a_narrower_role_shrinks_the_grant_to_the_remaining_union() {
     let _guard = serialized();
     let mut book = RoleBook::default();
-    book.add_role(role("a", &["read", "write", "admin"]));
-    book.add_role(role("b", &["read"]));
+    assert!(book.add_role(role("a", &["read", "write", "admin"])));
+    assert!(book.add_role(role("b", &["read"])));
     assert!(book.assign("dual", "a"));
     assert!(book.assign("dual", "b"));
     assert!(book.assign("solo", "a"));
@@ -1052,8 +1127,9 @@ fn re_adding_a_narrower_role_shrinks_the_grant_to_the_remaining_union() {
         assert!(book.allows("solo", &perm(p)));
     }
 
-    // Shrink `a` to nothing.
-    book.add_role(role("a", &[]));
+    // Shrink `a` to nothing — through the deliberate lever, which is now the
+    // only way to reach this at all.
+    assert!(book.redefine_role(role("a", &[])));
     // `dual` keeps exactly what `b` still grants…
     assert!(book.allows("dual", &perm("read")), "b still grants read");
     assert!(!book.allows("dual", &perm("write")));
@@ -1071,44 +1147,63 @@ fn re_adding_a_narrower_role_shrinks_the_grant_to_the_remaining_union() {
     assert!(!book.allows("solo", &perm("read")));
 }
 
-/// **FINDING (missing-behaviour).** There is no `unassign`, `revoke`,
-/// `remove_role` or `remove_actor` anywhere in the RBAC API, and none in
-/// `Deployment` either. A single actor's grant can never be withdrawn: the
-/// only lever available to an operator is redefining the role, which hits
-/// every other holder too. Offboarding one compromised agent therefore means
-/// de-provisioning every colleague who shares its role.
+/// **FINDING (missing-behaviour) — REPAIRED.** There was no `unassign`,
+/// `revoke`, `remove_role` or `remove_actor` anywhere in the RBAC API, and
+/// none in `Deployment` either. A single actor's grant could never be
+/// withdrawn: the only lever was redefining the role, which hit every other
+/// holder too. Offboarding one compromised agent meant de-provisioning every
+/// colleague who shared its role — and, worse, the offboarding did not
+/// survive: restoring the colleagues restored the departed actor, because the
+/// assignment had never been removable in the first place.
+///
+/// The API now has `unassign`, `remove_actor` and `remove_role`, on both
+/// `RoleBook` and `Deployment`. This test keeps the offboarding scenario and
+/// asserts it does what an operator means by it.
 #[test]
-fn a_grant_can_never_be_withdrawn_from_a_single_actor() {
+fn a_grant_can_be_withdrawn_from_one_actor_without_touching_the_others() {
     let _guard = serialized();
     let mut book = RoleBook::default();
-    book.add_role(role("oncall", &["policy.admin"]));
+    assert!(book.add_role(role("oncall", &["policy.admin"])));
     assert!(book.assign("leaver", "oncall"));
     assert!(book.assign("stayer", "oncall"));
 
-    // The only two things an operator can do, and what they cost:
-    //
-    // (a) re-assign — idempotent, never a removal.
-    assert!(book.assign("leaver", "oncall"));
-    assert!(book.allows("leaver", &perm("policy.admin")));
-
-    // (b) redefine the role — collateral damage to every holder.
-    book.add_role(role("oncall", &[]));
+    // Offboarding one actor: precise, and reported.
+    assert!(book.unassign("leaver", "oncall"), "the grant existed");
     assert!(
         !book.allows("leaver", &perm("policy.admin")),
-        "the leaver is finally out…"
+        "the leaver is out"
     );
     assert!(
-        !book.allows("stayer", &perm("policy.admin")),
-        "DEFECT: …and so is everyone else who shared the role"
+        book.allows("stayer", &perm("policy.admin")),
+        "…and the colleague is untouched"
     );
+    assert!(
+        !book.unassign("leaver", "oncall"),
+        "withdrawing twice reports that there was nothing to withdraw"
+    );
+    assert_eq!(book.roles_of("leaver"), Vec::<&str>::new());
+    assert_eq!(book.roles_of("stayer"), vec!["oncall"]);
 
-    // Restoring the colleague restores the departed actor too, because the
-    // assignment was never removable in the first place.
-    book.add_role(role("oncall", &["policy.admin"]));
+    // The offboarding survives unrelated repairs — this is the half that used
+    // to fail. Redefining the role for the remaining holder must not bring the
+    // departed actor back.
+    assert!(book.redefine_role(role("oncall", &["policy.admin", "memory.read"])));
     assert!(
-        book.allows("leaver", &perm("policy.admin")),
-        "DEFECT: a de-provisioned actor is re-granted by an unrelated repair"
+        !book.allows("leaver", &perm("policy.admin")),
+        "a de-provisioned actor was re-granted by an unrelated repair"
     );
+    assert!(book.allows("stayer", &perm("memory.read")));
+
+    // De-provisioning a principal entirely, across every role it holds.
+    assert!(book.add_role(role("auditor", &["audit.read"])));
+    assert!(book.assign("stayer", "auditor"));
+    assert_eq!(book.roles_of("stayer"), vec!["auditor", "oncall"]);
+    assert!(book.remove_actor("stayer"));
+    assert!(!book.allows("stayer", &perm("policy.admin")));
+    assert!(!book.allows("stayer", &perm("audit.read")));
+    assert!(!book.remove_actor("stayer"), "already gone");
+    // The roles themselves survive the actor.
+    assert!(book.has_role("oncall") && book.has_role("auditor"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1421,8 +1516,10 @@ fn role_grants_are_deployment_global_not_tenant_scoped() {
     );
 
     // …and globex's administrator, editing what they believe is their own
-    // `writer` role, revokes acme's writers.
-    d.add_role("writer", &["memory.read"]);
+    // `writer` role, revokes acme's writers. The edit is a deliberate
+    // `redefine_role` now — which changes nothing about the finding, because
+    // the *scope* of the edit is what is wrong, not how it is spelled.
+    assert!(d.redefine_role("writer", &["memory.read"]));
     let acme = request("acme", "alice", "memory.ingest", "r-collateral");
     assert_eq!(
         d.admit(Call {

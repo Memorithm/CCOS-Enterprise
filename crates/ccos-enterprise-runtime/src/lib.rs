@@ -378,6 +378,16 @@ impl Deployment {
         self.tenants.get_mut(&TenantId(tenant.to_string()))
     }
 
+    /// Define a role. **Provisioning only**: a name already taken is left
+    /// exactly as it was.
+    ///
+    /// The no-op on a duplicate is deliberate and worth defending. This is a
+    /// builder used at construction time, where a repeated name is a
+    /// programmer error; the previous behaviour made that error a *silent mass
+    /// privilege change* affecting every holder. First-definition-wins turns
+    /// the same mistake into a safe one. Changing a live role is
+    /// [`redefine_role`](Self::redefine_role), which says so and reports what
+    /// it hit.
     pub fn add_role(&mut self, name: &str, permissions: &[&str]) -> &mut Self {
         let mut role = Role {
             name: name.to_string(),
@@ -392,6 +402,44 @@ impl Deployment {
 
     /// Assign a role. Returns false (and grants nothing) for unknown roles —
     /// the RBAC crate's fail-closed rule, surfaced here.
+    /// Replace a live role's permission set, affecting every holder at once.
+    /// Returns whether a role of that name existed.
+    ///
+    /// Separate from [`add_role`](Self::add_role) so that a mass privilege
+    /// change cannot be reached by a typo. It is still **unjournaled**: role
+    /// mutation has no audit shape, which is a defect this method makes
+    /// visible rather than fixes — see `stress_rbac_scale`.
+    pub fn redefine_role(&mut self, name: &str, permissions: &[&str]) -> bool {
+        let mut role = Role {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        for p in permissions {
+            role.permissions.insert(Permission(p.to_string()));
+        }
+        self.roles.redefine_role(role)
+    }
+
+    /// Remove a role and every grant of it. Returns whether it existed.
+    pub fn remove_role(&mut self, name: &str) -> bool {
+        self.roles.remove_role(name)
+    }
+
+    /// Withdraw one role from one actor. Returns whether the grant existed.
+    pub fn unassign(&mut self, actor: &str, role: &str) -> bool {
+        self.roles.unassign(actor, role)
+    }
+
+    /// De-provision a principal entirely. Returns whether it held anything.
+    pub fn remove_actor(&mut self, actor: &str) -> bool {
+        self.roles.remove_actor(actor)
+    }
+
+    /// The roles an actor holds, in name order.
+    pub fn roles_of(&self, actor: &str) -> Vec<&str> {
+        self.roles.roles_of(actor)
+    }
+
     pub fn assign(&mut self, actor: &str, role: &str) -> bool {
         self.roles.assign(actor, role)
     }

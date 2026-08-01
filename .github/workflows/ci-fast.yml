@@ -63,6 +63,22 @@ jobs:
       # build compiles and no run exercises, passing CI by being absent.
       - name: identity verifier (non-default features)
         run: |
-          cargo test -p ccos-enterprise-auth --features token-auth,test-identities
-          cargo clippy -p ccos-enterprise-auth --features token-auth,test-identities \
+          FEATS=token-auth,mtls-auth,oidc-auth,test-identities
+          cargo test -p ccos-enterprise-auth --features "$FEATS"
+          cargo clippy -p ccos-enterprise-auth --features "$FEATS" \
             --all-targets -- -D warnings
+          # Every combination, including the empty one. The features gate a
+          # verifier, its issuer map and the constructor the mechanisms share,
+          # so a symbol can be live in one combination and dead in another —
+          # and `-D warnings` is right to say so. This loop exists because a
+          # push once went red on exactly the combination nobody had run: no
+          # features at all, which is what a deployment that has configured no
+          # authenticator compiles.
+          for f in "" token-auth mtls-auth oidc-auth test-identities \
+                   token-auth,mtls-auth token-auth,oidc-auth mtls-auth,oidc-auth \
+                   token-auth,test-identities token-auth,mtls-auth,oidc-auth; do
+            echo "::group::clippy features=[$f]"
+            cargo clippy -p ccos-enterprise-auth ${f:+--features "$f"} \
+              --all-targets -- -D warnings
+            echo "::endgroup::"
+          done

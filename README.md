@@ -5,8 +5,8 @@
 
 CCOS Enterprise adds the organizational layer around the stable cognitive
 kernel — authentication, RBAC, multi-tenancy with memory isolation, quotas and
-budgets, model governance, backup/restore, observability, and vendor licensing
-— **without ever duplicating Core**.
+budgets, model governance, backup/restore, observability, governed semantic /
+episodic memory, and vendor licensing — **without ever duplicating Core**.
 
 Core lives here too, under `core/`, as one member of one workspace. That is
 co-location, not duplication: there is exactly **one** `ccos-core` in the
@@ -18,9 +18,10 @@ two lockfiles, and no way to land a change that spanned the boundary in one
 commit. One workspace means `cargo test` covers both, and a Core change and
 its Enterprise consequence are reviewed together or not at all.
 
-The product boundary below is unchanged, and is now enforced on the
-**dependency graph** rather than by repository separation — a stronger check,
-since a crate cannot satisfy it merely by living somewhere else.
+The product boundary below is enforced on the **dependency graph** rather than
+by repository separation. The key invariant is directional: `ccos-core` stays
+independent of product/research memory engines, while Enterprise may compose
+approved external engines behind Enterprise-owned governance adapters.
 
 ### How an improvement travels between the three products
 
@@ -49,23 +50,49 @@ reach them. (`CCOS` and `CCOS_EXTENDED` are archived and are not part of the
 lineup — where their names survive in a source comment it is provenance for
 code that came from them, not a live dependency.)
 
-- **Never** contains or depends on: `ccos-rsi`, `forge-core`, `ccos-forge`,
-  `octasoma`, recursive self-improvement, autonomous patch promotion,
-  generated-code execution, self-modification, or CCOS Research Lab.
-- Core ships opt-in Pro features of its own that reach premium engines
-  (`octasoma` pulls one over git). Enterprise takes Core at
-  `default-features = false` and **CI never sweeps Core's feature matrix** —
-  a `--all-features` build across the workspace would resolve precisely what
-  this boundary forbids. Core's own suite still runs, at default features.
+- **Core never contains or depends on** `octasoma`, SciRust, `ccos-rsi`,
+  `forge-core`, `ccos-forge`, recursive self-improvement, autonomous patch
+  promotion, generated-code execution, self-modification, or CCOS Research Lab.
+- **Enterprise may depend on canonical OctaSoma** through an Enterprise-owned,
+  governed adapter. That adapter is responsible for tenant/workspace/agent
+  isolation, RBAC, quotas, lifecycle/retention, backup/restore, provenance and
+  audit. OctaSoma results are observations supplied to Core contracts; they do
+  not acquire authority merely because Enterprise selected the backend.
+- OctaSoma is **not** added to the `core/` subtree, to any Core feature, or to
+  the Core dependency graph. The dependency direction is Enterprise →
+  OctaSoma → targeted SciRust crates. Core remains below and independent of
+  that graph.
+- Research-only components (`ccos-rsi`, Forge, autonomous patch promotion,
+  generated-code execution, self-modification) remain forbidden in Enterprise.
+  Their presence in Research Lab does not make them Enterprise dependencies.
 - The gateway (`ccos-enterprise-gateway`) is an **allowlist**: a tool traverses
   only if it is in the exposed catalogue (`memory.*`, `context.*`, `policy.*`,
   `audit.*`, `system.health`; `ccos.*` accepted as an alias). Research
-  namespaces (`rsi.*`, `forge.*`, `slha.*`, `octa.*`) and the capabilities the
-  profile refuses outright (`patch.*`, `shell.*`, `self.*`, `code.execute`,
-  `repository.modify`) are rejected ahead of it, and no privilege reaches past
-  either — see `docs/HERMES_INTEGRATION.md`.
+  namespaces (`rsi.*`, `forge.*`, `slha.*`) and the capabilities the profile
+  refuses outright (`patch.*`, `shell.*`, `self.*`, `code.execute`,
+  `repository.modify`) are rejected ahead of it. An OctaSoma-backed memory
+  implementation is exposed through the governed `memory.*` contract rather
+  than by publishing an unauthenticated raw `octa.*` surface.
 - Advanced Q-Page variants are **policy-activated per tenant**
   (`ccos-enterprise-qpages`); Core's standard primitives are untouched.
+
+## Planned OctaSoma adapter
+
+`ccos-enterprise-octasoma` is the product-side integration point. Its intended
+responsibilities are deliberately narrower than OctaSoma itself:
+
+1. translate Enterprise tenancy/scope into opaque Core memory scopes;
+2. apply authorization, quotas, retention and lifecycle policy before writes or
+   recalls;
+3. attach auditable provenance and store-generation identifiers;
+4. expose OctaSoma recall as non-authoritative memory observations;
+5. make backup/restore and deletion semantics Enterprise-governed;
+6. keep the raw OctaSoma MCP server outside the authenticated Enterprise trust
+   boundary.
+
+The crate will be added only after the neutral memory ports in CCOS Core are
+available in the Enterprise `core/` subtree. This ordering prevents an adapter
+from inventing a parallel Core API merely to get ahead of the kernel contract.
 
 ## Crates
 
@@ -81,6 +108,7 @@ code that came from them, not a live dependency.)
 | `ccos-enterprise-governance` | license claim protocol, signed release-manifest verification, vendor issuance, offline revocation |
 | `ccos-enterprise-qpages` | advanced Q-Page variant registry (policy-gated) |
 | `ccos-enterprise-admin` | administrative action validation + audit |
+| `ccos-enterprise-octasoma` *(planned)* | governed semantic/episodic memory adapter; never part of Core |
 | `tools/ccos-license-server` | vendor claim counter (HTTP/1.1) + vault admin CLI + PHP shared-hosting flow |
 | `tests/ccos-enterprise-conformance` | the composed product path end to end: governed request admission, tenant isolation, the Hermes tool-catalogue contract, adversarial scenarios |
 

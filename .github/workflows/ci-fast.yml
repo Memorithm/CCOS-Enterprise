@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # The workspace depends on ccos-core by PATH during development
+      # The workspace depends on ccos-core by PATH during development.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -38,15 +38,22 @@ jobs:
         run: |
           ! grep -RniE 'ccos-rsi|forge-core|ccos-forge|ccos-research-lab|self_improvement|self_modify' \
             --include='Cargo.toml' crates tools Cargo.toml
-          ! cargo tree --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features 2>/dev/null | grep -iE 'ccos-rsi|forge|research-lab|scirust|octacore|octasoma'
+          ! cargo tree --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features 2>/dev/null | grep -iE 'ccos-rsi|forge|research-lab|octacore'
+          # OctaSoma and its targeted SciRust dependencies are now an explicit
+          # Enterprise capability, but direct declaration is confined to the
+          # workspace pin plus the governed adapter crate.
+          mapfile -t OCTA_MANIFESTS < <(grep -Rli 'octasoma' --include='Cargo.toml' crates tools Cargo.toml | sort)
+          printf '%s\n' "${OCTA_MANIFESTS[@]}" | grep -qx 'Cargo.toml'
+          printf '%s\n' "${OCTA_MANIFESTS[@]}" | grep -qx 'crates/ccos-enterprise-octasoma/Cargo.toml'
+          test "${#OCTA_MANIFESTS[@]}" -eq 2
       - run: cargo fmt --all -- --check
-      # NOT `--all-features` across the whole workspace. Core is a member now,
-      # and it carries opt-in Pro features of its own — `octasoma` pulls a
-      # premium engine over git. Turning every feature on would build exactly
-      # what §4.2 forbids. Core packages are excluded from *selection*, so they
-      # still build as dependencies with precisely the features Enterprise asks
-      # for (`default-features = false`); only Enterprise's own feature matrix
-      # is swept, which is the one this gate exists to cover.
+      # NOT `--all-features` across the whole workspace. Core is a member now
+      # and carries opt-in features of its own. Enterprise enables semantic
+      # memory through `ccos-enterprise-octasoma`, not by sweeping Core's
+      # unrelated optional feature matrix. Core packages are excluded from
+      # *selection*, so they still build as dependencies with precisely the
+      # features Enterprise asks for (`default-features = false`); only
+      # Enterprise's own feature matrix is swept here.
       - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
       - run: cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
       - run: cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release

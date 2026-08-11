@@ -1,15 +1,12 @@
 # cargo-deny configuration for the Enterprise workspace — the supply-chain
-# gate ci-security.yml runs. Mirrors CCOS Core's posture, minus anything the
-# Enterprise boundary forbids (no premium-crate git sources here, ever).
+# gate ci-security.yml runs. Git sources remain denied by default; the only
+# explicit Git exceptions are the reviewed canonical Memorithm memory/compute
+# foundations used by the governed Enterprise OctaSoma adapter.
 
 [graph]
-# NOT `all-features`. Core carries opt-in Pro features of its own — `octasoma`
-# pulls a premium engine over git — and Enterprise must never enable them
-# (§4.2). Turning every feature on would resolve exactly the graph the product
-# boundary forbids, and then ask this gate to bless it. The gate checks the
-# graph Enterprise actually ships: Core at `default-features = false`, plus the
-# one optional Enterprise feature (`license-verify`), whose `ed25519-dalek`
-# arrives non-optionally through the license server regardless.
+# NOT `all-features`. Core carries opt-in features of its own and Enterprise
+# must not sweep that matrix. The gate checks the graph Enterprise actually
+# ships: Core at `default-features = false`, plus Enterprise's own dependencies.
 all-features = false
 targets = [
     "aarch64-unknown-linux-gnu",
@@ -35,14 +32,15 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
-# `private.ignore` only reaches crates marked `publish = false`; neither Core
-# package is, so both house licenses are allowed explicitly. Core is a
-# workspace member now rather than an external path dependency, which changes
-# nothing about the licences themselves — only about which check would
-# otherwise have skipped them.
+# House/source-available licences are never promoted to the global allowlist.
+# They are accepted only for the exact reviewed internal crates that require
+# them. This keeps an unrelated dependency from silently inheriting the same
+# licence exception.
 exceptions = [
     { name = "ccos-core", allow = ["LicenseRef-TarekZekriti-Dual"] },
     { name = "ccos-memory-runtime", allow = ["LicenseRef-CheckupAuto-Dual"] },
+    { name = "octasoma", allow = ["LicenseRef-CheckupAuto-Dual"] },
+    { name = "scirust-license", allow = ["PolyForm-Noncommercial-1.0.0"] },
 ]
 
 [licenses.private]
@@ -66,4 +64,9 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# Exact canonical repositories only. Revisions remain pinned in Cargo.toml and
+# Cargo.lock; no arbitrary third-party Git dependency is admitted here.
+allow-git = [
+    "https://github.com/Memorithm/octasoma",
+    "https://github.com/Memorithm/scirust",
+]

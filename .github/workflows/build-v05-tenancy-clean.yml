@@ -1,0 +1,43 @@
+name: Build v0.5 tenancy clean branch
+
+on:
+  push:
+    branches:
+      - v05/nested-memory-scope
+
+permissions:
+  contents: write
+
+jobs:
+  build-clean:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Rebuild one clean change on current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          MERGE_BASE="$(git merge-base origin/main HEAD)"
+          git diff --binary "$MERGE_BASE" -- crates/ccos-enterprise-tenancy/src/lib.rs > /tmp/tenancy.patch
+          git reset --hard origin/main
+          git clean -fd
+          git apply /tmp/tenancy.patch
+          cargo fmt --all
+          cargo test -p ccos-enterprise-tenancy
+          cargo clippy -p ccos-enterprise-tenancy --all-targets -- -D warnings
+      - name: Commit with repository author policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ZEKRITI Tarek'
+          git config user.email 'zekriti.tarek@users.noreply.github.com'
+          git add crates/ccos-enterprise-tenancy/src/lib.rs
+          git commit -m 'feat(tenancy): add workspace and agent isolation scopes'
+          scripts/check-author-policy.sh HEAD
+          git push origin HEAD:refs/heads/v05/nested-memory-scope-clean

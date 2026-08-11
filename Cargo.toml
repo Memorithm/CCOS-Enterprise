@@ -23,6 +23,7 @@ members = [
     "crates/ccos-enterprise-admin",
     "crates/ccos-enterprise-runtime",
     "crates/ccos-enterprise-store",
+    "crates/ccos-enterprise-octasoma",
     "crates/ccos-enterprise-mcp",
     "crates/ccos-enterprise-sessions",
     "tools/ccos-license-server",
@@ -42,6 +43,10 @@ repository = "https://github.com/Memorithm/CCOS-Enterprise"
 # member of this workspace: no sibling checkout, no symlink, no second
 # lockfile, and a Core change plus its Enterprise consequence are one commit.
 ccos-core = { path = "core", default-features = false }
+# OctaSoma is a direct Enterprise memory dependency, never a Core dependency.
+# The pin is immutable; it will be advanced only after the corresponding
+# canonical OctaSoma change is reviewed and merged.
+octasoma = { git = "https://github.com/Memorithm/octasoma", rev = "513cad43cb430b0e898330d67ea34ccfcd305b88", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

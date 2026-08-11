@@ -18,9 +18,9 @@ two lockfiles, and no way to land a change that spanned the boundary in one
 commit. One workspace means `cargo test` covers both, and a Core change and
 its Enterprise consequence are reviewed together or not at all.
 
-The product boundary below is unchanged, and is now enforced on the
-**dependency graph** rather than by repository separation — a stronger check,
-since a crate cannot satisfy it merely by living somewhere else.
+The product boundary below is enforced on the **dependency graph** rather than
+by repository separation. OctaSoma is an explicit Enterprise dependency through
+one governed adapter; it does not become a dependency of `ccos-core`.
 
 ### How an improvement travels between the three products
 
@@ -50,22 +50,29 @@ lineup — where their names survive in a source comment it is provenance for
 code that came from them, not a live dependency.)
 
 - **Never** contains or depends on: `ccos-rsi`, `forge-core`, `ccos-forge`,
-  `octasoma`, recursive self-improvement, autonomous patch promotion,
-  generated-code execution, self-modification, or CCOS Research Lab.
-- Core ships opt-in Pro features of its own that reach premium engines
-  (`octasoma` pulls one over git). Enterprise takes Core at
-  `default-features = false` and **CI never sweeps Core's feature matrix** —
-  a `--all-features` build across the workspace would resolve precisely what
-  this boundary forbids. Core's own suite still runs, at default features.
+  recursive self-improvement, autonomous patch promotion, generated-code
+  execution, self-modification, or CCOS Research Lab.
+- **OctaSoma is allowed only through `ccos-enterprise-octasoma`.** That adapter
+  owns tenant isolation and quota enforcement and depends on canonical OctaSoma,
+  which in turn consumes targeted SciRust crates. Neither OctaSoma nor SciRust
+  acquires an edge back into Enterprise or Core.
+- Core still ships opt-in features of its own. Enterprise takes Core at
+  `default-features = false` and **CI never sweeps Core's feature matrix**: the
+  product enables premium memory through the dedicated Enterprise adapter, not
+  by silently activating unrelated Core features. Core's own suite still runs,
+  at default features.
 - The gateway (`ccos-enterprise-gateway`) is an **allowlist**: a tool traverses
   only if it is in the exposed catalogue (`memory.*`, `context.*`, `policy.*`,
-  `audit.*`, `system.health`; `ccos.*` accepted as an alias). Research
+  `audit.*`, `system.health`; `ccos.*` accepted as an alias). Research/raw
   namespaces (`rsi.*`, `forge.*`, `slha.*`, `octa.*`) and the capabilities the
   profile refuses outright (`patch.*`, `shell.*`, `self.*`, `code.execute`,
   `repository.modify`) are rejected ahead of it, and no privilege reaches past
   either — see `docs/HERMES_INTEGRATION.md`.
 - Advanced Q-Page variants are **policy-activated per tenant**
   (`ccos-enterprise-qpages`); Core's standard primitives are untouched.
+
+See `docs/OCTASOMA_INTEGRATION.md` for the memory-specific authority,
+isolation, persistence and determinism contract.
 
 ## Crates
 
@@ -81,6 +88,7 @@ code that came from them, not a live dependency.)
 | `ccos-enterprise-governance` | license claim protocol, signed release-manifest verification, vendor issuance, offline revocation |
 | `ccos-enterprise-qpages` | advanced Q-Page variant registry (policy-gated) |
 | `ccos-enterprise-admin` | administrative action validation + audit |
+| `ccos-enterprise-octasoma` | tenant-isolated semantic/episodic memory adapter; OctaSoma observations remain non-authoritative |
 | `tools/ccos-license-server` | vendor claim counter (HTTP/1.1) + vault admin CLI + PHP shared-hosting flow |
 | `tests/ccos-enterprise-conformance` | the composed product path end to end: governed request admission, tenant isolation, the Hermes tool-catalogue contract, adversarial scenarios |
 

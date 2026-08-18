@@ -539,6 +539,7 @@ fn fnv_field(state: &mut u64, bytes: &[u8]) {
 fn absorb_outcome(state: &mut u64, o: &Outcome) {
     match o {
         Outcome::Forwarded => fnv_field(state, b"forwarded"),
+        Outcome::Replayed => fnv_field(state, b"replayed"),
         Outcome::Refused(r) => {
             fnv_field(state, b"refused");
             fnv_field(state, tag_of(r).as_bytes());
@@ -580,6 +581,7 @@ fn tag_of(r: &Refusal) -> &'static str {
 fn outcome_tag(o: &Outcome) -> &'static str {
     match o {
         Outcome::Forwarded => "forwarded",
+        Outcome::Replayed => "replayed",
         Outcome::Refused(r) => tag_of(r),
     }
 }
@@ -596,6 +598,7 @@ struct Ledger {
     spent: Vec<u128>,
     calls: u64,
     forwarded: u64,
+    replayed: u64,
     refused: u64,
     tags: BTreeMap<&'static str, u64>,
 }
@@ -606,6 +609,7 @@ impl Ledger {
             spent: vec![0; TENANTS],
             calls: 0,
             forwarded: 0,
+            replayed: 0,
             refused: 0,
             tags: BTreeMap::new(),
         }
@@ -618,6 +622,9 @@ impl Ledger {
                 self.forwarded += 1;
                 assert!(step.tenant < TENANTS, "an unknown tenant cannot be charged");
                 self.spent[step.tenant] += u128::from(step.cost);
+            }
+            Outcome::Replayed => {
+                self.replayed += 1;
             }
             Outcome::Refused(r) => {
                 self.refused += 1;
@@ -734,16 +741,21 @@ fn check_invariants(d: &Deployment, l: &Ledger, names: &[String], at: usize) {
     let m = d.metrics();
     let requests = metric(&m, "gateway.requests");
     let forwarded = metric(&m, "gateway.forwarded");
+    let replayed = metric(&m, "gateway.replayed");
     let refused = metric(&m, "gateway.refused");
     assert_eq!(
         requests,
-        forwarded + refused,
-        "call {at}: requests != forwarded + refused"
+        forwarded + replayed + refused,
+        "call {at}: requests != forwarded + replayed + refused"
     );
     assert_eq!(requests, l.calls, "call {at}: requests != calls made");
     assert_eq!(
         forwarded, l.forwarded,
         "call {at}: forwarded counter != journal's forwarded count"
+    );
+    assert_eq!(
+        replayed, l.replayed,
+        "call {at}: replayed counter != journal's replay count"
     );
     assert_eq!(
         refused, l.refused,
@@ -755,11 +767,9 @@ fn check_invariants(d: &Deployment, l: &Ledger, names: &[String], at: usize) {
         "call {at}: the audit.dropped counter disagrees with audit_dropped()"
     );
     assert_eq!(
-        metric(&m, "gateway.replayed"),
-        0,
+        replayed, 0,
         "call {at}: a replay was suppressed, but every request id in this \
-         workload is distinct — an unbilled forward would silently hollow out \
-         every billing assertion in this file"
+         workload is distinct — a duplicate id would invalidate the workload"
     );
     let mut tag_total = 0u64;
     for (tag, count) in &l.tags {
@@ -1024,6 +1034,7 @@ fn endurance_two_hundred_thousand_admissions_across_fifty_tenants() {
         "the cap shed exactly the overflow, and counted every record of it"
     );
     let mut journal_forwarded = 0u64;
+    let mut journal_replayed = 0u64;
     let mut journal_tags: BTreeMap<&'static str, u64> = BTreeMap::new();
     let mut journal_cost = 0u128;
     let mut phantom_rows = 0u64;
@@ -1048,14 +1059,19 @@ fn endurance_two_hundred_thousand_admissions_across_fifty_tenants() {
         );
         match &r.outcome {
             Outcome::Forwarded => journal_forwarded += 1,
+            Outcome::Replayed => journal_replayed += 1,
             Outcome::Refused(x) => *journal_tags.entry(tag_of(x)).or_insert(0) += 1,
         }
         journal_cost += u128::from(r.cost);
         phantom_rows += u64::from(expected.tenant == TENANTS);
     }
     assert_eq!(
-        journal_forwarded + journal_tags.values().sum::<u64>(),
+        journal_forwarded + journal_replayed + journal_tags.values().sum::<u64>(),
         DEFAULT_AUDIT_CAPACITY as u64
+    );
+    assert_eq!(
+        journal_replayed, 0,
+        "the retained endurance window contains a replay despite globally unique ids"
     );
     let fleet_spend: u128 = ledger.spent.iter().sum();
     assert!(

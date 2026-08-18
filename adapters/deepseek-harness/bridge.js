@@ -125,6 +125,7 @@ export class DeepSeekHarnessBridge {
     this.logger = options.logger || console
     this.turns = new Map()
     this.activeTurn = new Map()
+    this.activeStep = new Map()
     this.capturePromise = Promise.resolve()
     this.drainPromise = Promise.resolve()
     this.disposed = false
@@ -173,6 +174,17 @@ export class DeepSeekHarnessBridge {
     }
   }
 
+  executionIdentity(exec) {
+    const session = exec?.agent?.session
+    if (!session?.id) throw new Error('CCOS tool execution requires a DeepSeek Harness agent session')
+    const stepState = this.activeStep.get(session.id)
+    const turn = stepState?.turn ?? this.activeTurn.get(session.id) ?? 0
+    const step = stepState?.step ?? 0
+    return resolveIdentity(this.config, session, turn, step, {
+      toolCallId: typeof exec?.callId === 'string' ? exec.callId : String(exec?.callId ?? ''),
+    })
+  }
+
   onSessionEvent(session, event) {
     if (!session?.id || !event?.type) return
     switch (event.type) {
@@ -182,6 +194,21 @@ export class DeepSeekHarnessBridge {
         const state = this.#ensureTurn(session, turn)
         state.startedAt = event.time
         this.activeTurn.set(session.id, turn)
+        return
+      }
+      case 'step/start': {
+        const turn = readNumber(event.data, 'turn')
+        const step = readNumber(event.data, 'step')
+        if (turn === undefined || step === undefined) return
+        this.activeTurn.set(session.id, turn)
+        this.activeStep.set(session.id, { turn, step })
+        return
+      }
+      case 'step/end': {
+        const turn = readNumber(event.data, 'turn')
+        const step = readNumber(event.data, 'step')
+        const active = this.activeStep.get(session.id)
+        if (active && active.turn === turn && active.step === step) this.activeStep.delete(session.id)
         return
       }
       case 'user/message': {
@@ -241,6 +268,8 @@ export class DeepSeekHarnessBridge {
         state.endedAt = event.time
         state.endReason = data?.reason
         if (this.activeTurn.get(session.id) === turn) this.activeTurn.delete(session.id)
+        const active = this.activeStep.get(session.id)
+        if (active?.turn === turn) this.activeStep.delete(session.id)
         if (!this.config.captureEnabled || !state.userText) {
           this.turns.delete(this.#turnKey(session.id, turn))
           return
@@ -252,6 +281,16 @@ export class DeepSeekHarnessBridge {
       }
       default:
         return
+    }
+  }
+
+  onSessionDisposed(session) {
+    if (!session?.id) return
+    this.activeTurn.delete(session.id)
+    this.activeStep.delete(session.id)
+    const prefix = `${session.id}:`
+    for (const key of this.turns.keys()) {
+      if (key.startsWith(prefix)) this.turns.delete(key)
     }
   }
 

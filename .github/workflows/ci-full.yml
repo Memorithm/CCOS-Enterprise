@@ -20,27 +20,33 @@ jobs:
           ref: fix/runtime-true-idempotent-replay
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Update and execute the Q-Page replay guard
+      - name: Replace and execute the complete Q-Page replay guard
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path('tests/ccos-enterprise-conformance/tests/stress_qpages_exhaustive.rs')
           s = p.read_text()
-          old_doc = '''/// A `(tenant, request_id)` already decided now returns its prior outcome
-          /// without charging again. This test is the regression guard: same inputs —
-          /// one id, five calls — opposite expectation.
-          '''
-          new_doc = '''/// A `(tenant, request_id)` already decided now returns explicit `Replayed`
+          start_marker = '/// REPAIRED (was an aside in the F2 test above, asserting the defect): the\n'
+          end_marker = '/// FINDING F3 (spec-violation), still open:'
+          start = s.index(start_marker)
+          end = s.index(end_marker, start)
+          replacement = r'''/// REPAIRED (was an aside in the F2 test above, asserting the defect): the
+          /// `request_id` is documented as an "idempotency/correlation key" and nothing
+          /// read it, so **the same id was charged on every retry** — a client whose
+          /// connection dropped mid-call paid twice for one decision, and a retry loop
+          /// could drain a tenant's budget without ever presenting a new request.
+          ///
+          /// A `(tenant, request_id)` already decided now returns explicit `Replayed`
           /// without charging or becoming eligible to execute again. This test is the
           /// regression guard: same inputs — one id, five attempts — one `Forwarded`,
           /// four `Replayed`, one charge.
-          '''
-          if s.count(old_doc) != 1:
-              raise SystemExit(f'expected one stale Q-Page replay doc block, found {s.count(old_doc)}')
-          s = s.replace(old_doc, new_doc, 1)
+          #[test]
+          fn a_replayed_request_id_is_never_billed_twice() {
+              let mut d = deployment_activating(SUBSETS - 1);
+              let a = actor(ORG, "alice", AuthStrength::Token);
+              let req = request("acme", "alice", "memory.recall", "same-id");
 
-          old_loop = '''    for attempt in 0..5 {
-              let out = d.admit(Call {
+              let first = d.admit(Call {
                   actor: &a,
                   request: &req,
                   model: "claude-opus",
@@ -48,54 +54,51 @@ jobs:
                   variant: Some(AdvancedQPageVariant::ExperimentalBridge),
                   justification: None,
               });
-              assert!(
-                  out.is_forwarded(),
-                  "attempt {attempt}: a replay returns the prior outcome, not a refusal: {out:?}"
-              );
-          }
-          '''
-          new_loop = '''    let first = d.admit(Call {
-              actor: &a,
-              request: &req,
-              model: "claude-opus",
-              cost_tokens: 1,
-              variant: Some(AdvancedQPageVariant::ExperimentalBridge),
-              justification: None,
-          });
-          assert_eq!(first, Outcome::Forwarded, "the first attempt executes");
-          for attempt in 1..5 {
-              let out = d.admit(Call {
-                  actor: &a,
-                  request: &req,
-                  model: "claude-opus",
-                  cost_tokens: 1,
-                  variant: Some(AdvancedQPageVariant::ExperimentalBridge),
-                  justification: None,
-              });
+              assert_eq!(first, Outcome::Forwarded, "the first attempt executes");
+
+              for attempt in 1..5 {
+                  let out = d.admit(Call {
+                      actor: &a,
+                      request: &req,
+                      model: "claude-opus",
+                      cost_tokens: 1,
+                      variant: Some(AdvancedQPageVariant::ExperimentalBridge),
+                      justification: None,
+                  });
+                  assert_eq!(
+                      out,
+                      Outcome::Replayed,
+                      "attempt {attempt}: a duplicate id is acknowledged without another execution"
+                  );
+              }
+
               assert_eq!(
-                  out,
-                  Outcome::Replayed,
-                  "attempt {attempt}: a duplicate id is acknowledged without another execution"
+                  d.spent("acme"),
+                  Some(1),
+                  "billed once, replayed four times: the same request_id is not a new call"
               );
-          }
-          '''
-          if s.count(old_loop) != 1:
-              raise SystemExit(f'expected one stale Q-Page replay loop, found {s.count(old_loop)}')
-          s = s.replace(old_loop, new_loop, 1)
 
-          old_journal = '''    assert_eq!(d.audit().count(), 5, "every attempt is still journaled");
-              let costs: Vec<u64> = d.audit().map(|r| r.cost).collect();
+              // Suppression is observable, not silence: all attempts are journaled,
+              // with exactly one executable/charged decision and four zero-cost replays.
+              let trail: Vec<_> = d.audit().collect();
+              assert_eq!(trail.len(), 5, "every attempt is still journaled");
+              assert_eq!(trail[0].outcome, Outcome::Forwarded);
+              assert!(trail[1..].iter().all(|r| r.outcome.is_replayed()));
+              let costs: Vec<u64> = trail.iter().map(|r| r.cost).collect();
+              assert_eq!(costs, vec![1, 0, 0, 0, 0]);
+              let billed: u64 = costs.iter().sum();
+              assert_eq!(Some(billed), d.spent("acme"), "the journal reconciles");
+
+              let replayed = d
+                  .metrics()
+                  .into_iter()
+                  .find(|(k, _)| k == "gateway.replayed")
+                  .map(|(_, v)| v);
+              assert_eq!(replayed, Some(4), "and the suppression is observable");
+          }
+
           '''
-          new_journal = '''    assert_eq!(d.audit().count(), 5, "every attempt is still journaled");
-              let outcomes: Vec<Outcome> = d.audit().map(|r| r.outcome.clone()).collect();
-              assert_eq!(outcomes[0], Outcome::Forwarded);
-              assert!(outcomes[1..].iter().all(Outcome::is_replayed));
-              let costs: Vec<u64> = d.audit().map(|r| r.cost).collect();
-          '''
-          if s.count(old_journal) != 1:
-              raise SystemExit(f'expected one Q-Page journal block, found {s.count(old_journal)}')
-          s = s.replace(old_journal, new_journal, 1)
-          p.write_text(s)
+          p.write_text(s[:start] + replacement + s[end:])
           PY
           cargo fmt --all
           cargo test -p ccos-enterprise-conformance --test stress_qpages_exhaustive a_replayed_request_id_is_never_billed_twice --release -- --exact

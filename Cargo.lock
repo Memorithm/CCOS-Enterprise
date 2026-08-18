@@ -307,6 +307,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-ontology-migration"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-extract",
+ "ccos-enterprise-knowledge-model",
+ "ccos-enterprise-ontology",
+ "ccos-enterprise-resolution",
+ "sha2",
+]
+
+[[package]]
 name = "ccos-enterprise-parse"
 version = "0.1.0-pre"
 dependencies = [
@@ -420,6 +431,7 @@ dependencies = [
  "ccos-enterprise-knowledge-store",
  "ccos-enterprise-normalize",
  "ccos-enterprise-ontology",
+ "ccos-enterprise-ontology-migration",
  "ccos-enterprise-parse",
  "ccos-enterprise-promotion",
  "ccos-enterprise-resolution",

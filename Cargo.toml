@@ -20,6 +20,7 @@ members = [
     "crates/ccos-enterprise-kg",
     "crates/ccos-enterprise-ontology",
     "crates/ccos-enterprise-promotion",
+    "crates/ccos-enterprise-ontology-migration",
     "crates/ccos-enterprise-policy",
     "crates/ccos-enterprise-gateway",
     "crates/ccos-enterprise-observability",

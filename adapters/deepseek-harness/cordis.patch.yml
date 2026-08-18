@@ -1,0 +1,19 @@
+- insert:
+    - id: ccos-enterprise-memory
+      name: '@memorithm/ccos-deepseek-harness/index.js'
+      config:
+        enabled: true
+        command: ccos-enterprise-mcp-server
+        args: []
+        tenantId: ''
+        actorId: ''
+        agentId: deepseek-harness
+        model: deepseek-harness
+        recallEnabled: true
+        captureEnabled: true
+        recallTimeoutMs: 1000
+        recallHardLimitMs: 3000
+        recallBudget: 2048
+        contextMaxChars: 6000
+        failOnStartupError: false
+        stateDir: ''

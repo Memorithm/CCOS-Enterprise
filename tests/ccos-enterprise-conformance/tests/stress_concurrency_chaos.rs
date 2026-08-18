@@ -1859,10 +1859,9 @@ fn two_interleavings_produce_two_journals_that_each_replay_exactly() {
 ///
 /// The same 32 threads, the same byte-identical call, the opposite
 /// expectation. `AuditRecord::sequence` makes the records pairwise distinct
-/// and totally ordered; replay suppression charges the request **once**. The
-/// 31 replays are still forwarded — a retry gets its prior outcome, not a
-/// refusal — and still journaled, each carrying `cost: 0`, so the trail shows
-/// that the calls happened *and* that they were free.
+/// and totally ordered; replay suppression charges and executes the request
+/// **once**. The other 31 attempts are explicit `Replayed` outcomes: journaled,
+/// zero-cost, and ineligible to execute the effect again.
 #[test]
 fn identical_concurrent_calls_are_ordered_and_billed_exactly_once() {
     let _wd = Watchdog::arm("identical_concurrent_calls", 30);
@@ -1901,11 +1900,26 @@ fn identical_concurrent_calls_are_ordered_and_billed_exactly_once() {
         trail[1..].iter().all(|r| *r != first),
         "no two records may be equal in every field, however identical the calls"
     );
-    // Billed once: the record that decided first carries the charge, and the
-    // {THREADS}-1 suppressed replays carry a zero the operator can read.
-    assert!(trail.iter().all(|r| r.outcome.is_forwarded()));
+    // Executed and billed once: the record that won the lock first is the
+    // single Forwarded decision; every duplicate id after it is an explicit,
+    // zero-cost replay and cannot execute the effect again.
+    assert_eq!(first.outcome, Outcome::Forwarded);
+    assert!(
+        trail[1..].iter().all(|r| r.outcome.is_replayed()),
+        "every concurrent duplicate after the winner must be Replayed"
+    );
     assert_eq!(first.cost, 1, "the first decision is the one that pays");
     assert!(trail[1..].iter().all(|r| r.cost == 0), "a replay is free");
+    assert_eq!(
+        trail.iter().filter(|r| r.outcome.is_forwarded()).count(),
+        1,
+        "exactly one concurrent attempt may execute"
+    );
+    assert_eq!(
+        trail.iter().filter(|r| r.outcome.is_replayed()).count(),
+        THREADS - 1,
+        "all remaining identical attempts are replays"
+    );
     assert_eq!(
         d.spent("acme"),
         Some(1),

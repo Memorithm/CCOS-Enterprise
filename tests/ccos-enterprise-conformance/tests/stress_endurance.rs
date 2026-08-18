@@ -21,7 +21,7 @@
 //!    a hundred thousand calls ago, while a record that left it left through
 //!    the front door — counted, never rewritten;
 //! 3. **the counters** — `gateway.requests == gateway.forwarded +
-//!    gateway.refused`, each equals the journal's own tally, the
+//!    gateway.replayed + gateway.refused`, each equals the journal's own tally, the
 //!    `gateway.refused.*` series sum to `gateway.refused`, and
 //!    `audit.dropped` agrees with `audit_dropped()`;
 //! 4. **the journal reconciles the meter** — every record carries the cost it
@@ -1805,10 +1805,10 @@ fn audit_of_scans_the_whole_trail_and_allocates_per_match() {
 /// the key an operator would join on had cardinality 1 for the whole incident.
 ///
 /// What was repaired: a `(tenant, request_id)` the deployment has already
-/// decided returns `Forwarded` **without charging again**, and moves
-/// `gateway.replayed`. Identical input — 10 000 replays of one id, against the
-/// fattest and the thinnest budget in the fleet — opposite expectation: one
-/// charge each, and a budget that repetition can no longer drain.
+/// decided returns explicit `Replayed` at zero cost. The effect is not eligible
+/// to execute again, and `gateway.replayed` moves. Identical input — 10 000
+/// attempts of one id against the fattest and thinnest budgets — opposite
+/// expectation: one `Forwarded` charge each and 9 999 `Replayed` acknowledgements.
 #[test]
 fn a_replayed_request_id_is_charged_exactly_once() {
     let _guard = serialized();
@@ -1824,8 +1824,9 @@ fn a_replayed_request_id_is_charged_exactly_once() {
     //     start refusing — but only the first one is billed.
     let fat = &names[TENANTS - 1];
     let req = request(fat, "alice", "memory.ingest", ID);
-    let mut admitted = 0u64;
-    for _ in 0..REPLAYS {
+    let mut fat_forwarded = 0u64;
+    let mut fat_replayed = 0u64;
+    for attempt in 0..REPLAYS {
         let out = d.admit(Call {
             actor: &alice,
             request: &req,
@@ -1834,11 +1835,17 @@ fn a_replayed_request_id_is_charged_exactly_once() {
             variant: None,
             justification: None,
         });
-        admitted += u64::from(out.is_forwarded());
+        match out {
+            Outcome::Forwarded => fat_forwarded += 1,
+            Outcome::Replayed => fat_replayed += 1,
+            Outcome::Refused(r) => panic!("fat replay attempt {attempt} was refused: {r:?}"),
+        }
     }
+    assert_eq!(fat_forwarded, 1, "only the first request may execute");
     assert_eq!(
-        admitted, REPLAYS,
-        "a suppressed replay must still be answered, not refused"
+        fat_replayed,
+        REPLAYS - 1,
+        "every duplicate id is an explicit replay"
     );
     assert_eq!(
         d.spent(fat),
@@ -1851,8 +1858,9 @@ fn a_replayed_request_id_is_charged_exactly_once() {
     //     remaining 9 999 replays cost the tenant nothing at all.
     let thin = &names[0];
     let req = request(thin, "alice", "memory.ingest", ID);
-    let mut admitted_thin = 0u64;
-    for _ in 0..REPLAYS {
+    let mut thin_forwarded = 0u64;
+    let mut thin_replayed = 0u64;
+    for attempt in 0..REPLAYS {
         let out = d.admit(Call {
             actor: &alice,
             request: &req,
@@ -1861,9 +1869,17 @@ fn a_replayed_request_id_is_charged_exactly_once() {
             variant: None,
             justification: None,
         });
-        admitted_thin += u64::from(out.is_forwarded());
+        match out {
+            Outcome::Forwarded => thin_forwarded += 1,
+            Outcome::Replayed => thin_replayed += 1,
+            Outcome::Refused(r) => panic!("thin replay attempt {attempt} was refused: {r:?}"),
+        }
     }
-    assert_eq!(admitted_thin, REPLAYS);
+    assert_eq!(
+        thin_forwarded, 1,
+        "only the first thin-tenant request may execute"
+    );
+    assert_eq!(thin_replayed, REPLAYS - 1);
     assert_eq!(
         d.spent(thin),
         Some(5),
@@ -1896,7 +1912,8 @@ fn a_replayed_request_id_is_charged_exactly_once() {
         2 * (REPLAYS - 1),
         "every suppressed replay must be announced on its own counter"
     );
-    assert_eq!(metric(&m, "gateway.forwarded"), 2 * REPLAYS);
+    assert_eq!(metric(&m, "gateway.requests"), 2 * REPLAYS);
+    assert_eq!(metric(&m, "gateway.forwarded"), 2);
     assert_eq!(metric(&m, "gateway.refused"), 0);
 }
 

@@ -1026,6 +1026,7 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
     let mut expect_acme: u64 = 0;
     let mut expect_globex: u64 = 0;
     let mut forwarded = 0u64;
+    let mut replayed = 0u64;
     let mut refusals = [0u64; 11];
 
     for i in 0..20_000u64 {
@@ -1088,6 +1089,11 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
                     expect_globex += cost;
                 }
             }
+            Outcome::Replayed => {
+                replayed += 1;
+                assert_eq!(d.spent("acme"), before_acme, "a replay billed acme");
+                assert_eq!(d.spent("globex"), before_globex, "a replay billed globex");
+            }
             Outcome::Refused(r) => {
                 refusals[refusal_index(r)] += 1;
                 assert_eq!(d.spent("acme"), before_acme, "a refusal billed acme");
@@ -1126,6 +1132,10 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
          the whole story and not a window onto it"
     );
     assert!(forwarded > 1_000, "forwards exercised: {forwarded}");
+    assert_eq!(
+        replayed, 0,
+        "the property workload uses unique non-empty request ids, so replay is impossible"
+    );
     // Every refusal cause was actually reached, so the "no refusal is billed"
     // half of this test is not vacuous for any of them — including the three
     // the credential binding introduced.
@@ -1147,7 +1157,7 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
             trail
                 .iter()
                 .all(|r| r.outcome.is_forwarded() || r.cost == 0),
-            "REGRESSION GUARD: a refusal is journaled at cost 0"
+            "REGRESSION GUARD: every non-forwarded outcome is journaled at cost 0"
         );
     }
     // Sequence numbers are assigned at decision time and never repeat, so a

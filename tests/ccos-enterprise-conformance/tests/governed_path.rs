@@ -84,6 +84,31 @@ fn a_governed_call_reaches_core_and_is_billed_once() {
     assert!(trail[0].outcome.is_forwarded());
 }
 
+#[test]
+fn replay_is_an_explicit_zero_cost_non_execution_outcome() {
+    let mut d = two_tenant_deployment();
+    let alice = actor("memorithm", "alice", AuthStrength::Token);
+    let req = request("acme", "alice", "memory.recall", "r-replay");
+
+    let call = || Call {
+        actor: &alice,
+        request: &req,
+        model: "claude-opus",
+        cost_tokens: 120,
+        variant: None,
+        justification: None,
+    };
+    assert_eq!(d.admit(call()), Outcome::Forwarded);
+    assert_eq!(d.admit(call()), Outcome::Replayed);
+    assert_eq!(d.spent("acme"), Some(120));
+
+    let trail = d.audit_of("acme");
+    assert_eq!(trail.len(), 2);
+    assert_eq!(trail[0].outcome, Outcome::Forwarded);
+    assert_eq!(trail[1].outcome, Outcome::Replayed);
+    assert_eq!(trail[1].cost, 0);
+}
+
 /// The load-bearing accounting rule: the budget is charged last, so a call
 /// refused by ANY other gate costs the tenant nothing. A product that bills
 /// refused calls lets a badly-configured client drain a tenant's quota
@@ -410,8 +435,8 @@ fn gates_are_evaluated_in_the_documented_order() {
     );
 
     // 11. Replay suppression sits ahead of the budget: a request id already
-    //     decided returns its prior outcome and is NOT charged again, even
-    //     when the retry's cost could no longer be afforded.
+    //     forwarded returns explicit `Replayed`, performs no second effect and is
+    //     NOT charged again, even when the retry's cost could no longer be afforded.
     let mut d = two_tenant_deployment();
     let req = request("acme", "alice", "memory.ingest", "r-replay");
     let call = |cost| Call {
@@ -426,8 +451,8 @@ fn gates_are_evaluated_in_the_documented_order() {
     assert_eq!(d.spent("acme"), Some(600));
     assert_eq!(
         d.admit(call(600)),
-        Outcome::Forwarded,
-        "a decided request id replays its outcome"
+        Outcome::Replayed,
+        "a decided request id is acknowledged without a second execution"
     );
     assert_eq!(
         d.spent("acme"),

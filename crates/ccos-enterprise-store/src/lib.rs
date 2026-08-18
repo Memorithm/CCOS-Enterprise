@@ -818,12 +818,12 @@ mod tests {
                 variant: None,
                 justification: None,
             }),
-            Outcome::Forwarded
+            Outcome::Replayed
         );
         assert_eq!(
             restored.spent("acme"),
             Some(100),
-            "the retry after a restart must not be billed twice"
+            "the retry after a restart is an explicit replay and must not be billed twice"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

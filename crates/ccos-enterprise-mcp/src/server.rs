@@ -66,6 +66,10 @@ pub enum McpOutcome {
     /// governance refusal and a backend fault are different incidents, and
     /// collapsing them hides one behind the other.
     BackendError(String),
+    /// The request_id was already forwarded earlier. The backend is deliberately
+    /// not called again; callers can correlate this acknowledgement to the
+    /// original request without duplicating its effect.
+    Replayed,
     /// Refused by the admission path. Never reached the backend.
     Refused(Refusal),
     /// The client named a capability this deployment does not advertise. Kept
@@ -159,9 +163,10 @@ impl<B: Backend> GovernedMcp<B> {
         // journaled, because "who asked for what" is the question an audit
         // trail exists to answer, and a probe for capabilities that do not
         // exist is exactly the traffic worth keeping.
-        let outcome = self.deployment.admit(call);
-        if let Outcome::Refused(r) = outcome {
-            return McpOutcome::Refused(r);
+        match self.deployment.admit(call) {
+            Outcome::Refused(r) => return McpOutcome::Refused(r),
+            Outcome::Replayed => return McpOutcome::Replayed,
+            Outcome::Forwarded => {}
         }
 
         let Some(core_tool) = to_core(&tool) else {
@@ -282,6 +287,45 @@ mod tests {
             mcp.backend().calls,
             vec![("acme".to_string(), "recall".to_string())],
             "the backend must see the *Core* name and the verified tenant"
+        );
+        assert_eq!(mcp.deployment().spent("acme"), Some(10));
+    }
+
+    #[test]
+    fn a_replayed_call_never_dispatches_the_backend_twice() {
+        let mut mcp = front_door();
+        let a = actor("memorithm", "alice", AuthStrength::Token);
+        let req = request("acme", "alice", "memory.ingest", "r-idempotent");
+
+        let first = mcp.call(
+            Call {
+                actor: &a,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: None,
+            },
+            &json!({}),
+        );
+        assert!(matches!(first, McpOutcome::Ok(_)), "{first:?}");
+
+        let replay = mcp.call(
+            Call {
+                actor: &a,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: None,
+            },
+            &json!({}),
+        );
+        assert_eq!(replay, McpOutcome::Replayed);
+        assert_eq!(
+            mcp.backend().calls,
+            vec![("acme".to_string(), "ingest".to_string())],
+            "a replay must not duplicate the backend effect"
         );
         assert_eq!(mcp.deployment().spent("acme"), Some(10));
     }
@@ -455,9 +499,14 @@ mod tests {
     fn each_tenant_is_dispatched_under_its_own_name() {
         let mut mcp = front_door();
         let a = actor("memorithm", "alice", AuthStrength::Token);
-        for tenant in ["acme", "globex", "acme"] {
-            let req = request(tenant, "alice", "memory.recall", &format!("r-{tenant}-x"));
-            let _ = mcp.call(
+        for (index, tenant) in ["acme", "globex", "acme"].into_iter().enumerate() {
+            let req = request(
+                tenant,
+                "alice",
+                "memory.recall",
+                &format!("r-{tenant}-{index}"),
+            );
+            let out = mcp.call(
                 Call {
                     actor: &a,
                     request: &req,
@@ -468,6 +517,7 @@ mod tests {
                 },
                 &json!({}),
             );
+            assert!(matches!(out, McpOutcome::Ok(_)), "{tenant}: {out:?}");
         }
         let tenants: Vec<&str> = mcp
             .backend()

@@ -1229,12 +1229,10 @@ fn the_composed_path_now_demands_and_records_a_justification() {
         Some("closing the gpt-5 allowlist entry, ticket 881")
     );
 
-    // STILL OPEN, and worth keeping separate from the repair above: the
-    // administrative path inherits the *general* replay rule rather than a
-    // stricter one. A replayed administrative `request_id` returns its prior
-    // outcome without re-charging, which is right for billing — but it means a
-    // captured administrative call replays as "forwarded" forever, and nothing
-    // requires a fresh reason for a fresh act.
+    // The administrative path inherits the same effect-idempotent replay rule
+    // as every other governed call. A captured request_id is acknowledged as a
+    // replay at zero cost, but it is NOT eligible to execute the administrative
+    // effect again. A fresh administrative act therefore needs a fresh request_id.
     let before = d.audit_of("acme").len();
     let again = d.admit(Call {
         actor: &root,
@@ -1244,7 +1242,7 @@ fn the_composed_path_now_demands_and_records_a_justification() {
         variant: None,
         justification: Some("a different reason entirely"),
     });
-    assert!(again.is_forwarded());
+    assert!(again.is_replayed());
     assert_eq!(d.audit_of("acme").len(), before + 1);
     assert_eq!(
         d.audit_of("acme")

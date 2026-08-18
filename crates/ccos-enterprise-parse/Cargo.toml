@@ -1,0 +1,14 @@
+[package]
+name = "ccos-enterprise-parse"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Deterministic source-span parsing for CCOS Enterprise Knowledge Plane artifacts."
+
+[dependencies]
+ccos-enterprise-ingest = { path = "../ccos-enterprise-ingest" }
+ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
+ccos-enterprise-normalize = { path = "../ccos-enterprise-normalize" }
+sha2.workspace = true

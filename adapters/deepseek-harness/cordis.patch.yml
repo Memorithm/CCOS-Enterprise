@@ -1,6 +1,6 @@
 - insert:
     - id: ccos-enterprise-memory
-      name: '@memorithm/ccos-deepseek-harness/index.js'
+      name: '@memorithm/ccos-deepseek-harness'
       config:
         enabled: true
         command: ccos-enterprise-mcp-server

@@ -2,7 +2,7 @@ name: CI (full)
 
 on:
   push:
-    branches: [main, fix/runtime-true-idempotent-replay]
+    branches: [main]
   pull_request:
   schedule:
     - cron: "0 5 * * *"
@@ -81,75 +81,6 @@ jobs:
         run: cargo test -p ccos-enterprise-conformance --test isolation --release
       - name: adversarial (escalation, quota abuse, forged restore, admin trail)
         run: cargo test -p ccos-enterprise-conformance --test adversarial --release
-
-  replay_cleanup:
-    name: align replay contract text
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: fix/runtime-true-idempotent-replay
-          fetch-depth: 0
-      - name: Patch stale replay assertions and docs
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          def replace_once(path, old, new):
-              p = Path(path)
-              s = p.read_text()
-              n = s.count(old)
-              if n != 1:
-                  raise SystemExit(f"{path}: expected exactly one match, found {n}")
-              p.write_text(s.replace(old, new, 1))
-
-          replace_once(
-              'crates/ccos-enterprise-runtime/src/lib.rs',
-              '''//! 8. **replay** — a `request_id` already decided returns its prior outcome
-          //!    rather than being billed twice;
-          ''',
-              '''//! 8. **replay** — a `request_id` already forwarded yields explicit
-          //!    [`Outcome::Replayed`], is journaled at zero cost, and no effect may
-          //!    execute again;
-          ''',
-          )
-
-          replace_once(
-              'tests/ccos-enterprise-conformance/tests/governed_path.rs',
-              '''    // 11. Replay suppression sits ahead of the budget: a request id already
-              //     decided returns its prior outcome and is NOT charged again, even
-              //     when the retry's cost could no longer be afforded.
-          ''',
-              '''    // 11. Replay suppression sits ahead of the budget: a request id already
-              //     forwarded returns explicit `Replayed`, performs no second effect and is
-              //     NOT charged again, even when the retry's cost could no longer be afforded.
-          ''',
-          )
-          replace_once(
-              'tests/ccos-enterprise-conformance/tests/governed_path.rs',
-              '''    assert_eq!(
-                  d.admit(call(600)),
-                  Outcome::Forwarded,
-                  "a decided request id replays its outcome"
-              );
-          ''',
-              '''    assert_eq!(
-                  d.admit(call(600)),
-                  Outcome::Replayed,
-                  "a decided request id is acknowledged without a second execution"
-              );
-          ''',
-          )
-          PY
-          cargo fmt --all
-          git diff --quiet -- crates/ccos-enterprise-runtime/src/lib.rs tests/ccos-enterprise-conformance/tests/governed_path.rs && exit 0
-          git config user.name 'ZEKRITI Tarek'
-          git config user.email 'contact@checkupauto.fr'
-          git add crates/ccos-enterprise-runtime/src/lib.rs tests/ccos-enterprise-conformance/tests/governed_path.rs
-          git commit -m 'test(runtime): align replay guard with non-execution semantics'
-          git push origin HEAD:fix/runtime-true-idempotent-replay
 
   conformance:
     name: Core dependency conformance

@@ -1,0 +1,75 @@
+name: Temporary P5 formatter and validator
+
+on:
+  push:
+    branches: [feat/knowledge-plane-p5-decision-intelligence]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/knowledge-plane-p5-decision-intelligence
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - name: Tighten fail-closed invariants
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/ccos-enterprise-decision/src/lib.rs')
+          s = p.read_text()
+          s = s.replace(
+              'wrong.knowledge.canonical_hash.replace_range(0..1, "f");',
+              "wrong.knowledge.canonical_hash.push('x');",
+              1,
+          )
+          old = '''        let partition = self.tenants.entry(draft.tenant.clone()).or_default();
+        if partition.decisions.contains_key(&draft.id) {
+            return Err(DecisionError::DuplicateDecision(draft.id));
+        }
+        for precedent in &draft.precedents {
+            if !partition.decisions.contains_key(precedent) {
+                return Err(DecisionError::UnknownPrecedent(precedent.clone()));
+            }
+        }
+        partition.decisions.insert(
+'''
+          new = '''        if let Some(existing) = self.tenants.get(&draft.tenant) {
+            if existing.decisions.contains_key(&draft.id) {
+                return Err(DecisionError::DuplicateDecision(draft.id));
+            }
+            for precedent in &draft.precedents {
+                if !existing.decisions.contains_key(precedent) {
+                    return Err(DecisionError::UnknownPrecedent(precedent.clone()));
+                }
+            }
+        } else if let Some(precedent) = draft.precedents.iter().next() {
+            return Err(DecisionError::UnknownPrecedent(precedent.clone()));
+        }
+        let partition = self.tenants.entry(draft.tenant.clone()).or_default();
+        partition.decisions.insert(
+'''
+          if old not in s:
+              raise SystemExit('expected decision insertion block not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: Format and validate P5
+        run: |
+          cargo fmt --all
+          cargo check -p ccos-enterprise-decision
+          cargo clippy -p ccos-enterprise-decision -- -D warnings
+          cargo test -p ccos-enterprise-decision
+          cargo test -p ccos-knowledge-conformance --test p5_decision
+      - name: Commit generated lockfile, formatting and invariant fixes
+        run: |
+          rm .github/workflows/p5-fix-format-and-validate.yml
+          git config user.name 'ZEKRITI Tarek'
+          git config user.email 'contact@checkupauto.fr'
+          git add -A
+          git commit -m 'fix(decision): format and harden P5 invariants'
+          git push origin HEAD:feat/knowledge-plane-p5-decision-intelligence

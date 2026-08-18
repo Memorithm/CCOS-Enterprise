@@ -435,8 +435,8 @@ fn gates_are_evaluated_in_the_documented_order() {
     );
 
     // 11. Replay suppression sits ahead of the budget: a request id already
-    //     decided returns its prior outcome and is NOT charged again, even
-    //     when the retry's cost could no longer be afforded.
+    //     forwarded returns explicit `Replayed`, performs no second effect and is
+    //     NOT charged again, even when the retry's cost could no longer be afforded.
     let mut d = two_tenant_deployment();
     let req = request("acme", "alice", "memory.ingest", "r-replay");
     let call = |cost| Call {
@@ -451,8 +451,8 @@ fn gates_are_evaluated_in_the_documented_order() {
     assert_eq!(d.spent("acme"), Some(600));
     assert_eq!(
         d.admit(call(600)),
-        Outcome::Forwarded,
-        "a decided request id replays its outcome"
+        Outcome::Replayed,
+        "a decided request id is acknowledged without a second execution"
     );
     assert_eq!(
         d.spent("acme"),

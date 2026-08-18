@@ -28,8 +28,9 @@
 //!    read. After authorization on purpose: refusing earlier would tell an
 //!    unauthorized prober which tools are sensitive;
 //! 7. **model governance**, then **Q-Page activation**;
-//! 8. **replay** — a `request_id` already decided returns its prior outcome
-//!    rather than being billed twice;
+//! 8. **replay** — a `request_id` already forwarded yields explicit
+//!    [`Outcome::Replayed`], is journaled at zero cost, and no effect may
+//!    execute again;
 //! 9. **budget** — charged **last**, so a call refused for any other reason
 //!    costs the tenant nothing.
 //!

@@ -8,6 +8,7 @@ publish = false
 description = "End-to-end conformance tests for the canonical CCOS Enterprise Knowledge Plane."
 
 [dependencies]
+ccos-enterprise-extract = { path = "../../crates/ccos-enterprise-extract" }
 ccos-enterprise-ingest = { path = "../../crates/ccos-enterprise-ingest" }
 ccos-enterprise-knowledge = { path = "../../crates/ccos-enterprise-knowledge" }
 ccos-enterprise-knowledge-store = { path = "../../crates/ccos-enterprise-knowledge-store" }

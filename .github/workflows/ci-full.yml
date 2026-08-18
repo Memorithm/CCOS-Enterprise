@@ -35,6 +35,10 @@ jobs:
         run: |
           cargo test -p ccos-enterprise-parse --release
           cargo test -p ccos-knowledge-conformance --test p1_parse --release
+      - name: Knowledge Plane P2 structural extraction
+        run: |
+          cargo test -p ccos-enterprise-extract --release
+          cargo test -p ccos-knowledge-conformance --test p2_extract --release
       - name: RBAC + tenancy + policy contracts
         run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
       - name: governance wire formats (claim, manifest, revocation)

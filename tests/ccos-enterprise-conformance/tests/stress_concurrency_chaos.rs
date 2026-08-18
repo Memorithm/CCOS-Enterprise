@@ -444,6 +444,7 @@ fn storm_deployment(cfg: &StormConfig) -> Deployment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     Forwarded,
+    Replayed,
     Unauthenticated,
     ActorMismatch,
     TenantNotOwnedByOrg,
@@ -478,20 +479,20 @@ const ALL_KINDS: &[Kind] = &[
     Kind::JustificationRequired,
 ];
 
-/// The one refusal `admit` cannot produce, so it is deliberately absent from
-/// `ALL_KINDS` above.
+/// Outcomes this particular storm cannot produce, each for an explicit reason.
 ///
+/// `Replayed` is a real `admit` outcome, but every scripted request id below is
+/// globally unique, so replay suppression must never fire in this harness.
 /// [`Refusal::StorageExhausted`] comes from the governed **cell** path
-/// (`put_cell`), which runs `admit` first and then its own effect; the storm
-/// drives `admit` directly, so demanding it here would be demanding a refusal
-/// this harness structurally cannot reach. It is classified in `kind_of` all
-/// the same, so a future storm that does drive `put_cell` gets it for free —
-/// and `stress_tenancy_fuzz` covers it, under concurrency included.
-const NOT_REACHABLE_THROUGH_ADMIT: &[Kind] = &[Kind::StorageExhausted];
+/// (`put_cell`), which runs `admit` first and then its own effect; this storm
+/// drives `admit` directly. Both remain classified in `kind_of` so future
+/// harnesses cannot silently forget either outcome.
+const NOT_REACHABLE_IN_STORM: &[Kind] = &[Kind::Replayed, Kind::StorageExhausted];
 
 fn kind_of(o: &Outcome) -> Kind {
     match o {
         Outcome::Forwarded => Kind::Forwarded,
+        Outcome::Replayed => Kind::Replayed,
         Outcome::Refused(Refusal::Unauthenticated) => Kind::Unauthenticated,
         Outcome::Refused(Refusal::ActorMismatch) => Kind::ActorMismatch,
         Outcome::Refused(Refusal::TenantNotOwnedByOrg) => Kind::TenantNotOwnedByOrg,
@@ -753,9 +754,9 @@ fn script_for_thread(cfg: &StormConfig, tid: usize) -> Vec<Op> {
     }
     // Request ids are assigned by final position, so they are globally unique
     // and each names exactly one (tenant, cost) pair. Uniqueness is not
-    // cosmetic: a repeated (tenant, request_id) is suppressed as a replay and
-    // forwarded *free*, which would silently collapse the billing this file
-    // reconciles. `run_storm` asserts it before the storm starts.
+    // cosmetic: a repeated (tenant, request_id) is suppressed as explicit
+    // `Replayed` with no second effect and zero cost, which would silently collapse
+    // the billing this file reconciles. `run_storm` asserts uniqueness first.
     for (pos, op) in ops.iter_mut().enumerate() {
         if let Op::Admit(a) = op {
             a.request_id = format!("t{tid:02}-{pos:06}");
@@ -1192,11 +1193,11 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
             "the storm never produced {kind:?}"
         );
     }
-    for kind in NOT_REACHABLE_THROUGH_ADMIT {
+    for kind in NOT_REACHABLE_IN_STORM {
         assert!(
             !seen_kinds.contains(kind),
-            "{kind:?} is documented as unreachable through `admit` and the \
-             storm just produced it — the classification above is stale"
+            "{kind:?} is documented as unreachable in this storm and was produced — \
+             either the script invariants or the classification above are stale"
         );
     }
     // REGRESSION GUARD: the three hostile probes. Every thread issued

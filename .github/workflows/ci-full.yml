@@ -31,6 +31,10 @@ jobs:
         run: |
           cargo test -p ccos-enterprise-normalize --release
           cargo test -p ccos-knowledge-conformance --test p1_normalize --release
+      - name: Knowledge Plane P1 source-span parsing
+        run: |
+          cargo test -p ccos-enterprise-parse --release
+          cargo test -p ccos-knowledge-conformance --test p1_parse --release
       - name: RBAC + tenancy + policy contracts
         run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
       - name: governance wire formats (claim, manifest, revocation)

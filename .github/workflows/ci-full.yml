@@ -2,7 +2,7 @@ name: CI (full)
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/runtime-true-idempotent-replay]
   pull_request:
   schedule:
     - cron: "0 5 * * *"
@@ -81,6 +81,143 @@ jobs:
         run: cargo test -p ccos-enterprise-conformance --test isolation --release
       - name: adversarial (escalation, quota abuse, forged restore, admin trail)
         run: cargo test -p ccos-enterprise-conformance --test adversarial --release
+
+  replay_semantics_patch:
+    name: verify endurance replay semantics
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/runtime-true-idempotent-replay'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/runtime-true-idempotent-replay
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Update the dedicated replay-flood contract and execute it
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/ccos-enterprise-conformance/tests/stress_endurance.rs')
+          s = p.read_text()
+          def rep(old, new):
+              global s
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'expected exactly one match, found {n}: {old[:100]!r}')
+              s = s.replace(old, new, 1)
+
+          rep('''/// What was repaired: a `(tenant, request_id)` the deployment has already
+          /// decided returns `Forwarded` **without charging again**, and moves
+          /// `gateway.replayed`. Identical input — 10 000 replays of one id, against the
+          /// fattest and the thinnest budget in the fleet — opposite expectation: one
+          /// charge each, and a budget that repetition can no longer drain.
+          ''', '''/// What was repaired: a `(tenant, request_id)` the deployment has already
+          /// decided returns explicit `Replayed` at zero cost. The effect is not eligible
+          /// to execute again, and `gateway.replayed` moves. Identical input — 10 000
+          /// attempts of one id against the fattest and thinnest budgets — opposite
+          /// expectation: one `Forwarded` charge each and 9 999 `Replayed` acknowledgements.
+          ''')
+
+          old_fat = '''    let mut admitted = 0u64;
+              for _ in 0..REPLAYS {
+                  let out = d.admit(Call {
+                      actor: &alice,
+                      request: &req,
+                      model: "claude-opus",
+                      cost_tokens: 1,
+                      variant: None,
+                      justification: None,
+                  });
+                  admitted += u64::from(out.is_forwarded());
+              }
+              assert_eq!(
+                  admitted, REPLAYS,
+                  "a suppressed replay must still be answered, not refused"
+              );
+          '''
+          new_fat = '''    let mut fat_forwarded = 0u64;
+              let mut fat_replayed = 0u64;
+              for attempt in 0..REPLAYS {
+                  let out = d.admit(Call {
+                      actor: &alice,
+                      request: &req,
+                      model: "claude-opus",
+                      cost_tokens: 1,
+                      variant: None,
+                      justification: None,
+                  });
+                  match out {
+                      Outcome::Forwarded => fat_forwarded += 1,
+                      Outcome::Replayed => fat_replayed += 1,
+                      Outcome::Refused(r) => panic!("fat replay attempt {attempt} was refused: {r:?}"),
+                  }
+              }
+              assert_eq!(fat_forwarded, 1, "only the first request may execute");
+              assert_eq!(fat_replayed, REPLAYS - 1, "every duplicate id is an explicit replay");
+          '''
+          rep(old_fat, new_fat)
+
+          old_thin = '''    let mut admitted_thin = 0u64;
+              for _ in 0..REPLAYS {
+                  let out = d.admit(Call {
+                      actor: &alice,
+                      request: &req,
+                      model: "claude-opus",
+                      cost_tokens: 5,
+                      variant: None,
+                      justification: None,
+                  });
+                  admitted_thin += u64::from(out.is_forwarded());
+              }
+              assert_eq!(admitted_thin, REPLAYS);
+          '''
+          new_thin = '''    let mut thin_forwarded = 0u64;
+              let mut thin_replayed = 0u64;
+              for attempt in 0..REPLAYS {
+                  let out = d.admit(Call {
+                      actor: &alice,
+                      request: &req,
+                      model: "claude-opus",
+                      cost_tokens: 5,
+                      variant: None,
+                      justification: None,
+                  });
+                  match out {
+                      Outcome::Forwarded => thin_forwarded += 1,
+                      Outcome::Replayed => thin_replayed += 1,
+                      Outcome::Refused(r) => panic!("thin replay attempt {attempt} was refused: {r:?}"),
+                  }
+              }
+              assert_eq!(thin_forwarded, 1, "only the first thin-tenant request may execute");
+              assert_eq!(thin_replayed, REPLAYS - 1);
+          '''
+          rep(old_thin, new_thin)
+
+          rep('''    assert_eq!(metric(&m, "gateway.forwarded"), 2 * REPLAYS);
+              assert_eq!(metric(&m, "gateway.refused"), 0);
+          ''', '''    assert_eq!(metric(&m, "gateway.requests"), 2 * REPLAYS);
+              assert_eq!(metric(&m, "gateway.forwarded"), 2);
+              assert_eq!(metric(&m, "gateway.refused"), 0);
+          ''')
+
+          rep('''//! 3. **the counters** — `gateway.requests == gateway.forwarded +
+          //!    gateway.refused`, each equals the journal's own tally, the
+          ''', '''//! 3. **the counters** — `gateway.requests == gateway.forwarded +
+          //!    gateway.replayed + gateway.refused`, each equals the journal's own tally, the
+          ''')
+
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          cargo test -p ccos-enterprise-conformance --test stress_endurance a_replayed_request_id_is_charged_exactly_once --release -- --exact
+          cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release --no-run
+          git config user.name 'MEMOPERF'
+          git config user.email 'contact@checkupauto.fr'
+          git add tests/ccos-enterprise-conformance/tests/stress_endurance.rs
+          git diff --cached --quiet && exit 0
+          git commit -m 'test(runtime): assert non-executing replay under flood'
+          git push origin HEAD:fix/runtime-true-idempotent-replay
 
   conformance:
     name: Core dependency conformance

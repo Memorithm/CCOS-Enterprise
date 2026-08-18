@@ -36,6 +36,7 @@ members = [
     "crates/ccos-enterprise-octasoma",
     "crates/ccos-enterprise-mcp",
     "crates/ccos-enterprise-sessions",
+    "crates/ccos-enterprise-execution",
     "tools/ccos-license-server",
     "tests/ccos-enterprise-conformance",
     "tests/ccos-knowledge-conformance",

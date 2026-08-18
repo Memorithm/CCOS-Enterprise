@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
 
 const MCP_PROTOCOL_VERSION = '2024-11-05'
@@ -72,10 +73,18 @@ export class StdioMcpClient {
 
   async callTool(name, arguments_, meta, options = {}) {
     if (!this.child) await this.start()
+    const executionMeta = {
+      ...(meta || {}),
+      // `request_id` is the stable idempotency identity. A durable outbox retry
+      // deliberately reuses it. The execution journal, however, needs one
+      // unique call id per physical attempt so a known failed attempt and its
+      // retry remain two valid lifecycles instead of a corrupt duplicate.
+      execution_attempt_id: randomUUID(),
+    }
     const params = {
       name,
       arguments: arguments_ || {},
-      _meta: { ccos: meta || {} },
+      _meta: { ccos: executionMeta },
     }
     const result = await this.request('tools/call', params, options)
     if (result?.isError === true) {

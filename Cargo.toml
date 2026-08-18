@@ -24,6 +24,7 @@ members = [
     "crates/ccos-enterprise-semantic",
     "crates/ccos-enterprise-decision",
     "crates/ccos-enterprise-decision-store",
+    "crates/ccos-enterprise-decision-service",
     "crates/ccos-enterprise-policy",
     "crates/ccos-enterprise-gateway",
     "crates/ccos-enterprise-observability",

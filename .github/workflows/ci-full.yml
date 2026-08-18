@@ -13,7 +13,7 @@ permissions:
 jobs:
   budget_replay_fix:
     name: repair replay billing conformance
-    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/runtime-true-idempotent-replay'
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/fix/runtime-true-idempotent-replay')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -29,7 +29,6 @@ jobs:
           from pathlib import Path
           p = Path('tests/ccos-enterprise-conformance/tests/stress_budget_property.rs')
           s = p.read_text()
-
           old_doc = '''/// A decided `(tenant, request_id)` is now Forwarded without being charged.
           /// The scenario is kept verbatim — the same ten replays of one id, at the same
           /// 100 tokens each — with the opposite expectation: billed once.
@@ -42,7 +41,6 @@ jobs:
           if s.count(old_doc) != 1:
               raise SystemExit(f'expected one stale replay doc block, found {s.count(old_doc)}')
           s = s.replace(old_doc, new_doc, 1)
-
           old_loop = '''    for i in 0..10 {
               assert_eq!(
                   d.admit(Call {
@@ -88,7 +86,6 @@ jobs:
           if s.count(old_loop) != 1:
               raise SystemExit(f'expected one stale replay loop, found {s.count(old_loop)}')
           s = s.replace(old_loop, new_loop, 1)
-
           old_trail = '''    assert!(
               trail.iter().all(|r| r.request_id == "the-same-request"),
               "…under the id the client sent…"

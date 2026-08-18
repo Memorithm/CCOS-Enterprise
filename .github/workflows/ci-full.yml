@@ -47,6 +47,10 @@ jobs:
         run: |
           cargo test -p ccos-enterprise-kg --release
           cargo test -p ccos-knowledge-conformance --test p3_graph --release
+      - name: Knowledge Plane P4 ontology validation
+        run: |
+          cargo test -p ccos-enterprise-ontology --release
+          cargo test -p ccos-knowledge-conformance --test p4_ontology --release
       - name: RBAC + tenancy + policy contracts
         run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
       - name: governance wire formats (claim, manifest, revocation)

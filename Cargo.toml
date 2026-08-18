@@ -2,11 +2,6 @@
 resolver = "2"
 members = [
     # ── CCOS Core ────────────────────────────────────────────────────────
-    # CCOS Enterprise now carries the Core kernel it is built on, brought in
-    # with its full history (`git subtree`), not copied. One authoritative Core
-    # in one workspace: `cargo test` covers Core and Enterprise in a single
-    # command, and a change that spans the boundary is one commit rather than
-    # two repositories and a version bump.
     "core",
     "core/crates/ccos-memory-runtime",
 
@@ -23,6 +18,7 @@ members = [
     "crates/ccos-enterprise-extract",
     "crates/ccos-enterprise-resolution",
     "crates/ccos-enterprise-kg",
+    "crates/ccos-enterprise-ontology",
     "crates/ccos-enterprise-policy",
     "crates/ccos-enterprise-gateway",
     "crates/ccos-enterprise-observability",
@@ -47,15 +43,7 @@ license = "LicenseRef-TarekZekriti-Dual"
 repository = "https://github.com/Memorithm/CCOS-Enterprise"
 
 [workspace.dependencies]
-# One workspace, one Core. This was a `path = "../CCOS-Core"` sibling
-# dependency marked TEMPORARY, resolved in CI by checking out a second
-# repository and symlinking it into place. It is now an ordinary path to a
-# member of this workspace: no sibling checkout, no symlink, no second
-# lockfile, and a Core change plus its Enterprise consequence are one commit.
 ccos-core = { path = "core", default-features = false }
-# OctaSoma is a direct Enterprise memory dependency, never a Core dependency.
-# The pin is immutable; it will be advanced only after the corresponding
-# canonical OctaSoma change is reviewed and merged.
 octasoma = { git = "https://github.com/Memorithm/octasoma", rev = "145761aeb52ef8ded85dcf2b8c97690005284926", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

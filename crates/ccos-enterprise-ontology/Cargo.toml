@@ -1,0 +1,14 @@
+[package]
+name = "ccos-enterprise-ontology"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Deterministic tenant-scoped ontology schemas and validation for CCOS Enterprise Knowledge proposals."
+
+[dependencies]
+ccos-enterprise-extract = { path = "../ccos-enterprise-extract" }
+ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
+ccos-enterprise-resolution = { path = "../ccos-enterprise-resolution" }
+sha2.workspace = true

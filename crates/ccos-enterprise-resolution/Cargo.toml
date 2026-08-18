@@ -1,0 +1,16 @@
+[package]
+name = "ccos-enterprise-resolution"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Deterministic exact-key entity resolution proposals for CCOS Enterprise Knowledge Plane observations."
+
+[dependencies]
+ccos-enterprise-extract = { path = "../ccos-enterprise-extract" }
+ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
+sha2.workspace = true
+
+[dev-dependencies]
+ccos-enterprise-ingest = { path = "../ccos-enterprise-ingest" }

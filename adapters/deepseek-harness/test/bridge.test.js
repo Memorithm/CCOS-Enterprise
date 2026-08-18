@@ -117,6 +117,48 @@ test('turn capture is persisted to outbox before send and retained on failure', 
   assert.ok(calls.some((call) => call.args.source.includes('remember this')))
 })
 
+test('DeepSeek Harness rc.7 tool/result message is correlated and captured', async () => {
+  const outbox = new MemoryOutbox()
+  const client = {
+    async start() {}, async close() {},
+    async callTool() { throw new Error('keep capture in outbox') },
+  }
+  const bridge = new DeepSeekHarnessBridge({ client, outbox, config: config({ recallEnabled: false }), logger: { warn() {} } })
+  await bridge.init()
+  const s = session('rc7-tool-result')
+  bridge.onSessionEvent(s, { type: 'turn/start', time: 1, data: { turn: 11 } })
+  bridge.onSessionEvent(s, { type: 'user/message', time: 2, data: { id: 'u', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'run tool' }] } })
+  bridge.onSessionEvent(s, { type: 'tool/call', time: 3, data: { turn: 11, step: 1, callId: 'call-7', name: 'example_tool', arguments: '{"x":1}' } })
+  bridge.onSessionEvent(s, {
+    type: 'tool/result',
+    time: 4,
+    data: {
+      turn: 11,
+      step: 1,
+      message: {
+        id: 'tool-message-7',
+        role: 'user',
+        source: { kind: 'tool', callId: 'call-7' },
+        content: [{
+          type: 'tool-result',
+          toolCallId: 'call-7',
+          content: [{ type: 'text', text: 'rc7 tool output' }],
+          isError: true,
+        }],
+      },
+      error: { name: 'ExampleError', code: 'EXAMPLE' },
+    },
+  })
+  bridge.onSessionEvent(s, { type: 'turn/end', time: 5, data: { turn: 11, reason: { kind: 'completed' } } })
+  await bridge.flush()
+
+  const [capture] = await outbox.list()
+  assert.ok(capture)
+  assert.match(capture.value.arguments.source, /example_tool \(call-7\)/)
+  assert.match(capture.value.arguments.source, /rc7 tool output/)
+  assert.match(capture.value.arguments.source, /failed: true/)
+})
+
 test('recall timeout is bounded by the hard 3s product ceiling', () => {
   assert.equal(clampRecallTimeout(500, 3000), 500)
   assert.equal(clampRecallTimeout(8000, 9000), 3000)

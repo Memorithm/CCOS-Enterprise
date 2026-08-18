@@ -8,27 +8,24 @@ import { DurableOutbox } from './outbox.js'
 export const name = 'ccos-enterprise-memory'
 export const inject = ['systemPrompt']
 
+function configuredString(value, fallback = '') {
+  if (typeof value === 'string' && value.trim()) return value.trim()
+  return typeof fallback === 'string' ? fallback.trim() : ''
+}
+
 function normalizeConfig(config = {}) {
   const dshHome = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
   return {
     enabled: config.enabled !== false,
-    command: typeof config.command === 'string' && config.command.trim()
-      ? config.command.trim()
-      : 'ccos-enterprise-mcp-server',
+    command: configuredString(config.command, 'ccos-enterprise-mcp-server'),
     args: Array.isArray(config.args) ? config.args.map(String) : [],
-    cwd: typeof config.cwd === 'string' && config.cwd.trim() ? config.cwd : undefined,
+    cwd: configuredString(config.cwd) || undefined,
     env: config.env && typeof config.env === 'object' ? config.env : {},
-    tenantId: typeof config.tenantId === 'string' ? config.tenantId : '',
-    actorId: typeof config.actorId === 'string' ? config.actorId : '',
-    agentId: typeof config.agentId === 'string' && config.agentId.trim()
-      ? config.agentId.trim()
-      : 'deepseek-harness',
-    profileId: typeof config.profileId === 'string' && config.profileId.trim()
-      ? config.profileId.trim()
-      : 'default',
-    model: typeof config.model === 'string' && config.model.trim()
-      ? config.model.trim()
-      : 'deepseek-harness',
+    tenantId: configuredString(config.tenantId, process.env.CCOS_ENTERPRISE_TENANT),
+    actorId: configuredString(config.actorId, process.env.CCOS_ENTERPRISE_ACTOR),
+    agentId: configuredString(config.agentId, 'deepseek-harness'),
+    profileId: configuredString(config.profileId, 'default'),
+    model: configuredString(config.model, process.env.CCOS_ENTERPRISE_MODEL || 'deepseek-harness'),
     recallEnabled: config.recallEnabled !== false,
     captureEnabled: config.captureEnabled !== false,
     recallTimeoutMs: Number(config.recallTimeoutMs ?? 1000),
@@ -36,9 +33,7 @@ function normalizeConfig(config = {}) {
     recallBudget: Number(config.recallBudget ?? 2048),
     contextMaxChars: Number(config.contextMaxChars ?? 6000),
     failOnStartupError: config.failOnStartupError === true,
-    stateDir: typeof config.stateDir === 'string' && config.stateDir.trim()
-      ? config.stateDir.trim()
-      : join(dshHome, 'ccos-enterprise', 'outbox'),
+    stateDir: configuredString(config.stateDir) || join(dshHome, 'ccos-enterprise', 'outbox'),
   }
 }
 

@@ -47,6 +47,24 @@ function recallMessage(text) {
   }
 }
 
+function dshToolResult(data) {
+  const message = record(data?.message)
+  const source = record(message?.source)
+  const block = Array.isArray(message?.content)
+    ? message.content.find((entry) => entry?.type === 'tool-result')
+    : undefined
+  const callId = readString(source, 'callId')
+    ?? readString(block, 'toolCallId')
+    ?? readString(data, 'callId')
+  if (!callId) return undefined
+
+  return {
+    callId,
+    result: block?.content ?? data?.result ?? data?.output,
+    failed: Boolean(block?.isError || data?.error || data?.isError || data?.failed),
+  }
+}
+
 export function memoryGuidance() {
   return [
     'CCOS Enterprise may append one automatic long-term-memory recall to an accepted direct-user turn.',
@@ -204,13 +222,13 @@ export class DeepSeekHarnessBridge {
       case 'tool/result': {
         const data = record(event.data)
         const turn = readNumber(data, 'turn') ?? this.activeTurn.get(session.id)
-        const callId = readString(data, 'callId')
-        if (turn === undefined || !callId) return
+        const result = dshToolResult(data)
+        if (turn === undefined || !result) return
         const state = this.#ensureTurn(session, turn)
-        const tool = state.toolCalls.find((entry) => entry.callId === callId)
+        const tool = state.toolCalls.find((entry) => entry.callId === result.callId)
         if (!tool) return
-        tool.result = data?.result ?? data?.output
-        tool.failed = Boolean(data?.isError ?? data?.failed)
+        tool.result = result.result
+        tool.failed = result.failed
         return
       }
       case 'turn/end': {

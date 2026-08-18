@@ -173,6 +173,19 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
+    macro_rules! governed_call {
+        ($actor:expr, $request:expr) => {
+            Call {
+                actor: $actor,
+                request: $request,
+                model: "claude-opus",
+                cost_tokens: 10,
+                variant: None,
+                justification: None,
+            }
+        };
+    }
+
     #[derive(Clone, Default)]
     struct Recorder {
         calls: Arc<Mutex<Vec<(String, String)>>>,
@@ -221,20 +234,6 @@ mod tests {
         deployment
     }
 
-    fn governed_call<'a>(
-        actor: &'a ccos_enterprise_auth::AuthenticatedActor,
-        request: &'a ccos_enterprise_gateway::GatewayRequest,
-    ) -> Call<'a> {
-        Call {
-            actor,
-            request,
-            model: "claude-opus",
-            cost_tokens: 10,
-            variant: None,
-            justification: None,
-        }
-    }
-
     #[test]
     fn forwarded_request_id_becomes_exact_durable_call_id() {
         let root = scratch("correlation");
@@ -242,7 +241,7 @@ mod tests {
         let alice = actor("memorithm", "alice", AuthStrength::Token);
         let req = request("acme", "alice", "memory.recall", "req-correlation-17");
 
-        let outcome = mcp.call(governed_call(&alice, &req), &json!({}));
+        let outcome = mcp.call(governed_call!(&alice, &req), &json!({}));
         assert!(matches!(outcome, McpOutcome::Ok(_)), "{outcome:?}");
         let recovered = mcp.recover_tools("acme").expect("recover");
         assert_eq!(recovered.len(), 1);
@@ -261,11 +260,11 @@ mod tests {
         let req = request("acme", "alice", "memory.recall", "req-replay");
 
         assert!(matches!(
-            mcp.call(governed_call(&alice, &req), &json!({})),
+            mcp.call(governed_call!(&alice, &req), &json!({})),
             McpOutcome::Ok(_)
         ));
         assert_eq!(
-            mcp.call(governed_call(&alice, &req), &json!({})),
+            mcp.call(governed_call!(&alice, &req), &json!({})),
             McpOutcome::Replayed
         );
         assert_eq!(mcp.backend().execution().inner().call_count(), 1);
@@ -281,7 +280,7 @@ mod tests {
         let bob = actor("memorithm", "bob", AuthStrength::Token);
         let req = request("acme", "bob", "memory.ingest", "req-refused");
 
-        let outcome = mcp.call(governed_call(&bob, &req), &json!({}));
+        let outcome = mcp.call(governed_call!(&bob, &req), &json!({}));
         assert!(matches!(outcome, McpOutcome::Refused(_)), "{outcome:?}");
         assert_eq!(mcp.backend().execution().inner().call_count(), 0);
         assert!(!mcp.backend().has_pending_context());
@@ -296,7 +295,7 @@ mod tests {
         let alice = actor("memorithm", "alice", AuthStrength::Token);
         let req = request("acme", "alice", "memory.recall", "bad\nrequest");
 
-        let outcome = mcp.call(governed_call(&alice, &req), &json!({}));
+        let outcome = mcp.call(governed_call!(&alice, &req), &json!({}));
         assert!(
             matches!(outcome, McpOutcome::BackendError(_)),
             "{outcome:?}"

@@ -186,16 +186,15 @@ impl EffectRecord {
     }
 
     fn execution(&self) -> Result<DispatchExecution, String> {
-        let turn = self
-            .turn_id
-            .as_deref()
-            .ok_or_else(|| "effect marker predates execution correlation (missing turn_id)".to_string())?;
-        let step = self
-            .step_id
-            .as_deref()
-            .ok_or_else(|| "effect marker predates execution correlation (missing step_id)".to_string())?;
+        let turn = self.turn_id.as_deref().ok_or_else(|| {
+            "effect marker predates execution correlation (missing turn_id)".to_string()
+        })?;
+        let step = self.step_id.as_deref().ok_or_else(|| {
+            "effect marker predates execution correlation (missing step_id)".to_string()
+        })?;
         let attempt = self.execution_attempt_id.as_deref().ok_or_else(|| {
-            "effect marker predates execution correlation (missing execution_attempt_id)".to_string()
+            "effect marker predates execution correlation (missing execution_attempt_id)"
+                .to_string()
         })?;
         Ok(DispatchExecution::new(turn, step, attempt))
     }
@@ -458,12 +457,20 @@ impl JournaledBackend {
         }
     }
 
-    fn arm(&mut self, tenant: &str, execution: DispatchExecution, effect: EffectRecord) -> Result<(), String> {
+    fn arm(
+        &mut self,
+        tenant: &str,
+        execution: DispatchExecution,
+        effect: EffectRecord,
+    ) -> Result<(), String> {
         if self.pending.is_some() {
             return Err("execution backend already has a pending request".into());
         }
         self.execution.inner_mut().arm(effect)?;
-        self.pending = Some(PendingExecution { tenant: tenant.to_string(), execution });
+        self.pending = Some(PendingExecution {
+            tenant: tenant.to_string(),
+            execution,
+        });
         Ok(())
     }
 
@@ -472,15 +479,18 @@ impl JournaledBackend {
         self.execution.inner_mut().disarm();
     }
 
-    fn inner(&self) -> &TenantBackend { self.execution.inner() }
-    fn inner_mut(&mut self) -> &mut TenantBackend { self.execution.inner_mut() }
+    fn inner(&self) -> &TenantBackend {
+        self.execution.inner()
+    }
+    fn inner_mut(&mut self) -> &mut TenantBackend {
+        self.execution.inner_mut()
+    }
 
     fn reconcile_effect(&mut self, effect: &EffectRecord) -> Result<(), String> {
         let execution = effect.execution()?;
-        let hash = effect
-            .output_sha256
-            .as_deref()
-            .ok_or_else(|| "effect marker has no output_sha256 for execution reconciliation".to_string())?;
+        let hash = effect.output_sha256.as_deref().ok_or_else(|| {
+            "effect marker has no output_sha256 for execution reconciliation".to_string()
+        })?;
         let success = effect.state == EffectState::Succeeded;
         self.execution
             .reconcile_finished(&effect.tenant, &execution.call_id, success, hash)
@@ -495,12 +505,19 @@ impl JournaledBackend {
 
     #[cfg(test)]
     fn recover_tools(&mut self, tenant: &str) -> Result<Vec<execution::ToolRecovery>, String> {
-        self.execution.recover_tools(tenant).map_err(|error| error.to_string())
+        self.execution
+            .recover_tools(tenant)
+            .map_err(|error| error.to_string())
     }
 }
 
 impl Backend for JournaledBackend {
-    fn dispatch(&mut self, tenant: &str, core_tool: &str, arguments: &Value) -> Result<Value, String> {
+    fn dispatch(
+        &mut self,
+        tenant: &str,
+        core_tool: &str,
+        arguments: &Value,
+    ) -> Result<Value, String> {
         let pending = self
             .pending
             .take()
@@ -1132,21 +1149,44 @@ mod tests {
         cleanup(&root);
         let mut server = Server::new(config).unwrap();
         let first = server
-            .handle(&call(1, "alice", "same-request", "memory.ingest", json!({
-                "uri": "dsh/test.md", "source": "alpha"
-            })))
+            .handle(&call(
+                1,
+                "alice",
+                "same-request",
+                "memory.ingest",
+                json!({
+                    "uri": "dsh/test.md", "source": "alpha"
+                }),
+            ))
             .unwrap();
         assert!(first.get("result").is_some(), "{first}");
         let replay = server
-            .handle(&call(2, "alice", "same-request", "memory.ingest", json!({
-                "uri": "dsh/test.md", "source": "different"
-            })))
+            .handle(&call(
+                2,
+                "alice",
+                "same-request",
+                "memory.ingest",
+                json!({
+                    "uri": "dsh/test.md", "source": "different"
+                }),
+            ))
             .unwrap();
         assert_eq!(replay["result"]["structuredContent"]["replayed"], true);
-        let recovered = server.front_door.backend_mut().recover_tools("acme").unwrap();
-        assert_eq!(recovered.len(), 1, "governance replay must never enter the backend journal");
+        let recovered = server
+            .front_door
+            .backend_mut()
+            .recover_tools("acme")
+            .unwrap();
+        assert_eq!(
+            recovered.len(),
+            1,
+            "governance replay must never enter the backend journal"
+        );
         assert_eq!(recovered[0].call_id, "attempt-1");
-        assert!(matches!(recovered[0].disposition, ToolRecoveryDisposition::Completed { success: true, .. }));
+        assert!(matches!(
+            recovered[0].disposition,
+            ToolRecoveryDisposition::Completed { success: true, .. }
+        ));
         drop(server);
         cleanup(&root);
     }
@@ -1163,18 +1203,34 @@ mod tests {
         assert_eq!(failed["result"]["isError"], true);
         assert_eq!(server.front_door.deployment().spent("acme"), Some(0));
         let retry = server
-            .handle(&call(2, "alice", "retry-me", "memory.ingest", json!({
-                "uri": "dsh/retry.md", "source": "second attempt succeeds"
-            })))
+            .handle(&call(
+                2,
+                "alice",
+                "retry-me",
+                "memory.ingest",
+                json!({
+                    "uri": "dsh/retry.md", "source": "second attempt succeeds"
+                }),
+            ))
             .unwrap();
         assert!(retry.get("result").is_some(), "{retry}");
         assert_eq!(server.front_door.deployment().spent("acme"), Some(1));
-        let recovered = server.front_door.backend_mut().recover_tools("acme").unwrap();
+        let recovered = server
+            .front_door
+            .backend_mut()
+            .recover_tools("acme")
+            .unwrap();
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0].call_id, "attempt-1");
         assert_eq!(recovered[1].call_id, "attempt-2");
-        assert!(matches!(recovered[0].disposition, ToolRecoveryDisposition::Completed { success: false, .. }));
-        assert!(matches!(recovered[1].disposition, ToolRecoveryDisposition::Completed { success: true, .. }));
+        assert!(matches!(
+            recovered[0].disposition,
+            ToolRecoveryDisposition::Completed { success: false, .. }
+        ));
+        assert!(matches!(
+            recovered[1].disposition,
+            ToolRecoveryDisposition::Completed { success: true, .. }
+        ));
         drop(server);
         cleanup(&root);
     }
@@ -1187,21 +1243,40 @@ mod tests {
         {
             let mut server = Server::new(config.clone()).unwrap();
             server
-                .handle(&call(1, "alice", "restart-request", "memory.ingest", json!({
-                    "uri": "dsh/restart.md", "source": "durable"
-                })))
+                .handle(&call(
+                    1,
+                    "alice",
+                    "restart-request",
+                    "memory.ingest",
+                    json!({
+                        "uri": "dsh/restart.md", "source": "durable"
+                    }),
+                ))
                 .unwrap();
         }
         {
             let mut restarted = Server::new(config).unwrap();
             assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
-            let recovered = restarted.front_door.backend_mut().recover_tools("acme").unwrap();
+            let recovered = restarted
+                .front_door
+                .backend_mut()
+                .recover_tools("acme")
+                .unwrap();
             assert_eq!(recovered.len(), 1);
-            assert!(matches!(recovered[0].disposition, ToolRecoveryDisposition::Completed { success: true, .. }));
+            assert!(matches!(
+                recovered[0].disposition,
+                ToolRecoveryDisposition::Completed { success: true, .. }
+            ));
             let replay = restarted
-                .handle(&call(2, "alice", "restart-request", "memory.ingest", json!({
-                    "uri": "dsh/restart.md", "source": "must-not-run"
-                })))
+                .handle(&call(
+                    2,
+                    "alice",
+                    "restart-request",
+                    "memory.ingest",
+                    json!({
+                        "uri": "dsh/restart.md", "source": "must-not-run"
+                    }),
+                ))
                 .unwrap();
             assert_eq!(replay["result"]["structuredContent"]["replayed"], true);
         }
@@ -1220,14 +1295,20 @@ mod tests {
             let mut journal = execution::ExecutionJournal::open(&path, "tenant/acme/mcp")
                 .unwrap()
                 .journal;
-            journal.append(execution::ExecutionEvent::ToolRequested {
-                turn_id: "turn-r".into(),
-                step_id: "step-r".into(),
-                call_id: "attempt-r".into(),
-                tool: "ingest".into(),
-                input_sha256: "input".into(),
-            }).unwrap();
-            journal.append(execution::ExecutionEvent::ToolStarted { call_id: "attempt-r".into() }).unwrap();
+            journal
+                .append(execution::ExecutionEvent::ToolRequested {
+                    turn_id: "turn-r".into(),
+                    step_id: "step-r".into(),
+                    call_id: "attempt-r".into(),
+                    tool: "ingest".into(),
+                    input_sha256: "input".into(),
+                })
+                .unwrap();
+            journal
+                .append(execution::ExecutionEvent::ToolStarted {
+                    call_id: "attempt-r".into(),
+                })
+                .unwrap();
             let effect = EffectRecord {
                 request_id: "recovered-success".into(),
                 tenant: "acme".into(),
@@ -1246,13 +1327,20 @@ mod tests {
         {
             let mut restarted = Server::new(config).unwrap();
             assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
-            let recovered = restarted.front_door.backend_mut().recover_tools("acme").unwrap();
+            let recovered = restarted
+                .front_door
+                .backend_mut()
+                .recover_tools("acme")
+                .unwrap();
             assert!(matches!(
                 &recovered[0].disposition,
                 ToolRecoveryDisposition::Completed { success: true, output_sha256 }
                     if output_sha256 == "known-output"
             ));
-            assert_eq!(read_effect(&effect_path(&root)).unwrap().unwrap().state, EffectState::Settled);
+            assert_eq!(
+                read_effect(&effect_path(&root)).unwrap().unwrap().state,
+                EffectState::Settled
+            );
         }
         cleanup(&root);
     }
@@ -1269,13 +1357,24 @@ mod tests {
             let mut journal = execution::ExecutionJournal::open(&path, "tenant/acme/mcp")
                 .unwrap()
                 .journal;
-            journal.append(execution::ExecutionEvent::ToolRequested {
-                turn_id: "turn-u".into(), step_id: "step-u".into(), call_id: "attempt-u".into(),
-                tool: "recall".into(), input_sha256: "input".into(),
-            }).unwrap();
-            journal.append(execution::ExecutionEvent::ToolStarted { call_id: "attempt-u".into() }).unwrap();
+            journal
+                .append(execution::ExecutionEvent::ToolRequested {
+                    turn_id: "turn-u".into(),
+                    step_id: "step-u".into(),
+                    call_id: "attempt-u".into(),
+                    tool: "recall".into(),
+                    input_sha256: "input".into(),
+                })
+                .unwrap();
+            journal
+                .append(execution::ExecutionEvent::ToolStarted {
+                    call_id: "attempt-u".into(),
+                })
+                .unwrap();
         }
-        let error = Server::new(config).err().expect("unexplained unknown must fail closed");
+        let error = Server::new(config)
+            .err()
+            .expect("unexplained unknown must fail closed");
         assert!(error.contains("unresolved outcome-unknown"), "{error}");
         cleanup(&root);
     }

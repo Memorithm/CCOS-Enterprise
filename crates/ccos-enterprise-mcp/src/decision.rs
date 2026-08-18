@@ -28,6 +28,27 @@ pub trait DecisionBackend {
     ) -> Result<Value, String>;
 }
 
+/// Explicit null implementation kept for callers that want to carry a decision
+/// backend type without enabling any local execution path. [`GovernedDecisionMcp`]
+/// is still opt-in; constructing the historical [`GovernedMcp`] alone advertises
+/// no decision tools.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoDecisionBackend;
+
+impl DecisionBackend for NoDecisionBackend {
+    fn dispatch_decision(
+        &mut self,
+        _tenant: &str,
+        _actor: &AuthenticatedActor,
+        enterprise_tool: &str,
+        _arguments: &Value,
+    ) -> Result<Value, String> {
+        Err(format!(
+            "decision backend is disabled; cannot execute {enterprise_tool:?}"
+        ))
+    }
+}
+
 impl DecisionBackend for DecisionService {
     fn dispatch_decision(
         &mut self,

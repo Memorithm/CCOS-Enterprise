@@ -1,0 +1,12 @@
+[package]
+name = "ccos-enterprise-kg"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Bounded deterministic graph views over canonical CCOS Enterprise Knowledge state."
+
+[dependencies]
+ccos-enterprise-knowledge = { path = "../ccos-enterprise-knowledge" }
+ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }

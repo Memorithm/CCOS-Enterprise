@@ -1,8 +1,7 @@
 use ccos_enterprise_auth::AuthStrength;
 use ccos_enterprise_decision_service::{DECISION_READ, DECISION_TOOLS, DECISION_WRITE};
-use ccos_enterprise_mcp::{
-    govern_catalogue, Backend, DecisionBackend, GovernedMcp, McpOutcome,
-};
+use ccos_enterprise_mcp::decision::{DecisionBackend, GovernedDecisionMcp};
+use ccos_enterprise_mcp::{govern_catalogue, Backend, GovernedMcp, McpOutcome};
 use ccos_enterprise_runtime::{actor, request, Call, Deployment, TenantState};
 use serde_json::{json, Value};
 
@@ -61,10 +60,9 @@ fn deployment() -> Deployment {
     deployment
 }
 
-fn front_door() -> GovernedMcp<CoreRecorder, DecisionRecorder> {
-    GovernedMcp::with_decisions(
-        deployment(),
-        CoreRecorder::default(),
+fn front_door() -> GovernedDecisionMcp<CoreRecorder, DecisionRecorder> {
+    GovernedDecisionMcp::new(
+        GovernedMcp::new(deployment(), CoreRecorder::default()),
         DecisionRecorder::default(),
     )
 }

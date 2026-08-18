@@ -16,6 +16,7 @@ ccos-enterprise-knowledge-model = { path = "../../crates/ccos-enterprise-knowled
 ccos-enterprise-knowledge-store = { path = "../../crates/ccos-enterprise-knowledge-store" }
 ccos-enterprise-normalize = { path = "../../crates/ccos-enterprise-normalize" }
 ccos-enterprise-ontology = { path = "../../crates/ccos-enterprise-ontology" }
+ccos-enterprise-ontology-migration = { path = "../../crates/ccos-enterprise-ontology-migration" }
 ccos-enterprise-parse = { path = "../../crates/ccos-enterprise-parse" }
 ccos-enterprise-promotion = { path = "../../crates/ccos-enterprise-promotion" }
 ccos-enterprise-resolution = { path = "../../crates/ccos-enterprise-resolution" }

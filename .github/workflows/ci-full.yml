@@ -84,7 +84,7 @@ jobs:
 
   replay_semantics_patch:
     name: verify endurance replay semantics
-    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/runtime-true-idempotent-replay'
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/fix/runtime-true-idempotent-replay')
     runs-on: ubuntu-24.04
     permissions:
       contents: write

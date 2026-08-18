@@ -355,6 +355,9 @@ impl Backend for TenantBackend {
                 .get("result")
                 .cloned()
                 .ok_or_else(|| "Core tools/call response had no result".to_string())?;
+            if result.get("isError").and_then(Value::as_bool) == Some(true) {
+                return Err(format!("Core tool reported failure: {result}"));
+            }
             if permission_for(core_tool) == Some("memory.write") {
                 session
                     .checkpoint()
@@ -543,14 +546,17 @@ impl Server {
                     ));
                 }
                 Self::validate_restored_snapshot(&config, &org, &actor, &loaded.snapshot)?;
-                Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance)
-                    .map_err(|error| format!("cannot restore Enterprise governance state: {error}"))?
+                Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance).map_err(
+                    |error| format!("cannot restore Enterprise governance state: {error}"),
+                )?
             }
             None => {
                 let deployment = Self::provision(&config, &org, &actor)?;
                 store
                     .save_snapshot(&deployment.snapshot())
-                    .map_err(|error| format!("cannot initialize Enterprise governance store: {error}"))?;
+                    .map_err(|error| {
+                        format!("cannot initialize Enterprise governance store: {error}")
+                    })?;
                 deployment
             }
         };
@@ -562,7 +568,9 @@ impl Server {
                 || effect.model != config.model
                 || effect.cost_tokens != config.call_cost_tokens
             {
-                return Err("durable effect marker does not match configured principal/tenant".into());
+                return Err(
+                    "durable effect marker does not match configured principal/tenant".into(),
+                );
             }
             match effect.state {
                 EffectState::Started => {
@@ -670,7 +678,8 @@ impl Server {
             request_id: meta.request_id,
         };
         let checkpoint = DeploymentCheckpoint::capture(self.front_door.deployment());
-        let effect = EffectRecord::from_request(&request, &meta.model, self.config.call_cost_tokens);
+        let effect =
+            EffectRecord::from_request(&request, &meta.model, self.config.call_cost_tokens);
         self.front_door
             .backend_mut()
             .arm(effect)
@@ -694,17 +703,29 @@ impl Server {
                 let reason = "backend may have succeeded but its durable outcome marker failed";
                 self.poisoned = Some(reason.to_string());
                 eprintln!("ccos-enterprise-mcp: {reason}");
-                return Err((-32000, "Enterprise effect outcome is not durable".to_string()));
+                return Err((
+                    -32000,
+                    "Enterprise effect outcome is not durable".to_string(),
+                ));
             }
-            self.front_door.backend_mut().discard_session(&request.tenant);
+            self.front_door
+                .backend_mut()
+                .discard_session(&request.tenant);
             let restored = checkpoint.restore().map_err(|error| {
                 self.poisoned = Some(error.clone());
                 (-32000, "Enterprise admission rollback failed".to_string())
             })?;
             *self.front_door.deployment_mut() = restored;
-            if let Err(error) = self.front_door.backend_mut().settle_marker(&request.request_id) {
+            if let Err(error) = self
+                .front_door
+                .backend_mut()
+                .settle_marker(&request.request_id)
+            {
                 self.poisoned = Some(error.clone());
-                return Err((-32000, "Enterprise failed effect could not be settled".to_string()));
+                return Err((
+                    -32000,
+                    "Enterprise failed effect could not be settled".to_string(),
+                ));
             }
             return match outcome {
                 McpOutcome::BackendError(error) => {
@@ -715,10 +736,22 @@ impl Server {
             };
         }
 
+        if matches!(outcome, McpOutcome::UnknownTool) {
+            let restored = checkpoint.restore().map_err(|error| {
+                self.poisoned = Some(error.clone());
+                (-32000, "Enterprise catalogue rollback failed".to_string())
+            })?;
+            *self.front_door.deployment_mut() = restored;
+            return Ok(tool_error("unknown CCOS Enterprise tool"));
+        }
+
         if let Err(error) = persist_deployment(&mut self.store, self.front_door.deployment()) {
             self.poisoned = Some(error.clone());
             eprintln!("ccos-enterprise-mcp: durable governance commit failed: {error}");
-            return Err((-32000, "Enterprise governance state is not durable".to_string()));
+            return Err((
+                -32000,
+                "Enterprise governance state is not durable".to_string(),
+            ));
         }
 
         match outcome {
@@ -730,7 +763,10 @@ impl Server {
                 {
                     self.poisoned = Some(error.clone());
                     eprintln!("ccos-enterprise-mcp: effect settlement marker failed: {error}");
-                    return Err((-32000, "Enterprise effect settlement is not durable".to_string()));
+                    return Err((
+                        -32000,
+                        "Enterprise effect settlement is not durable".to_string(),
+                    ));
                 }
                 Ok(value)
             }
@@ -742,7 +778,7 @@ impl Server {
                 eprintln!("ccos-enterprise-mcp: governed request refused: {refusal:?}");
                 Ok(tool_error("CCOS Enterprise request refused"))
             }
-            McpOutcome::UnknownTool => Ok(tool_error("unknown CCOS Enterprise tool")),
+            McpOutcome::UnknownTool => unreachable!("unknown tools returned before persistence"),
             McpOutcome::BackendError(_) => unreachable!("backend errors returned above"),
         }
     }
@@ -997,13 +1033,7 @@ mod tests {
         let mut server = Server::new(config).unwrap();
 
         let failed = server
-            .handle(&call(
-                1,
-                "alice",
-                "retry-me",
-                "memory.ingest",
-                json!({}),
-            ))
+            .handle(&call(1, "alice", "retry-me", "memory.ingest", json!({})))
             .unwrap();
         assert_eq!(failed["result"]["isError"], Value::Bool(true));
         assert_eq!(

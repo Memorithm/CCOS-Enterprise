@@ -8,7 +8,7 @@ function required(value, name) {
   return text
 }
 
-export function resolveIdentity(config, session, turn, step = 0) {
+export function resolveIdentity(config, session, turn, step = 0, extra = {}) {
   const tenantId = required(config.tenantId, 'tenantId')
   const actorId = required(config.actorId, 'actorId')
   const agentId = required(config.agentId || HOST_KIND, 'agentId')
@@ -20,6 +20,9 @@ export function resolveIdentity(config, session, turn, step = 0) {
     .update(`${tenantId}\0${actorId}\0${sessionId}\0${turnId}\0${stepId}\0${requestId}`)
     .digest('hex')
     .slice(0, 32)
+  const toolCallId = typeof extra.toolCallId === 'string' && extra.toolCallId.trim()
+    ? extra.toolCallId.trim()
+    : undefined
 
   return Object.freeze({
     tenant_id: tenantId,
@@ -38,6 +41,7 @@ export function resolveIdentity(config, session, turn, step = 0) {
       ? config.model.trim()
       : HOST_KIND,
     workspace: typeof session?.header?.cwd === 'string' ? session.header.cwd : undefined,
+    ...(toolCallId ? { tool_call_id: toolCallId } : {}),
   })
 }
 

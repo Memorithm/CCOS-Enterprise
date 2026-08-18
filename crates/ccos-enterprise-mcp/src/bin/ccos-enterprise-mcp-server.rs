@@ -70,8 +70,8 @@ impl Config {
 }
 
 fn required_env(name: &str) -> Result<String, String> {
-    let value = std::env::var(name)
-        .map_err(|_| format!("missing required environment variable {name}"))?;
+    let value =
+        std::env::var(name).map_err(|_| format!("missing required environment variable {name}"))?;
     let value = value.trim();
     if value.is_empty() {
         Err(format!("required environment variable {name} is empty"))
@@ -277,7 +277,10 @@ impl Server {
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| (-32602, "invalid params".to_string()))?;
-        let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         let meta = parse_meta(params).map_err(|_| (-32602, "invalid params".to_string()))?;
         let identity = self
             .authenticator

@@ -14,8 +14,7 @@ use std::path::{Path, PathBuf};
 pub const SCHEMA_VERSION: u16 = 1;
 
 /// Predecessor of the first record in a stream.
-pub const GENESIS_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// A durable execution fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,7 +366,9 @@ fn recover_tools(records: &[ExecutionRecord]) -> Result<Vec<ToolRecovery>, Journ
 
 fn validate_stream_id(stream_id: &str) -> Result<(), JournalError> {
     if stream_id.is_empty() {
-        return Err(JournalError::InvalidStreamId("must not be empty".to_string()));
+        return Err(JournalError::InvalidStreamId(
+            "must not be empty".to_string(),
+        ));
     }
     if stream_id.len() > 256 {
         return Err(JournalError::InvalidStreamId(
@@ -464,21 +465,20 @@ fn hex(bytes: &[u8]) -> String {
 
 fn sha256(input: &[u8]) -> [u8; 32] {
     const INITIAL: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
-        0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     let bit_len = (input.len() as u64).wrapping_mul(8);
@@ -609,7 +609,9 @@ mod tests {
                 turn_id: "turn-1".to_string(),
             })
             .expect("turn");
-        journal.append(requested("call-1", "cargo-test")).expect("request");
+        journal
+            .append(requested("call-1", "cargo-test"))
+            .expect("request");
         let head = journal.head_hash().to_string();
         drop(journal);
 
@@ -624,7 +626,9 @@ mod tests {
     #[test]
     fn tampering_breaks_the_hash_chain() {
         let (dir, mut journal) = journal("tamper");
-        journal.append(requested("call-1", "cargo-test")).expect("request");
+        journal
+            .append(requested("call-1", "cargo-test"))
+            .expect("request");
         drop(journal);
 
         let path = dir.join("execution.jsonl");
@@ -642,7 +646,9 @@ mod tests {
     #[test]
     fn incomplete_unterminated_tail_is_discarded() {
         let (dir, mut journal) = journal("partial-tail");
-        journal.append(requested("call-1", "cargo-test")).expect("request");
+        journal
+            .append(requested("call-1", "cargo-test"))
+            .expect("request");
         drop(journal);
 
         let path = dir.join("execution.jsonl");
@@ -657,14 +663,18 @@ mod tests {
             TailRepair::DiscardedPartialTail { bytes } if bytes > 0
         ));
         assert_eq!(reopened.journal.len(), 1);
-        assert!(std::fs::read(&path).expect("read repaired").ends_with(b"\n"));
+        assert!(std::fs::read(&path)
+            .expect("read repaired")
+            .ends_with(b"\n"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn complete_record_missing_only_newline_is_preserved() {
         let (dir, mut journal) = journal("missing-newline");
-        journal.append(requested("call-1", "cargo-test")).expect("request");
+        journal
+            .append(requested("call-1", "cargo-test"))
+            .expect("request");
         drop(journal);
 
         let path = dir.join("execution.jsonl");
@@ -675,24 +685,33 @@ mod tests {
         let reopened = ExecutionJournal::open(&path, "tenant-acme/session-1").expect("repair");
         assert_eq!(reopened.tail_repair, TailRepair::CompletedMissingNewline);
         assert_eq!(reopened.journal.len(), 1);
-        assert!(std::fs::read(&path).expect("read repaired").ends_with(b"\n"));
+        assert!(std::fs::read(&path)
+            .expect("read repaired")
+            .ends_with(b"\n"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn requested_without_start_is_not_started() {
         let (dir, mut journal) = journal("not-started");
-        journal.append(requested("call-1", "cargo-test")).expect("request");
+        journal
+            .append(requested("call-1", "cargo-test"))
+            .expect("request");
         let recovered = journal.recover_tools().expect("recover");
         assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].disposition, ToolRecoveryDisposition::NotStarted);
+        assert_eq!(
+            recovered[0].disposition,
+            ToolRecoveryDisposition::NotStarted
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn started_without_result_is_outcome_unknown() {
         let (dir, mut journal) = journal("unknown");
-        journal.append(requested("call-1", "git-push")).expect("request");
+        journal
+            .append(requested("call-1", "git-push"))
+            .expect("request");
         journal
             .append(ExecutionEvent::ToolStarted {
                 call_id: "call-1".to_string(),
@@ -709,7 +728,9 @@ mod tests {
     #[test]
     fn durable_result_marks_tool_completed() {
         let (dir, mut journal) = journal("completed");
-        journal.append(requested("call-1", "cargo-test")).expect("request");
+        journal
+            .append(requested("call-1", "cargo-test"))
+            .expect("request");
         journal
             .append(ExecutionEvent::ToolStarted {
                 call_id: "call-1".to_string(),
@@ -749,7 +770,9 @@ mod tests {
     #[test]
     fn a_journal_cannot_be_rebound_to_another_stream() {
         let (dir, mut journal) = journal("stream-binding");
-        journal.append(requested("call-1", "cargo-test")).expect("request");
+        journal
+            .append(requested("call-1", "cargo-test"))
+            .expect("request");
         drop(journal);
         let path = dir.join("execution.jsonl");
         let error = match ExecutionJournal::open(&path, "tenant-globex/session-1") {

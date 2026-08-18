@@ -175,7 +175,10 @@ impl fmt::Display for DecisionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::JournalDiscontinuity { expected, found } => {
-                write!(f, "decision journal sequence {found} does not continue {expected}")
+                write!(
+                    f,
+                    "decision journal sequence {found} does not continue {expected}"
+                )
             }
             Self::EmptyKnowledgeState => f.write_str("cannot anchor a decision to empty knowledge"),
             Self::Knowledge(detail) => write!(f, "knowledge state error: {detail}"),
@@ -204,7 +207,9 @@ impl fmt::Display for DecisionError {
             Self::TraversalLimitExceeded { limit } => {
                 write!(f, "decision traversal exceeded {limit}-result bound")
             }
-            Self::InvalidSearchLimit => f.write_str("decision search limit must be greater than zero"),
+            Self::InvalidSearchLimit => {
+                f.write_str("decision search limit must be greater than zero")
+            }
             Self::Serialization(detail) => write!(f, "decision serialization failed: {detail}"),
         }
     }
@@ -252,9 +257,7 @@ impl DecisionState {
                 validate_draft(draft, knowledge)?;
             }
             DecisionOp::RecordOutcome {
-                tenant,
-                outcome,
-                ..
+                tenant, outcome, ..
             } => {
                 validate_anchor(&outcome.knowledge, knowledge)?;
                 validate_outcome(tenant, outcome, knowledge)?;
@@ -354,12 +357,8 @@ impl DecisionState {
             .decisions
             .get(decision)
             .ok_or_else(|| DecisionError::UnknownDecision(decision.clone()))?;
-        let mut queue: VecDeque<(DecisionId, usize)> = root
-            .precedents
-            .iter()
-            .cloned()
-            .map(|id| (id, 1))
-            .collect();
+        let mut queue: VecDeque<(DecisionId, usize)> =
+            root.precedents.iter().cloned().map(|id| (id, 1)).collect();
         let mut visited = BTreeSet::new();
         let mut output = Vec::new();
 
@@ -534,15 +533,19 @@ impl DecisionState {
 
     fn record(&mut self, draft: DecisionDraft, sequence: u64) -> Result<(), DecisionError> {
         validate_structural_draft(&draft)?;
-        let partition = self.tenants.entry(draft.tenant.clone()).or_default();
-        if partition.decisions.contains_key(&draft.id) {
-            return Err(DecisionError::DuplicateDecision(draft.id));
-        }
-        for precedent in &draft.precedents {
-            if !partition.decisions.contains_key(precedent) {
-                return Err(DecisionError::UnknownPrecedent(precedent.clone()));
+        if let Some(existing) = self.tenants.get(&draft.tenant) {
+            if existing.decisions.contains_key(&draft.id) {
+                return Err(DecisionError::DuplicateDecision(draft.id));
             }
+            for precedent in &draft.precedents {
+                if !existing.decisions.contains_key(precedent) {
+                    return Err(DecisionError::UnknownPrecedent(precedent.clone()));
+                }
+            }
+        } else if let Some(precedent) = draft.precedents.iter().next() {
+            return Err(DecisionError::UnknownPrecedent(precedent.clone()));
         }
+        let partition = self.tenants.entry(draft.tenant.clone()).or_default();
         partition.decisions.insert(
             draft.id.clone(),
             DecisionRecord {
@@ -687,7 +690,10 @@ impl RegulatoryTrail {
     }
 }
 
-fn validate_anchor(anchor: &KnowledgeAnchor, knowledge: &KnowledgeState) -> Result<(), DecisionError> {
+fn validate_anchor(
+    anchor: &KnowledgeAnchor,
+    knowledge: &KnowledgeState,
+) -> Result<(), DecisionError> {
     if anchor == &KnowledgeAnchor::capture(knowledge)? {
         Ok(())
     } else {
@@ -732,7 +738,9 @@ fn validate_outcome(
     knowledge: &KnowledgeState,
 ) -> Result<(), DecisionError> {
     validate_structural_outcome(outcome)?;
-    let partition = knowledge.tenant(tenant).ok_or(DecisionError::UnknownTenant)?;
+    let partition = knowledge
+        .tenant(tenant)
+        .ok_or(DecisionError::UnknownTenant)?;
     for id in &outcome.evidence {
         if !partition.evidence.contains_key(id) {
             return Err(DecisionError::UnknownEvidence(id.clone()));
@@ -803,8 +811,8 @@ mod tests {
     use super::*;
     use ccos_enterprise_knowledge::{JournalEntry, KnowledgeOp};
     use ccos_enterprise_knowledge_model::{
-        AssertionKind, EntityId, EntityRecord, EvidenceRecord, FactAssertion, FactObject,
-        SourceId, SourceRecord, SourceTrust, ValidityInterval,
+        AssertionKind, EntityId, EntityRecord, EvidenceRecord, FactAssertion, FactObject, SourceId,
+        SourceRecord, SourceTrust, ValidityInterval,
     };
 
     fn tenant() -> TenantId {
@@ -884,7 +892,8 @@ mod tests {
     fn replay_is_deterministic_and_precedents_form_a_dag_by_construction() {
         let knowledge = knowledge();
         let mut state = DecisionState::new();
-        let first = DecisionJournalEntry::new(0, DecisionOp::Record(draft("decision:1", &knowledge)));
+        let first =
+            DecisionJournalEntry::new(0, DecisionOp::Record(draft("decision:1", &knowledge)));
         state.apply(first.clone(), &knowledge).unwrap();
         let mut second = draft("decision:2", &knowledge);
         second.precedents.insert(DecisionId::from("decision:1"));
@@ -892,7 +901,10 @@ mod tests {
         state.apply(second.clone(), &knowledge).unwrap();
 
         let replayed = DecisionState::replay([first, second]).unwrap();
-        assert_eq!(state.canonical_hash().unwrap(), replayed.canonical_hash().unwrap());
+        assert_eq!(
+            state.canonical_hash().unwrap(),
+            replayed.canonical_hash().unwrap()
+        );
         assert_eq!(
             state
                 .causal_ancestry(
@@ -909,10 +921,13 @@ mod tests {
     fn an_anchor_must_name_the_exact_knowledge_snapshot() {
         let knowledge = knowledge();
         let mut wrong = draft("decision:1", &knowledge);
-        wrong.knowledge.canonical_hash.replace_range(0..1, "f");
+        wrong.knowledge.canonical_hash.push('x');
         let mut state = DecisionState::new();
         assert_eq!(
-            state.apply(DecisionJournalEntry::new(0, DecisionOp::Record(wrong)), &knowledge),
+            state.apply(
+                DecisionJournalEntry::new(0, DecisionOp::Record(wrong)),
+                &knowledge
+            ),
             Err(DecisionError::KnowledgeAnchorMismatch)
         );
         assert_eq!(state.next_sequence(), 0);

@@ -1,0 +1,13 @@
+[
+  { "enterprise": "memory.recall", "dsh": "ccos_recall" },
+  { "enterprise": "memory.recall_what_if", "dsh": "ccos_recall_what_if" },
+  { "enterprise": "memory.get", "dsh": "ccos_get" },
+  { "enterprise": "memory.stats", "dsh": "ccos_stats" },
+  { "enterprise": "memory.timeline", "dsh": "ccos_timeline" },
+  { "enterprise": "memory.verify", "dsh": "ccos_verify" },
+  { "enterprise": "context.retrieve", "dsh": "ccos_context_retrieve" },
+  { "enterprise": "ccos.causal_blame", "dsh": "ccos_causal_blame" },
+  { "enterprise": "ccos.causal_flash", "dsh": "ccos_causal_flash" },
+  { "enterprise": "ccos.drift_cause", "dsh": "ccos_drift_cause" },
+  { "enterprise": "ccos.retrodict_belief", "dsh": "ccos_retrodict_belief" }
+]

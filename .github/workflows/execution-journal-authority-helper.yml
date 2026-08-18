@@ -1,0 +1,250 @@
+name: Execution journal authority migration helper
+
+on:
+  push:
+    branches: [ci/execution-journal-authority-helper]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  migrate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/execution-journal-authority
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify feature branch still equals main
+        run: |
+          git fetch origin main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Consolidate execution journal authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p crates/ccos-enterprise-execution/src
+          cp crates/ccos-enterprise-sessions/src/execution.rs crates/ccos-enterprise-execution/src/lib.rs
+          rm crates/ccos-enterprise-sessions/src/execution.rs
+
+          cat > crates/ccos-enterprise-execution/Cargo.toml <<'EOF'
+          [package]
+          name = "ccos-enterprise-execution"
+          version = "0.1.0-pre"
+          edition.workspace = true
+          rust-version.workspace = true
+          license.workspace = true
+          publish = false
+          description = "Canonical durable Enterprise orchestration journal shared by sessions and governed host adapters."
+
+          [dependencies]
+          serde.workspace = true
+          serde_json.workspace = true
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def once(text, old, new, label):
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f"{label}: expected one match, found {n}")
+              return text.replace(old, new, 1)
+
+          root = Path('Cargo.toml')
+          text = root.read_text()
+          text = once(
+              text,
+              '    "crates/ccos-enterprise-mcp",\n    "crates/ccos-enterprise-sessions",\n',
+              '    "crates/ccos-enterprise-execution",\n    "crates/ccos-enterprise-mcp",\n    "crates/ccos-enterprise-sessions",\n',
+              'workspace member',
+          )
+          root.write_text(text)
+
+          p = Path('crates/ccos-enterprise-execution/src/lib.rs')
+          text = p.read_text()
+          text = once(
+              text,
+              '    Lifecycle(String),\n}\n',
+              '    Lifecycle(String),\n    Poisoned(String),\n}\n',
+              'poison error',
+          )
+          text = once(
+              text,
+              '            Self::Lifecycle(detail) => write!(f, "execution lifecycle: {detail}"),\n',
+              '            Self::Lifecycle(detail) => write!(f, "execution lifecycle: {detail}"),\n            Self::Poisoned(detail) => write!(f, "execution journal poisoned: {detail}"),\n',
+              'poison display',
+          )
+          text = once(
+              text,
+              'pub struct ExecutionJournal {\n    path: PathBuf,\n    stream_id: String,\n    records: Vec<ExecutionRecord>,\n}\n',
+              'pub struct ExecutionJournal {\n    path: PathBuf,\n    stream_id: String,\n    records: Vec<ExecutionRecord>,\n    poisoned: bool,\n}\n',
+              'poison field',
+          )
+          text = once(
+              text,
+              '                records,\n            },\n            tail_repair,\n',
+              '                records,\n                poisoned: false,\n            },\n            tail_repair,\n',
+              'open poison state',
+          )
+
+          old_append = '''    /// Append, flush and sync one fact before returning.\n    pub fn append(&mut self, event: ExecutionEvent) -> Result<&ExecutionRecord, JournalError> {\n        let sequence = self.records.len() as u64;\n        let previous_hash = self\n            .records\n            .last()\n            .map(|record| record.hash.clone())\n            .unwrap_or_else(|| GENESIS_HASH.to_string());\n        let hash = record_hash(&self.stream_id, sequence, &previous_hash, &event)?;\n        let record = ExecutionRecord {\n            schema_version: SCHEMA_VERSION,\n            stream_id: self.stream_id.clone(),\n            sequence,\n            previous_hash,\n            event,\n            hash,\n        };\n        let mut encoded = serde_json::to_vec(&record)?;\n        encoded.push(b'\\n');\n\n        let mut file = OpenOptions::new()\n            .create(true)\n            .append(true)\n            .open(&self.path)?;\n        file.write_all(&encoded)?;\n        file.sync_data()?;\n        self.records.push(record);\n        Ok(self.records.last().expect("record was just pushed"))\n    }\n'''
+          new_append = '''    /// Append, flush and sync one fact before returning.\n    ///\n    /// Any I/O failure after persistence begins poisons this live instance. The\n    /// caller must drop and reopen it so crash-tail repair can establish a new\n    /// verified in-memory view before another append is attempted.\n    pub fn append(&mut self, event: ExecutionEvent) -> Result<&ExecutionRecord, JournalError> {\n        self.append_with_writer(event, |file, encoded| file.write_all(encoded))\n    }\n\n    fn append_with_writer<F>(\n        &mut self,\n        event: ExecutionEvent,\n        writer: F,\n    ) -> Result<&ExecutionRecord, JournalError>\n    where\n        F: FnOnce(&mut File, &[u8]) -> std::io::Result<()>,\n    {\n        if self.poisoned {\n            return Err(JournalError::Poisoned(\n                "append refused after a previous durable write error; reopen the journal to repair the tail"\n                    .to_string(),\n            ));\n        }\n\n        let sequence = self.records.len() as u64;\n        let previous_hash = self\n            .records\n            .last()\n            .map(|record| record.hash.clone())\n            .unwrap_or_else(|| GENESIS_HASH.to_string());\n        let hash = record_hash(&self.stream_id, sequence, &previous_hash, &event)?;\n        let record = ExecutionRecord {\n            schema_version: SCHEMA_VERSION,\n            stream_id: self.stream_id.clone(),\n            sequence,\n            previous_hash,\n            event,\n            hash,\n        };\n        let mut encoded = serde_json::to_vec(&record)?;\n        encoded.push(b'\\n');\n\n        let persist = (|| -> std::io::Result<()> {\n            let mut file = OpenOptions::new()\n                .create(true)\n                .append(true)\n                .open(&self.path)?;\n            writer(&mut file, &encoded)?;\n            file.sync_data()\n        })();\n        if let Err(error) = persist {\n            self.poisoned = true;\n            return Err(JournalError::Io(error));\n        }\n\n        self.records.push(record);\n        Ok(self.records.last().expect("record was just pushed"))\n    }\n'''
+          text = once(text, old_append, new_append, 'append implementation')
+          text = once(
+              text,
+              '    pub fn is_empty(&self) -> bool {\n        self.records.is_empty()\n    }\n\n    pub fn head_hash(&self) -> &str {\n',
+              '    pub fn is_empty(&self) -> bool {\n        self.records.is_empty()\n    }\n\n    /// Whether this live handle observed an ambiguous persistence failure.\n    pub fn is_poisoned(&self) -> bool {\n        self.poisoned\n    }\n\n    pub fn head_hash(&self) -> &str {\n',
+              'poison accessor',
+          )
+          text = once(
+              text,
+              '    pub fn recover_tools(&self) -> Result<Vec<ToolRecovery>, JournalError> {\n        recover_tools(&self.records)\n    }\n',
+              '    pub fn recover_tools(&self) -> Result<Vec<ToolRecovery>, JournalError> {\n        if self.poisoned {\n            return Err(JournalError::Poisoned(\n                "recovery refused after a previous durable write error; reopen the journal to repair the tail"\n                    .to_string(),\n            ));\n        }\n        recover_tools(&self.records)\n    }\n',
+              'poison recovery',
+          )
+
+          test = r'''
+
+    #[test]
+    fn append_error_poisons_handle_until_reopen_repairs_tail() {
+        let dir = scratch("poison");
+        let path = dir.join("execution.jsonl");
+        let mut journal = ExecutionJournal::open(&path, "tenant-acme/session-1")
+            .expect("open")
+            .journal;
+
+        let error = journal
+            .append_with_writer(
+                ExecutionEvent::TurnStarted {
+                    turn_id: "turn-partial".to_string(),
+                },
+                |file, encoded| {
+                    let partial = (encoded.len() / 2).max(1);
+                    file.write_all(&encoded[..partial])?;
+                    file.sync_data()?;
+                    Err(std::io::Error::other("simulated append failure"))
+                },
+            )
+            .expect_err("partial write must fail");
+        assert!(matches!(error, JournalError::Io(_)));
+        assert!(journal.is_poisoned());
+        assert!(matches!(journal.recover_tools(), Err(JournalError::Poisoned(_))));
+        assert!(matches!(
+            journal.append(ExecutionEvent::TurnStarted {
+                turn_id: "must-not-append".to_string(),
+            }),
+            Err(JournalError::Poisoned(_))
+        ));
+        drop(journal);
+
+        let report = ExecutionJournal::open(&path, "tenant-acme/session-1").expect("repair");
+        assert!(matches!(
+            report.tail_repair,
+            TailRepair::DiscardedPartialTail { bytes } if bytes > 0
+        ));
+        let mut repaired = report.journal;
+        assert!(!repaired.is_poisoned());
+        repaired
+            .append(ExecutionEvent::TurnStarted {
+                turn_id: "after-repair".to_string(),
+            })
+            .expect("append after repair");
+        assert_eq!(repaired.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+'''
+          marker = '\n}\n'
+          idx = text.rfind(marker)
+          if idx < 0:
+              raise SystemExit('test module closing brace not found')
+          text = text[:idx] + test + text[idx:]
+          p.write_text(text)
+
+          p = Path('crates/ccos-enterprise-sessions/Cargo.toml')
+          text = p.read_text()
+          text = once(
+              text,
+              '[dependencies]\nccos-enterprise-mcp = { path = "../ccos-enterprise-mcp" }\n',
+              '[dependencies]\nccos-enterprise-execution = { path = "../ccos-enterprise-execution" }\nccos-enterprise-mcp = { path = "../ccos-enterprise-mcp" }\n',
+              'sessions dependency',
+          )
+          p.write_text(text)
+
+          p = Path('crates/ccos-enterprise-sessions/src/crate_root.rs')
+          text = p.read_text()
+          text = once(
+              text,
+              'pub mod execution;\n',
+              'pub mod execution {\n    pub use ccos_enterprise_execution::*;\n}\n',
+              'sessions re-export',
+          )
+          p.write_text(text)
+
+          p = Path('crates/ccos-enterprise-mcp/Cargo.toml')
+          text = p.read_text()
+          text = once(
+              text,
+              '[dependencies]\nccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }\n',
+              '[dependencies]\nccos-enterprise-execution = { path = "../ccos-enterprise-execution" }\nccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }\n',
+              'mcp dependency',
+          )
+          p.write_text(text)
+
+          p = Path('crates/ccos-enterprise-mcp/src/execution_backend.rs')
+          text = p.read_text()
+          text = once(
+              text,
+              'use crate::execution::{\n    ExecutionEvent, ExecutionJournal, JournalError, ToolRecovery, ToolRecoveryDisposition,\n};\n',
+              'use ccos_enterprise_execution::{\n    ExecutionEvent, ExecutionJournal, JournalError, ToolRecovery, ToolRecoveryDisposition,\n};\n',
+              'mcp backend journal import',
+          )
+          p.write_text(text)
+
+          p = Path('crates/ccos-enterprise-mcp/src/bin/ccos-enterprise-mcp-server.rs')
+          text = p.read_text()
+          text = once(
+              text,
+              '#[path = "../execution.rs"]\nmod execution;\n#[path = "../execution_backend.rs"]\nmod execution_backend;\n',
+              '#[path = "../execution_backend.rs"]\nmod execution_backend;\n',
+              'remove local journal module',
+          )
+          text = once(
+              text,
+              '#[cfg(test)]\nuse execution::ToolRecoveryDisposition;\n',
+              '#[cfg(test)]\nuse ccos_enterprise_execution::ToolRecoveryDisposition;\n',
+              'server recovery import',
+          )
+          p.write_text(text)
+
+          Path('crates/ccos-enterprise-mcp/src/execution.rs').unlink()
+          PY
+
+      - name: Format and resolve lockfile
+        run: |
+          cargo fmt --all
+          cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
+      - name: Lint Enterprise workspace
+        run: cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
+      - name: Test canonical execution crate
+        run: cargo test -p ccos-enterprise-execution
+      - name: Test sessions integration
+        run: cargo test -p ccos-enterprise-sessions --all-targets
+      - name: Test MCP integration
+        run: cargo test -p ccos-enterprise-mcp --all-targets --all-features
+      - name: Commit validated migration
+        run: |
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add -A Cargo.toml Cargo.lock crates/ccos-enterprise-execution crates/ccos-enterprise-sessions crates/ccos-enterprise-mcp
+          git diff --cached --quiet && exit 0
+          git commit -m "refactor(execution): establish one Enterprise journal authority"
+          git push origin HEAD:refactor/execution-journal-authority

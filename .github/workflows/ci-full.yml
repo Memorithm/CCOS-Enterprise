@@ -2,7 +2,7 @@ name: CI (full)
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/runtime-true-idempotent-replay]
   pull_request:
   schedule:
     - cron: "0 5 * * *"
@@ -11,6 +11,115 @@ permissions:
   contents: read
 
 jobs:
+  budget_replay_fix:
+    name: repair replay billing conformance
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/runtime-true-idempotent-replay'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/runtime-true-idempotent-replay
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Update the dedicated replay billing contract and execute it
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/ccos-enterprise-conformance/tests/stress_budget_property.rs')
+          s = p.read_text()
+
+          old_doc = '''/// A decided `(tenant, request_id)` is now Forwarded without being charged.
+          /// The scenario is kept verbatim — the same ten replays of one id, at the same
+          /// 100 tokens each — with the opposite expectation: billed once.
+          '''
+          new_doc = '''/// A decided `(tenant, request_id)` is now returned as explicit `Replayed`
+          /// without being charged or becoming eligible to execute again. The scenario is
+          /// kept verbatim — ten attempts of one id, at 100 tokens each — with the opposite
+          /// expectation: one `Forwarded`, nine `Replayed`, billed once.
+          '''
+          if s.count(old_doc) != 1:
+              raise SystemExit(f'expected one stale replay doc block, found {s.count(old_doc)}')
+          s = s.replace(old_doc, new_doc, 1)
+
+          old_loop = '''    for i in 0..10 {
+              assert_eq!(
+                  d.admit(Call {
+                      actor: &alice,
+                      request: &req,
+                      model: "claude-opus",
+                      cost_tokens: 100,
+                      variant: None,
+                      justification: None,
+                  }),
+                  Outcome::Forwarded,
+                  "replay {i} keeps returning the prior outcome"
+              );
+          }
+          '''
+          new_loop = '''    assert_eq!(
+              d.admit(Call {
+                  actor: &alice,
+                  request: &req,
+                  model: "claude-opus",
+                  cost_tokens: 100,
+                  variant: None,
+                  justification: None,
+              }),
+              Outcome::Forwarded,
+              "the first request is the one execution"
+          );
+          for i in 1..10 {
+              assert_eq!(
+                  d.admit(Call {
+                      actor: &alice,
+                      request: &req,
+                      model: "claude-opus",
+                      cost_tokens: 100,
+                      variant: None,
+                      justification: None,
+                  }),
+                  Outcome::Replayed,
+                  "replay {i} is acknowledged without a second execution"
+              );
+          }
+          '''
+          if s.count(old_loop) != 1:
+              raise SystemExit(f'expected one stale replay loop, found {s.count(old_loop)}')
+          s = s.replace(old_loop, new_loop, 1)
+
+          old_trail = '''    assert!(
+              trail.iter().all(|r| r.request_id == "the-same-request"),
+              "…under the id the client sent…"
+          );
+          let costs: Vec<u64> = trail.iter().map(|r| r.cost).collect();
+          '''
+          new_trail = '''    assert!(
+              trail.iter().all(|r| r.request_id == "the-same-request"),
+              "…under the id the client sent…"
+          );
+          assert_eq!(trail[0].outcome, Outcome::Forwarded);
+          assert!(
+              trail[1..].iter().all(|r| r.outcome.is_replayed()),
+              "…and every duplicate is recorded explicitly as Replayed"
+          );
+          let costs: Vec<u64> = trail.iter().map(|r| r.cost).collect();
+          '''
+          if s.count(old_trail) != 1:
+              raise SystemExit(f'expected one replay trail block, found {s.count(old_trail)}')
+          s = s.replace(old_trail, new_trail, 1)
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          cargo test -p ccos-enterprise-conformance --test stress_budget_property a_replayed_request_id_is_billed_once --release -- --exact
+          git config user.name 'MEMOPERF'
+          git config user.email 'contact@checkupauto.fr'
+          git add tests/ccos-enterprise-conformance/tests/stress_budget_property.rs
+          git diff --cached --quiet && exit 0
+          git commit -m 'test(runtime): expect explicit replay in billing guard'
+          git push origin HEAD:fix/runtime-true-idempotent-replay
+
   contract:
     name: boundary + contract tests
     runs-on: ubuntu-24.04

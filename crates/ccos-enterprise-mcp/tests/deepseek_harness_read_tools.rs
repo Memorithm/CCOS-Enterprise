@@ -3,9 +3,7 @@ use std::collections::BTreeSet;
 use ccos_enterprise_mcp::{clears_the_boundary, permission_for, to_core};
 use serde::Deserialize;
 
-const MANIFEST: &str = include_str!(
-    "../../../adapters/deepseek-harness/governed-read-tools.json"
-);
+const MANIFEST: &str = include_str!("../../../adapters/deepseek-harness/governed-read-tools.json");
 
 #[derive(Debug, Deserialize)]
 struct Mapping {
@@ -23,7 +21,8 @@ fn valid_dsh_name(name: &str) -> bool {
 
 #[test]
 fn deepseek_native_manifest_is_exactly_governed_read_only_surface() {
-    let rows: Vec<Mapping> = serde_json::from_str(MANIFEST).expect("DSH read manifest is valid JSON");
+    let rows: Vec<Mapping> =
+        serde_json::from_str(MANIFEST).expect("DSH read manifest is valid JSON");
     assert_eq!(
         rows.len(),
         11,
@@ -43,14 +42,22 @@ fn deepseek_native_manifest_is_exactly_governed_read_only_surface() {
             "duplicate DSH tool name in manifest: {}",
             row.dsh
         );
-        assert!(valid_dsh_name(&row.dsh), "invalid DSH tool name: {}", row.dsh);
+        assert!(
+            valid_dsh_name(&row.dsh),
+            "invalid DSH tool name: {}",
+            row.dsh
+        );
         assert!(
             clears_the_boundary(&row.enterprise),
             "DSH manifest exposed a capability the Enterprise gateway refuses: {}",
             row.enterprise
         );
-        let core = to_core(&row.enterprise)
-            .unwrap_or_else(|| panic!("DSH manifest names unknown Enterprise tool: {}", row.enterprise));
+        let core = to_core(&row.enterprise).unwrap_or_else(|| {
+            panic!(
+                "DSH manifest names unknown Enterprise tool: {}",
+                row.enterprise
+            )
+        });
         assert_eq!(
             permission_for(core),
             Some("memory.read"),

@@ -167,19 +167,31 @@ fn decisions_are_searchable_causal_replayable_and_exportable() {
     let limits = TraversalLimits::default();
     assert_eq!(
         state
-            .causal_ancestry(&tenant("acme"), &DecisionId::from("decision:deploy"), limits)
+            .causal_ancestry(
+                &tenant("acme"),
+                &DecisionId::from("decision:deploy"),
+                limits,
+            )
             .unwrap(),
         vec![DecisionId::from("decision:approve")]
     );
     assert_eq!(
         state
-            .causal_dependents(&tenant("acme"), &DecisionId::from("decision:approve"), limits)
+            .causal_dependents(
+                &tenant("acme"),
+                &DecisionId::from("decision:approve"),
+                limits,
+            )
             .unwrap(),
         vec![DecisionId::from("decision:deploy")]
     );
 
     let impact = state
-        .impact_analysis(&tenant("acme"), &DecisionId::from("decision:approve"), limits)
+        .impact_analysis(
+            &tenant("acme"),
+            &DecisionId::from("decision:approve"),
+            limits,
+        )
         .unwrap();
     assert_eq!(
         impact.dependent_decisions,
@@ -189,7 +201,11 @@ fn decisions_are_searchable_causal_replayable_and_exportable() {
     assert!(impact.rules.contains(&RuleId::from("rule:approval")));
 
     let trail = state
-        .regulatory_trail(&tenant("acme"), &DecisionId::from("decision:deploy"), limits)
+        .regulatory_trail(
+            &tenant("acme"),
+            &DecisionId::from("decision:deploy"),
+            limits,
+        )
         .unwrap();
     assert_eq!(trail.records.len(), 2);
     assert_eq!(trail.records[0].id, DecisionId::from("decision:approve"));
@@ -198,8 +214,14 @@ fn decisions_are_searchable_causal_replayable_and_exportable() {
         trail.records[1].outcome.as_ref().unwrap().status,
         OutcomeStatus::Succeeded
     );
-    assert_eq!(trail.canonical_json().unwrap(), trail.canonical_json().unwrap());
-    assert_eq!(trail.canonical_hash().unwrap(), trail.canonical_hash().unwrap());
+    assert_eq!(
+        trail.canonical_json().unwrap(),
+        trail.canonical_json().unwrap()
+    );
+    assert_eq!(
+        trail.canonical_hash().unwrap(),
+        trail.canonical_hash().unwrap()
+    );
 
     let replayed = DecisionState::replay(journal).unwrap();
     assert_eq!(
@@ -252,6 +274,7 @@ fn a_tenant_cannot_cite_another_tenants_precedent() {
         ))
     );
     assert_eq!(state.next_sequence(), 1);
+    assert!(state.tenant(&tenant("globex")).is_none());
 }
 
 #[test]

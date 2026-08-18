@@ -35,6 +35,12 @@ A durable effect marker closes the crash window between the Core workspace and
 the Enterprise ledger: known successes are settled without re-running Core,
 known failures remain retryable, and an ambiguous started effect fails closed.
 
+MCP tool-level errors are failures, not acknowledgements. The JavaScript client
+rejects `isError: true`, so a failed capture stays in the durable outbox. The
+server also treats a Core `isError: true` result as a backend failure before the
+write checkpoint and rolls back the admission reservation/charge, allowing the
+same durable `request_id` to be retried.
+
 Host correlation data is carried under MCP `_meta.ccos`; those fields are claims
 to validate, never proof of identity.
 

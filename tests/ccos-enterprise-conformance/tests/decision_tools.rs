@@ -9,6 +9,7 @@ use ccos_enterprise_knowledge_model::{
     AssertionKind, EntityId, EntityRecord, EvidenceId, EvidenceRecord, FactAssertion, FactId,
     FactObject, SourceId, SourceRecord, SourceTrust, TenantId, ValidityInterval,
 };
+use ccos_enterprise_mcp::decision::GovernedDecisionMcp;
 use ccos_enterprise_mcp::{govern_catalogue, Backend, GovernedMcp, McpOutcome};
 use ccos_enterprise_runtime::{actor, request, Call, Deployment, TenantState};
 use serde_json::{json, Value};
@@ -124,10 +125,13 @@ fn deployment() -> Deployment {
     deployment
 }
 
-fn front_door(dir: &TestDir) -> GovernedMcp<CoreRecorder, DecisionService> {
+fn front_door(dir: &TestDir) -> GovernedDecisionMcp<CoreRecorder, DecisionService> {
     let mut decisions = DecisionService::open(dir.0.join("decision-service")).unwrap();
     seed(&mut decisions);
-    GovernedMcp::with_decisions(deployment(), CoreRecorder::default(), decisions)
+    GovernedDecisionMcp::new(
+        GovernedMcp::new(deployment(), CoreRecorder::default()),
+        decisions,
+    )
 }
 
 fn record_args() -> Value {

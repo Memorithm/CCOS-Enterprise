@@ -55,11 +55,9 @@ impl std::fmt::Display for StoreError {
                 "{}:{line}: corrupt decision journal: {detail}",
                 path.display()
             ),
-            Self::JournalInvalid { path, detail } => write!(
-                f,
-                "{}: invalid decision journal: {detail}",
-                path.display()
-            ),
+            Self::JournalInvalid { path, detail } => {
+                write!(f, "{}: invalid decision journal: {detail}", path.display())
+            }
             Self::Serialization(detail) => {
                 write!(f, "cannot serialize decision journal: {detail}")
             }
@@ -434,14 +432,8 @@ mod tests {
         let mut store = DecisionStore::open(&dir.0).unwrap();
         let result = store.append(
             &[
-                DecisionJournalEntry::new(
-                    0,
-                    DecisionOp::Record(draft("decision:1", &knowledge)),
-                ),
-                DecisionJournalEntry::new(
-                    2,
-                    DecisionOp::Record(draft("decision:2", &knowledge)),
-                ),
+                DecisionJournalEntry::new(0, DecisionOp::Record(draft("decision:1", &knowledge))),
+                DecisionJournalEntry::new(2, DecisionOp::Record(draft("decision:2", &knowledge))),
             ],
             &knowledge,
         );

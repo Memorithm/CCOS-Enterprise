@@ -137,7 +137,11 @@ fn durable_decision_journal_survives_restart_and_keeps_accountable_views() {
     let expected_hash;
     {
         let mut store = DecisionStore::open(&dir.0).unwrap();
-        assert_eq!(store.next_sequence(), 1, "restart must resume journal order");
+        assert_eq!(
+            store.next_sequence(),
+            1,
+            "restart must resume journal order"
+        );
 
         let mut deployment = draft("decision:deploy", &knowledge);
         deployment

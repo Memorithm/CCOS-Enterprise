@@ -3,6 +3,8 @@ name: Execution journal authority migration helper
 on:
   push:
     branches: [ci/execution-journal-authority-helper]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write

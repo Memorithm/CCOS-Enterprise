@@ -1,0 +1,30 @@
+name: CI (DeepSeek Harness adapter)
+
+on:
+  pull_request:
+    paths:
+      - 'adapters/deepseek-harness/**'
+      - '.github/workflows/ci-deepseek-harness.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'adapters/deepseek-harness/**'
+      - '.github/workflows/ci-deepseek-harness.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  adapter:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Syntax
+        working-directory: adapters/deepseek-harness
+        run: npm run check
+      - name: Unit and stdio protocol tests
+        working-directory: adapters/deepseek-harness
+        run: npm test

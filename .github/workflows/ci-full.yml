@@ -59,6 +59,10 @@ jobs:
         run: |
           cargo test -p ccos-enterprise-ontology-migration --release
           cargo test -p ccos-knowledge-conformance --test p4_migration --release
+      - name: Knowledge Plane P4 semantic interoperability
+        run: |
+          cargo test -p ccos-enterprise-semantic --release
+          cargo test -p ccos-knowledge-conformance --test p4_semantic --release
       - name: Knowledge Plane P5 Decision Intelligence
         run: |
           cargo test -p ccos-enterprise-decision --release
@@ -77,7 +81,6 @@ jobs:
         run: cargo test -p ccos-enterprise-conformance --test isolation --release
       - name: adversarial (escalation, quota abuse, forged restore, admin trail)
         run: cargo test -p ccos-enterprise-conformance --test adversarial --release
-
 
   conformance:
     name: Core dependency conformance

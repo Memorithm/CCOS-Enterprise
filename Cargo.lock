@@ -401,6 +401,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-semantic"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-extract",
+ "ccos-enterprise-knowledge-model",
+ "ccos-enterprise-ontology",
+ "ccos-enterprise-resolution",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ccos-enterprise-sessions"
 version = "0.1.0-pre"
 dependencies = [
@@ -449,6 +461,7 @@ dependencies = [
  "ccos-enterprise-parse",
  "ccos-enterprise-promotion",
  "ccos-enterprise-resolution",
+ "ccos-enterprise-semantic",
 ]
 
 [[package]]

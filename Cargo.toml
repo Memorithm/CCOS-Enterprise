@@ -21,6 +21,7 @@ members = [
     "crates/ccos-enterprise-ontology",
     "crates/ccos-enterprise-promotion",
     "crates/ccos-enterprise-ontology-migration",
+    "crates/ccos-enterprise-semantic",
     "crates/ccos-enterprise-decision",
     "crates/ccos-enterprise-policy",
     "crates/ccos-enterprise-gateway",

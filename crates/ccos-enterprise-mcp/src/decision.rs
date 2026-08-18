@@ -2,22 +2,23 @@
 //!
 //! These tools are not Core translations, so they must never be inserted into
 //! `crate::CATALOGUE`, whose total/injective contract is specifically about Core.
+//! [`GovernedDecisionMcp`] wraps the existing Core-only [`crate::GovernedMcp`]
+//! rather than modifying it: Core calls keep their historical path unchanged,
+//! while exact decision tools reuse the same [`ccos_enterprise_runtime::Deployment::admit`]
+//! gate and #34 replay suppression before any local effect runs.
 
 use ccos_enterprise_auth::AuthenticatedActor;
 use ccos_enterprise_decision_service::{DecisionService, DECISION_TOOLS};
-use ccos_enterprise_runtime::Deployment;
+use ccos_enterprise_runtime::{Call, Deployment, Outcome};
 use serde_json::Value;
+
+use crate::{AdvertisedTool, Backend, GovernedMcp, McpOutcome};
 
 /// A backend for Enterprise-local decision capabilities.
 ///
-/// The MCP front door has already run the full composed admission path before
-/// calling this trait. Implementations receive the verified tenant and the
-/// unforgeable authenticated actor rather than copies parsed from arguments.
+/// Implementations receive the verified tenant and the unforgeable authenticated
+/// actor rather than copies parsed from arguments.
 pub trait DecisionBackend {
-    fn enabled(&self) -> bool {
-        true
-    }
-
     fn dispatch_decision(
         &mut self,
         tenant: &str,
@@ -25,29 +26,6 @@ pub trait DecisionBackend {
         enterprise_tool: &str,
         arguments: &Value,
     ) -> Result<Value, String>;
-}
-
-/// Default for the existing Core-only front door. It advertises and governs no
-/// decision tools, preserving the previous catalogue exactly.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoDecisionBackend;
-
-impl DecisionBackend for NoDecisionBackend {
-    fn enabled(&self) -> bool {
-        false
-    }
-
-    fn dispatch_decision(
-        &mut self,
-        _tenant: &str,
-        _actor: &AuthenticatedActor,
-        enterprise_tool: &str,
-        _arguments: &Value,
-    ) -> Result<Value, String> {
-        Err(format!(
-            "decision backend is disabled; cannot execute {enterprise_tool:?}"
-        ))
-    }
 }
 
 impl DecisionBackend for DecisionService {
@@ -86,6 +64,81 @@ pub fn govern_decision_catalogue(deployment: &mut Deployment) {
     }
 }
 
+/// Opt-in front door for Enterprise-local Decision Intelligence.
+///
+/// The inner [`GovernedMcp`] remains unchanged and continues to own all Core
+/// translation/dispatch. The wrapper only intercepts exact decision tool names.
+/// For those names it calls the same runtime admission path itself, so replay,
+/// tenant ownership, RBAC, policy, budget and audit remain authoritative before
+/// the local backend is allowed to mutate durable decision state.
+pub struct GovernedDecisionMcp<B: Backend, D: DecisionBackend> {
+    core: GovernedMcp<B>,
+    decisions: D,
+}
+
+impl<B: Backend, D: DecisionBackend> GovernedDecisionMcp<B, D> {
+    pub fn new(mut core: GovernedMcp<B>, decisions: D) -> Self {
+        govern_decision_catalogue(core.deployment_mut());
+        Self { core, decisions }
+    }
+
+    pub fn deployment(&self) -> &Deployment {
+        self.core.deployment()
+    }
+
+    pub fn deployment_mut(&mut self) -> &mut Deployment {
+        self.core.deployment_mut()
+    }
+
+    pub fn backend(&self) -> &B {
+        self.core.backend()
+    }
+
+    pub fn backend_mut(&mut self) -> &mut B {
+        self.core.backend_mut()
+    }
+
+    pub fn decision_backend(&self) -> &D {
+        &self.decisions
+    }
+
+    pub fn decision_backend_mut(&mut self) -> &mut D {
+        &mut self.decisions
+    }
+
+    /// Advertise the stable Core catalogue plus the exact local decision tools.
+    pub fn list_tools(&self) -> Vec<AdvertisedTool> {
+        let mut tools = self.core.list_tools();
+        tools.extend(DECISION_TOOLS.iter().map(|tool| AdvertisedTool {
+            name: tool.name,
+            permission: tool.permission,
+        }));
+        tools.sort_by_key(|tool| tool.name);
+        tools
+    }
+
+    pub fn call(&mut self, call: Call<'_>, arguments: &Value) -> McpOutcome {
+        if !is_decision_tool(&call.request.tool) {
+            return self.core.call(call, arguments);
+        }
+
+        let tool = call.request.tool.clone();
+        let tenant = call.request.tenant.clone();
+        let actor = call.actor.clone();
+        match self.core.deployment_mut().admit(call) {
+            Outcome::Refused(refusal) => McpOutcome::Refused(refusal),
+            Outcome::Replayed => McpOutcome::Replayed,
+            Outcome::Forwarded => match self
+                .decisions
+                .dispatch_decision(&tenant, &actor, &tool, arguments)
+            {
+                Ok(value) => McpOutcome::Ok(value),
+                Err(error) => McpOutcome::BackendError(error),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,7 +157,10 @@ mod tests {
                 tool: tool.into(),
                 request_id: "r-1".into(),
             };
-            assert!(matches!(classify(&request), ccos_enterprise_gateway::Disposition::Forward));
+            assert!(matches!(
+                classify(&request),
+                ccos_enterprise_gateway::Disposition::Forward
+            ));
         }
     }
 
@@ -114,6 +170,9 @@ mod tests {
             .into_iter()
             .map(|(_, permission)| permission)
             .collect();
-        assert_eq!(permissions, BTreeSet::from(["decision.read", "decision.write"]));
+        assert_eq!(
+            permissions,
+            BTreeSet::from(["decision.read", "decision.write"])
+        );
     }
 }

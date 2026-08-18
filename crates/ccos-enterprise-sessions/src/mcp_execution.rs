@@ -1,10 +1,8 @@
 //! Request-correlated governed MCP front door for CCOS Enterprise.
 //!
-//! `GovernedMcp` owns the admission policy and must remain the authority for
-//! identity, tenant, authorization, replay, and budget decisions. This module
-//! does not duplicate any of those gates. Instead it decorates its backend so
-//! the already-governed `request_id` becomes the durable execution identity
-//! when (and only when) the call actually reaches the backend.
+//! `GovernedMcp` remains the sole admission authority. This wrapper only carries
+//! the already-governed `request_id` into the durable Enterprise execution
+//! journal when a call actually reaches the backend.
 
 use crate::execution_backend::{DispatchExecution, ExecutionBackend, ExecutionBackendError};
 use ccos_enterprise_mcp::{AdvertisedTool, Backend, GovernedMcp, McpOutcome};
@@ -12,18 +10,13 @@ use ccos_enterprise_runtime::{Call, Deployment};
 use serde_json::Value;
 use std::path::Path;
 
-/// A context waiting for exactly one governed backend dispatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingExecution {
     tenant: String,
     execution: DispatchExecution,
 }
 
-/// Backend adapter that consumes a request-correlated context at dispatch.
-///
-/// The pending context is intentionally single-use. `GovernedMcp` dispatches at
-/// most once for a forwarded call; a second dispatch would therefore fall back
-/// to the execution backend's own monotonic IDs instead of reusing a call ID.
+/// Backend adapter that consumes one request-correlated context at dispatch.
 pub struct RequestCorrelatedBackend<B> {
     execution: ExecutionBackend<B>,
     pending: Option<PendingExecution>,
@@ -54,9 +47,6 @@ impl<B> RequestCorrelatedBackend<B> {
     }
 
     fn arm(&mut self, tenant: &str, request_id: &str) {
-        // The same already-governed request id names the turn, step and tool
-        // call. Their namespaces are distinct in the event schema, so equality
-        // is unambiguous and gives audit joins an exact correlation key.
         self.pending = Some(PendingExecution {
             tenant: tenant.to_string(),
             execution: DispatchExecution::new(request_id, request_id, request_id),
@@ -81,8 +71,6 @@ impl<B: Backend> Backend for RequestCorrelatedBackend<B> {
                 .dispatch_with_context(tenant, &pending.execution, core_tool, arguments)
                 .map_err(|error| error.to_string()),
             Some(pending) => {
-                // Put it back: a tenant mismatch is an invariant violation, not
-                // permission to consume another tenant's correlation context.
                 let expected = pending.tenant.clone();
                 self.pending = Some(pending);
                 Err(format!(
@@ -94,8 +82,7 @@ impl<B: Backend> Backend for RequestCorrelatedBackend<B> {
     }
 }
 
-/// Governed MCP front door whose forwarded calls are correlated to the
-/// Enterprise execution journal by `request_id`.
+/// Governed MCP front door whose forwarded calls are correlated by request ID.
 pub struct GovernedExecutionMcp<B: Backend> {
     inner: GovernedMcp<RequestCorrelatedBackend<B>>,
 }
@@ -135,9 +122,8 @@ impl<B: Backend> GovernedExecutionMcp<B> {
         self.inner.list_tools()
     }
 
-    /// Run the authoritative Enterprise admission path and correlate only a
-    /// genuinely forwarded backend call. Refused, replayed, and unknown-tool
-    /// outcomes always clear the temporary context before returning.
+    /// Arm the request correlation, run the authoritative admission path, then
+    /// clear any unconsumed context on every returned outcome.
     pub fn call(&mut self, call: Call<'_>, arguments: &Value) -> McpOutcome {
         let tenant = call.request.tenant.clone();
         let request_id = call.request.request_id.clone();
@@ -147,7 +133,6 @@ impl<B: Backend> GovernedExecutionMcp<B> {
         outcome
     }
 
-    /// Recover durable tool states for a tenant without dispatching anything.
     pub fn recover_tools(
         &mut self,
         tenant: &str,
@@ -159,16 +144,12 @@ impl<B: Backend> GovernedExecutionMcp<B> {
     }
 }
 
-/// Production specialization: one Core session and one execution journal
-/// stream per tenant, both rooted under the same Enterprise data directory.
+/// Production specialization: one Core session and execution stream per tenant.
 pub type GovernedTenantSessions = GovernedExecutionMcp<crate::TenantSessions>;
 
 impl GovernedExecutionMcp<crate::TenantSessions> {
     pub fn tenant_sessions(deployment: Deployment, root: impl AsRef<Path>) -> Self {
-        Self::new(
-            deployment,
-            ExecutionBackend::tenant_sessions(root.as_ref().to_path_buf()),
-        )
+        Self::new(deployment, ExecutionBackend::tenant_sessions(root.as_ref()))
     }
 
     pub fn tenant_sessions_with_capacity(
@@ -178,7 +159,7 @@ impl GovernedExecutionMcp<crate::TenantSessions> {
     ) -> Self {
         Self::new(
             deployment,
-            ExecutionBackend::tenant_sessions_with_capacity(root.as_ref().to_path_buf(), capacity),
+            ExecutionBackend::tenant_sessions_with_capacity(root.as_ref(), capacity),
         )
     }
 }
@@ -240,25 +221,28 @@ mod tests {
         deployment
     }
 
+    fn governed_call<'a>(
+        actor: &'a ccos_enterprise_auth::AuthenticatedActor,
+        request: &'a ccos_enterprise_gateway::GatewayRequest,
+    ) -> Call<'a> {
+        Call {
+            actor,
+            request,
+            model: "claude-opus",
+            cost_tokens: 10,
+            variant: None,
+            justification: None,
+        }
+    }
+
     #[test]
     fn forwarded_request_id_becomes_exact_durable_call_id() {
         let root = scratch("correlation");
-        let recorder = Recorder::default();
-        let mut mcp = GovernedExecutionMcp::from_backend(deployment(), recorder, &root);
+        let mut mcp = GovernedExecutionMcp::from_backend(deployment(), Recorder::default(), &root);
         let alice = actor("memorithm", "alice", AuthStrength::Token);
         let req = request("acme", "alice", "memory.recall", "req-correlation-17");
 
-        let outcome = mcp.call(
-            Call {
-                actor: &alice,
-                request: &req,
-                model: "claude-opus",
-                cost_tokens: 10,
-                variant: None,
-                justification: None,
-            },
-            &json!({}),
-        );
+        let outcome = mcp.call(governed_call(&alice, &req), &json!({}));
         assert!(matches!(outcome, McpOutcome::Ok(_)), "{outcome:?}");
         let recovered = mcp.recover_tools("acme").expect("recover");
         assert_eq!(recovered.len(), 1);
@@ -277,31 +261,11 @@ mod tests {
         let req = request("acme", "alice", "memory.recall", "req-replay");
 
         assert!(matches!(
-            mcp.call(
-                Call {
-                    actor: &alice,
-                    request: &req,
-                    model: "claude-opus",
-                    cost_tokens: 10,
-                    variant: None,
-                    justification: None,
-                },
-                &json!({})
-            ),
+            mcp.call(governed_call(&alice, &req), &json!({})),
             McpOutcome::Ok(_)
         ));
         assert_eq!(
-            mcp.call(
-                Call {
-                    actor: &alice,
-                    request: &req,
-                    model: "claude-opus",
-                    cost_tokens: 10,
-                    variant: None,
-                    justification: None,
-                },
-                &json!({})
-            ),
+            mcp.call(governed_call(&alice, &req), &json!({})),
             McpOutcome::Replayed
         );
         assert_eq!(mcp.backend().execution().inner().call_count(), 1);
@@ -311,23 +275,13 @@ mod tests {
     }
 
     #[test]
-    fn refused_call_clears_pending_context_without_touching_backend() {
+    fn refused_call_clears_context_without_touching_backend() {
         let root = scratch("refused");
         let mut mcp = GovernedExecutionMcp::from_backend(deployment(), Recorder::default(), &root);
         let bob = actor("memorithm", "bob", AuthStrength::Token);
         let req = request("acme", "bob", "memory.ingest", "req-refused");
 
-        let outcome = mcp.call(
-            Call {
-                actor: &bob,
-                request: &req,
-                model: "claude-opus",
-                cost_tokens: 10,
-                variant: None,
-                justification: None,
-            },
-            &json!({}),
-        );
+        let outcome = mcp.call(governed_call(&bob, &req), &json!({}));
         assert!(matches!(outcome, McpOutcome::Refused(_)), "{outcome:?}");
         assert_eq!(mcp.backend().execution().inner().call_count(), 0);
         assert!(!mcp.backend().has_pending_context());
@@ -342,17 +296,7 @@ mod tests {
         let alice = actor("memorithm", "alice", AuthStrength::Token);
         let req = request("acme", "alice", "memory.recall", "bad\nrequest");
 
-        let outcome = mcp.call(
-            Call {
-                actor: &alice,
-                request: &req,
-                model: "claude-opus",
-                cost_tokens: 10,
-                variant: None,
-                justification: None,
-            },
-            &json!({}),
-        );
+        let outcome = mcp.call(governed_call(&alice, &req), &json!({}));
         assert!(
             matches!(outcome, McpOutcome::BackendError(_)),
             "{outcome:?}"
@@ -364,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn tenant_mismatch_refuses_to_consume_another_tenants_context() {
+    fn tenant_mismatch_refuses_to_consume_foreign_context() {
         let root = scratch("tenant-mismatch");
         let execution = ExecutionBackend::new(Recorder::default(), &root);
         let mut backend = RequestCorrelatedBackend::new(execution);

@@ -77,7 +77,15 @@ export class StdioMcpClient {
       arguments: arguments_ || {},
       _meta: { ccos: meta || {} },
     }
-    return this.request('tools/call', params, options)
+    const result = await this.request('tools/call', params, options)
+    if (result?.isError === true) {
+      const text = textFromMcpToolResult(result) || `CCOS Enterprise tool ${name} failed`
+      const error = new Error(text)
+      error.code = 'MCP_TOOL_ERROR'
+      error.result = result
+      throw error
+    }
+    return result
   }
 
   request(method, params, options = {}) {

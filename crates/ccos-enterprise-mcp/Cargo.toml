@@ -13,6 +13,7 @@ ccos-enterprise-gateway = { path = "../ccos-enterprise-gateway" }
 ccos-enterprise-auth = { path = "../ccos-enterprise-auth", features = ["token-auth"] }
 ccos-enterprise-decision-service = { path = "../ccos-enterprise-decision-service" }
 ccos-enterprise-qpages = { path = "../ccos-enterprise-qpages" }
+ccos-enterprise-store = { path = "../ccos-enterprise-store" }
 ccos-core.workspace = true
 ed25519-dalek = "2"
 serde.workspace = true

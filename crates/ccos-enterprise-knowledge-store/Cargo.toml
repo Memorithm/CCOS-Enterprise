@@ -1,0 +1,12 @@
+[package]
+name = "ccos-enterprise-knowledge-store"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Durable append-only journal and deterministic replay store for the CCOS Enterprise Knowledge Plane."
+
+[dependencies]
+ccos-enterprise-knowledge = { path = "../ccos-enterprise-knowledge" }
+serde_json.workspace = true

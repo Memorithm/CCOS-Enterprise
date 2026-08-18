@@ -1,0 +1,12 @@
+[package]
+name = "ccos-knowledge-conformance"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "End-to-end conformance tests for the canonical CCOS Enterprise Knowledge Plane."
+
+[dependencies]
+ccos-enterprise-knowledge = { path = "../../crates/ccos-enterprise-knowledge" }
+ccos-enterprise-knowledge-store = { path = "../../crates/ccos-enterprise-knowledge-store" }

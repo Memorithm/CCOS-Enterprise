@@ -14,6 +14,9 @@ members = [
     "crates/ccos-enterprise-auth",
     "crates/ccos-enterprise-rbac",
     "crates/ccos-enterprise-tenancy",
+    "crates/ccos-enterprise-knowledge-model",
+    "crates/ccos-enterprise-knowledge",
+    "crates/ccos-enterprise-knowledge-store",
     "crates/ccos-enterprise-policy",
     "crates/ccos-enterprise-gateway",
     "crates/ccos-enterprise-observability",
@@ -28,6 +31,7 @@ members = [
     "crates/ccos-enterprise-sessions",
     "tools/ccos-license-server",
     "tests/ccos-enterprise-conformance",
+    "tests/ccos-knowledge-conformance",
 ]
 
 [workspace.package]

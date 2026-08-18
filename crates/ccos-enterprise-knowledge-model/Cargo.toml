@@ -1,0 +1,12 @@
+[package]
+name = "ccos-enterprise-knowledge-model"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Canonical tenant-scoped data model for the CCOS Enterprise Knowledge Plane."
+
+[dependencies]
+ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
+serde.workspace = true

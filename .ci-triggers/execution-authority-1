@@ -1,0 +1,2 @@
+Trigger the isolated execution-journal authority migration onto refactor/execution-journal-authority.
+The feature branch must still equal current main before the helper applies any change.

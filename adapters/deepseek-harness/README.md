@@ -10,10 +10,10 @@ Target host: DeepSeek Harness `0.1.x` (initial validation target: `0.1.0-rc.7`).
 
 - DSH remains authoritative for its turn waterfall; recall happens only after
   `next()` accepts/redacts the direct-user input.
-- recalled text is untrusted historical context, never system authority;
-- recall is fail-open and hard-capped at 3000 ms;
-- tenant and actor are mandatory and are never inferred from the workspace;
-- capture enters a durable local outbox before MCP delivery;
+- Recalled text is untrusted historical context, never system authority.
+- Recall is fail-open and hard-capped at 3000 ms.
+- Tenant and actor are mandatory and are never inferred from the workspace.
+- Capture enters a durable local outbox before MCP delivery.
 - DSH-native shell/code capabilities do not become CCOS capabilities.
 
 ## Enterprise stdio transport

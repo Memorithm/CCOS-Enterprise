@@ -976,15 +976,27 @@ fn the_audit_trail_cannot_tell_an_experimental_call_from_a_standard_one() {
 /// connection dropped mid-call paid twice for one decision, and a retry loop
 /// could drain a tenant's budget without ever presenting a new request.
 ///
-/// A `(tenant, request_id)` already decided now returns its prior outcome
-/// without charging again. This test is the regression guard: same inputs —
-/// one id, five calls — opposite expectation.
+/// A `(tenant, request_id)` already decided now returns explicit `Replayed`
+/// without charging or becoming eligible to execute again. This test is the
+/// regression guard: same inputs — one id, five attempts — one `Forwarded`,
+/// four `Replayed`, one charge.
 #[test]
 fn a_replayed_request_id_is_never_billed_twice() {
     let mut d = deployment_activating(SUBSETS - 1);
     let a = actor(ORG, "alice", AuthStrength::Token);
     let req = request("acme", "alice", "memory.recall", "same-id");
-    for attempt in 0..5 {
+
+    let first = d.admit(Call {
+        actor: &a,
+        request: &req,
+        model: "claude-opus",
+        cost_tokens: 1,
+        variant: Some(AdvancedQPageVariant::ExperimentalBridge),
+        justification: None,
+    });
+    assert_eq!(first, Outcome::Forwarded, "the first attempt executes");
+
+    for attempt in 1..5 {
         let out = d.admit(Call {
             actor: &a,
             request: &req,
@@ -993,21 +1005,26 @@ fn a_replayed_request_id_is_never_billed_twice() {
             variant: Some(AdvancedQPageVariant::ExperimentalBridge),
             justification: None,
         });
-        assert!(
-            out.is_forwarded(),
-            "attempt {attempt}: a replay returns the prior outcome, not a refusal: {out:?}"
+        assert_eq!(
+            out,
+            Outcome::Replayed,
+            "attempt {attempt}: a duplicate id is acknowledged without another execution"
         );
     }
+
     assert_eq!(
         d.spent("acme"),
         Some(1),
         "billed once, replayed four times: the same request_id is not a new call"
     );
 
-    // Suppression is a billing rule, not a silence: every attempt is journaled,
-    // and only the one that was charged carries a cost.
-    assert_eq!(d.audit().count(), 5, "every attempt is still journaled");
-    let costs: Vec<u64> = d.audit().map(|r| r.cost).collect();
+    // Suppression is observable, not silence: all attempts are journaled,
+    // with exactly one executable/charged decision and four zero-cost replays.
+    let trail: Vec<_> = d.audit().collect();
+    assert_eq!(trail.len(), 5, "every attempt is still journaled");
+    assert_eq!(trail[0].outcome, Outcome::Forwarded);
+    assert!(trail[1..].iter().all(|r| r.outcome.is_replayed()));
+    let costs: Vec<u64> = trail.iter().map(|r| r.cost).collect();
     assert_eq!(costs, vec![1, 0, 0, 0, 0]);
     let billed: u64 = costs.iter().sum();
     assert_eq!(Some(billed), d.spent("acme"), "the journal reconciles");

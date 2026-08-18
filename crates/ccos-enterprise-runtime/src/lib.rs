@@ -228,19 +228,28 @@ pub enum Refusal {
 /// The outcome of one admission decision, as journaled.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Outcome {
+    /// The call passed every gate and its effect may execute exactly once.
     Forwarded,
+    /// This tenant/request_id was already forwarded earlier. The replay is
+    /// journaled at zero cost but MUST NOT execute the effect again.
+    Replayed,
     Refused(Refusal),
 }
 
 impl Outcome {
+    /// True only for the first admitted execution, never for a replay.
     pub fn is_forwarded(&self) -> bool {
         matches!(self, Outcome::Forwarded)
+    }
+
+    pub fn is_replayed(&self) -> bool {
+        matches!(self, Outcome::Replayed)
     }
 
     pub fn refusal(&self) -> Option<&Refusal> {
         match self {
             Outcome::Refused(r) => Some(r),
-            Outcome::Forwarded => None,
+            Outcome::Forwarded | Outcome::Replayed => None,
         }
     }
 }
@@ -1176,6 +1185,7 @@ impl Deployment {
         self.metrics.inc("gateway.requests", 1);
         match &outcome {
             Outcome::Forwarded => self.metrics.inc("gateway.forwarded", 1),
+            Outcome::Replayed => self.metrics.inc("gateway.replayed", 1),
             Outcome::Refused(r) => {
                 self.metrics.inc("gateway.refused", 1);
                 self.metrics.inc(&format!("gateway.refused.{}", tag(r)), 1);
@@ -1299,8 +1309,7 @@ impl Deployment {
         //    key; nothing read it, so a retried request was billed again.
         let key = (tenant_id.clone(), call.request.request_id.clone());
         if self.decided.contains(&key) {
-            self.metrics.inc("gateway.replayed", 1);
-            return (Outcome::Forwarded, 0);
+            return (Outcome::Replayed, 0);
         }
 
         // 8. Budget, last: a refusal above never reaches this line.
@@ -1892,6 +1901,7 @@ impl Deployment {
             d.metrics.inc("gateway.requests", 1);
             match &record.outcome {
                 Outcome::Forwarded => d.metrics.inc("gateway.forwarded", 1),
+                Outcome::Replayed => d.metrics.inc("gateway.replayed", 1),
                 Outcome::Refused(r) => {
                     d.metrics.inc("gateway.refused", 1);
                     d.metrics.inc(&format!("gateway.refused.{}", tag(r)), 1);
@@ -2074,11 +2084,22 @@ mod tests {
     }
 
     #[test]
-    fn a_replayed_request_id_is_not_billed_twice() {
+    fn a_replayed_request_id_is_explicit_and_not_billed_twice() {
         let mut d = two_tenant_deployment();
         let alice = actor("memorithm", "alice", AuthStrength::Token);
         let req = request("acme", "alice", "memory.ingest", "r-same");
-        for _ in 0..5 {
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 100,
+                variant: None,
+                justification: None,
+            }),
+            Outcome::Forwarded
+        );
+        for _ in 0..4 {
             assert_eq!(
                 d.admit(Call {
                     actor: &alice,
@@ -2088,7 +2109,7 @@ mod tests {
                     variant: None,
                     justification: None,
                 }),
-                Outcome::Forwarded
+                Outcome::Replayed
             );
         }
         assert_eq!(
@@ -2096,6 +2117,11 @@ mod tests {
             Some(100),
             "billed once, replayed four times"
         );
+        let trail: Vec<_> = d.audit_of("acme");
+        assert_eq!(trail.len(), 5);
+        assert_eq!(trail[0].outcome, Outcome::Forwarded);
+        assert!(trail[1..].iter().all(|r| r.outcome.is_replayed()));
+        assert!(trail[1..].iter().all(|r| r.cost == 0));
     }
 
     #[test]

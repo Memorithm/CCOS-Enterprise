@@ -20,38 +20,38 @@ jobs:
           ref: fix/runtime-true-idempotent-replay
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Patch and execute the replay billing guard
+      - name: Replace and execute the complete replay billing guard
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
           p = Path('tests/ccos-enterprise-conformance/tests/stress_budget_property.rs')
           s = p.read_text()
-          fn = 'fn a_replayed_request_id_is_billed_once() {'
-          fn_pos = s.index(fn)
+          start_marker = '/// **DEFECT 5 (medium, billing integrity) — REPAIRED; this test is the\n'
+          end_marker = '// ── 9. Defect 7, REPAIRED: whose budget is it? ───────────────────────────\n'
+          start = s.index(start_marker)
+          end = s.index(end_marker, start)
+          replacement = r'''/// **DEFECT 5 (medium, billing integrity) — REPAIRED; this test is the
+          /// guard.**
+          ///
+          /// `GatewayRequest::request_id` is documented as an "Idempotency/correlation
+          /// key for audit joins", and nothing on the path read it. Replaying the
+          /// identical request — the ordinary consequence of a client-side retry after a
+          /// timeout — was admitted again and **billed** again: ten attempts of one id
+          /// drained ten times the budget and left ten audit records that all claimed to
+          /// be the same request.
+          ///
+          /// A decided `(tenant, request_id)` is now returned as explicit `Replayed` at
+          /// zero cost and is not eligible to execute again. Ten attempts therefore mean
+          /// one `Forwarded`, nine `Replayed`, and one charge. Replay suppression remains
+          /// tenant-scoped: a new request id or the same id in another tenant is a new
+          /// decision and can execute normally.
+          #[test]
+          fn a_replayed_request_id_is_billed_once() {
+              let mut d = two_tenant_deployment();
+              let alice = actor("memorithm", "alice", AuthStrength::Token);
+              let req = request("acme", "alice", "memory.ingest", "the-same-request");
 
-          old_doc = '/// A decided `(tenant, request_id)` is now Forwarded without being charged.\n/// The scenario is kept verbatim — the same ten replays of one id, at the same\n/// 100 tokens each — with the opposite expectation: billed once.\n'
-          new_doc = '/// A decided `(tenant, request_id)` is now returned as explicit `Replayed`\n/// without being charged or becoming eligible to execute again. The scenario is\n/// kept verbatim — ten attempts of one id, at 100 tokens each — with the opposite\n/// expectation: one `Forwarded`, nine `Replayed`, billed once.\n'
-          if s.count(old_doc) != 1:
-              raise SystemExit(f'expected one stale replay doc block, found {s.count(old_doc)}')
-          s = s.replace(old_doc, new_doc, 1)
-          fn_pos = s.index(fn)
-
-          loop_start = s.index('    for i in 0..10 {', fn_pos)
-          after_loop = s.index('    assert_eq!(\n        d.spent("acme"),', loop_start)
-          replacement = '''    assert_eq!(
-              d.admit(Call {
-                  actor: &alice,
-                  request: &req,
-                  model: "claude-opus",
-                  cost_tokens: 100,
-                  variant: None,
-                  justification: None,
-              }),
-              Outcome::Forwarded,
-              "the first request is the one execution"
-          );
-          for i in 1..10 {
               assert_eq!(
                   d.admit(Call {
                       actor: &alice,
@@ -61,27 +61,108 @@ jobs:
                       variant: None,
                       justification: None,
                   }),
-                  Outcome::Replayed,
-                  "replay {i} is acknowledged without a second execution"
+                  Outcome::Forwarded,
+                  "the first request is the one execution"
+              );
+              for i in 1..10 {
+                  assert_eq!(
+                      d.admit(Call {
+                          actor: &alice,
+                          request: &req,
+                          model: "claude-opus",
+                          cost_tokens: 100,
+                          variant: None,
+                          justification: None,
+                      }),
+                      Outcome::Replayed,
+                      "replay {i} is acknowledged without a second execution"
+                  );
+              }
+
+              assert_eq!(
+                  d.spent("acme"),
+                  Some(100),
+                  "REGRESSION GUARD: one request id, one charge — not the whole budget"
+              );
+              let trail = d.audit_of("acme");
+              assert_eq!(trail.len(), 10, "every attempt is still journaled");
+              assert!(
+                  trail.iter().all(|r| r.request_id == "the-same-request"),
+                  "…under the id the client sent…"
+              );
+              assert_eq!(trail[0].outcome, Outcome::Forwarded);
+              assert!(
+                  trail[1..].iter().all(|r| r.outcome.is_replayed()),
+                  "…and every duplicate is explicitly recorded as Replayed"
+              );
+              let costs: Vec<u64> = trail.iter().map(|r| r.cost).collect();
+              assert_eq!(
+                  costs,
+                  vec![100, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                  "…and the journal says which attempt was the real charge"
+              );
+              let billed: u64 = costs.iter().sum();
+              assert_eq!(Some(billed), d.spent("acme"), "journal reconciles the meter");
+
+              // A further retry stays a replay: no new charge and, critically, no new
+              // effect is eligible to execute.
+              assert_eq!(
+                  d.admit(Call {
+                      actor: &alice,
+                      request: &req,
+                      model: "claude-opus",
+                      cost_tokens: 100,
+                      variant: None,
+                      justification: None,
+                  }),
+                  Outcome::Replayed
+              );
+              assert_eq!(d.spent("acme"), Some(100));
+
+              // Dedup is on the id, not on request shape: a genuinely new request with
+              // the same tenant, actor, tool and price is a new execution and is billed.
+              let fresh = request("acme", "alice", "memory.ingest", "a-different-request");
+              assert_eq!(
+                  d.admit(Call {
+                      actor: &alice,
+                      request: &fresh,
+                      model: "claude-opus",
+                      cost_tokens: 100,
+                      variant: None,
+                      justification: None,
+                  }),
+                  Outcome::Forwarded
+              );
+              assert_eq!(
+                  d.spent("acme"),
+                  Some(200),
+                  "a distinct id is a distinct decision, and is charged"
+              );
+
+              // Replay suppression is per tenant: the same id under another tenant is a
+              // different decision, so it cannot be used to get a free call elsewhere.
+              let bob = actor("memorithm", "bob", AuthStrength::Token);
+              let elsewhere = request("globex", "bob", "memory.recall", "the-same-request");
+              assert_eq!(
+                  d.admit(Call {
+                      actor: &bob,
+                      request: &elsewhere,
+                      model: "gpt-5",
+                      cost_tokens: 50,
+                      variant: None,
+                      justification: None,
+                  }),
+                  Outcome::Forwarded
+              );
+              assert_eq!(
+                  d.spent("globex"),
+                  Some(50),
+                  "REGRESSION GUARD: the replay key is (tenant, request_id), not request_id"
               );
           }
-          '''
-          s = s[:loop_start] + replacement + s[after_loop:]
 
-          trail_marker = '''    assert!(
-              trail.iter().all(|r| r.request_id == "the-same-request"),
-              "…under the id the client sent…"
-          );
           '''
-          trail_pos = s.index(trail_marker, fn_pos) + len(trail_marker)
-          trail_guard = '''    assert_eq!(trail[0].outcome, Outcome::Forwarded);
-          assert!(
-              trail[1..].iter().all(|r| r.outcome.is_replayed()),
-              "…and every duplicate is recorded explicitly as Replayed"
-          );
-          '''
-          s = s[:trail_pos] + trail_guard + s[trail_pos:]
-          p.write_text(s)
+          p.write_text(s[:start] + replacement + s[end:])
           PY
           cargo fmt --all
           cargo test -p ccos-enterprise-conformance --test stress_budget_property a_replayed_request_id_is_billed_once --release -- --exact

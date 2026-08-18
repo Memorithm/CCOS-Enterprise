@@ -496,10 +496,8 @@ mod tests {
 
     #[test]
     fn append_error_poisons_instance_until_reopen_repairs_tail() {
-        let root = std::env::temp_dir().join(format!(
-            "ccos-mcp-execution-poison-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ccos-mcp-execution-poison-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let path = root.join("execution.jsonl");
         let mut journal = ExecutionJournal::open(&path, "tenant/acme/mcp")

@@ -1,0 +1,241 @@
+name: P5b2 bootstrap
+
+on:
+  push:
+    branches: [feat/knowledge-plane-p5b2-governed-decision-tools]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/knowledge-plane-p5b2-governed-decision-tools
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Patch MCP composition and validate P5b2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}')
+              p.write_text(s.replace(old, new, 1))
+
+          lib = 'crates/ccos-enterprise-mcp/src/lib.rs'
+          replace_once(
+              lib,
+              '''//! This crate is the translation table and the front door built on it. It adds
+          //! no capability of its own: every admitted call is one Core already had, and
+          //! every refusal is [`ccos_enterprise_runtime::Deployment::admit`]'s.
+          ''',
+              '''//! Core's translation table remains a closed contract. Enterprise-local capabilities
+          //! such as Decision Intelligence live in a separate catalogue (`decision`) and never
+          //! masquerade as Core tools. Both paths still share the one composed admission policy:
+          //! [`ccos_enterprise_runtime::Deployment::admit`].
+          ''')
+          replace_once(
+              lib,
+              '''pub mod server;
+          pub use server::{govern_catalogue, AdvertisedTool, Backend, GovernedMcp, McpOutcome};
+          ''',
+              '''pub mod decision;
+          pub mod server;
+          pub use decision::{
+              decision_governance_map, decision_governed_names, govern_decision_catalogue,
+              DecisionBackend, NoDecisionBackend,
+          };
+          pub use server::{govern_catalogue, AdvertisedTool, Backend, GovernedMcp, McpOutcome};
+          ''')
+
+          server = 'crates/ccos-enterprise-mcp/src/server.rs'
+          replace_once(
+              server,
+              '''use crate::{governed_names, to_core, Disposition, CATALOGUE};
+          ''',
+              '''use ccos_enterprise_decision_service::DECISION_TOOLS;
+
+          use crate::decision::{
+              govern_decision_catalogue, is_decision_tool, DecisionBackend, NoDecisionBackend,
+          };
+          use crate::{governed_names, to_core, Disposition, CATALOGUE};
+          ''')
+          replace_once(
+              server,
+              '''/// The governed MCP front door.
+          pub struct GovernedMcp<B: Backend> {
+              deployment: Deployment,
+              backend: B,
+          }
+
+          impl<B: Backend> GovernedMcp<B> {
+              pub fn new(deployment: Deployment, backend: B) -> Self {
+                  Self {
+                      deployment,
+                      backend,
+                  }
+              }
+
+              /// The deployment underneath, for provisioning and for reading the trail.
+          ''',
+              '''/// The governed MCP front door.
+          ///
+          /// `D = NoDecisionBackend` preserves the historical Core-only surface. Decision tools
+          /// become governed and advertised only through [`GovernedMcp::with_decisions`].
+          pub struct GovernedMcp<B: Backend, D: DecisionBackend = NoDecisionBackend> {
+              deployment: Deployment,
+              backend: B,
+              decision_backend: D,
+          }
+
+          impl<B: Backend> GovernedMcp<B, NoDecisionBackend> {
+              pub fn new(deployment: Deployment, backend: B) -> Self {
+                  Self {
+                      deployment,
+                      backend,
+                      decision_backend: NoDecisionBackend,
+                  }
+              }
+
+              pub fn with_decisions<D: DecisionBackend>(
+                  mut deployment: Deployment,
+                  backend: B,
+                  decision_backend: D,
+              ) -> GovernedMcp<B, D> {
+                  govern_decision_catalogue(&mut deployment);
+                  GovernedMcp {
+                      deployment,
+                      backend,
+                      decision_backend,
+                  }
+              }
+          }
+
+          impl<B: Backend, D: DecisionBackend> GovernedMcp<B, D> {
+              /// The deployment underneath, for provisioning and for reading the trail.
+          ''')
+          replace_once(
+              server,
+              '''    pub fn backend_mut(&mut self) -> &mut B {
+                  &mut self.backend
+              }
+
+              /// The `tools/list` answer: Enterprise names only.
+          ''',
+              '''    pub fn backend_mut(&mut self) -> &mut B {
+                  &mut self.backend
+              }
+
+              pub fn decision_backend(&self) -> &D {
+                  &self.decision_backend
+              }
+
+              pub fn decision_backend_mut(&mut self) -> &mut D {
+                  &mut self.decision_backend
+              }
+
+              /// The `tools/list` answer: Enterprise names only.
+          ''')
+          replace_once(
+              server,
+              '''            .collect();
+              tools.sort_by_key(|t| t.name);
+              tools
+          ''',
+              '''            .collect();
+              if self.decision_backend.enabled() {
+                  tools.extend(DECISION_TOOLS.iter().map(|tool| AdvertisedTool {
+                      name: tool.name,
+                      permission: tool.permission,
+                  }));
+              }
+              tools.sort_by_key(|t| t.name);
+              tools
+          ''')
+          replace_once(
+              server,
+              '''    pub fn call(&mut self, call: Call<'_>, arguments: &serde_json::Value) -> McpOutcome {
+                  let tool = call.request.tool.clone();
+                  let tenant = call.request.tenant.clone();
+                  // The catalogue check is deliberately *after* nothing and *before*
+                  // admission only in the sense that an unknown name has no Core tool to
+                  // run. It does not short-circuit governance: an unknown name is still
+                  // journaled, because "who asked for what" is the question an audit
+                  // trail exists to answer, and a probe for capabilities that do not
+                  // exist is exactly the traffic worth keeping.
+                  match self.deployment.admit(call) {
+                      Outcome::Refused(r) => return McpOutcome::Refused(r),
+                      Outcome::Replayed => return McpOutcome::Replayed,
+                      Outcome::Forwarded => {}
+                  }
+
+                  let Some(core_tool) = to_core(&tool) else {
+                      // Admitted by governance, but not in the table. Reachable only if
+                      // a deployment governs a tool this crate does not translate, which
+                      // `the_governance_map_covers_every_advertised_capability` and the
+                      // Core contract test both work to prevent.
+                      return McpOutcome::UnknownTool;
+                  };
+
+                  match self.backend.dispatch(&tenant, core_tool, arguments) {
+                      Ok(value) => McpOutcome::Ok(value),
+                      Err(e) => McpOutcome::BackendError(e),
+                  }
+              }
+          ''',
+              '''    pub fn call(&mut self, call: Call<'_>, arguments: &serde_json::Value) -> McpOutcome {
+                  let tool = call.request.tool.clone();
+                  let tenant = call.request.tenant.clone();
+                  // Clone the verified identity before `admit` consumes the Call wrapper. Local
+                  // decision tools receive this proof-derived actor, never an argument field.
+                  let actor = call.actor.clone();
+                  match self.deployment.admit(call) {
+                      Outcome::Refused(r) => return McpOutcome::Refused(r),
+                      Outcome::Replayed => return McpOutcome::Replayed,
+                      Outcome::Forwarded => {}
+                  }
+
+                  if let Some(core_tool) = to_core(&tool) {
+                      return match self.backend.dispatch(&tenant, core_tool, arguments) {
+                          Ok(value) => McpOutcome::Ok(value),
+                          Err(error) => McpOutcome::BackendError(error),
+                      };
+                  }
+
+                  if self.decision_backend.enabled() && is_decision_tool(&tool) {
+                      return match self
+                          .decision_backend
+                          .dispatch_decision(&tenant, &actor, &tool, arguments)
+                      {
+                          Ok(value) => McpOutcome::Ok(value),
+                          Err(error) => McpOutcome::BackendError(error),
+                      };
+                  }
+
+                  McpOutcome::UnknownTool
+              }
+          ''')
+          PY
+
+          cargo fmt --all
+          cargo test -p ccos-enterprise-gateway --release
+          cargo test -p ccos-enterprise-decision-service --release
+          cargo test -p ccos-enterprise-mcp --release
+          cargo test -p ccos-enterprise-mcp --test decision_surface --release
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+
+          git config user.name 'MEMOPERF'
+          git config user.email 'contact@checkupauto.fr'
+          git add Cargo.lock Cargo.toml crates/ccos-enterprise-gateway crates/ccos-enterprise-decision-service crates/ccos-enterprise-mcp
+          git diff --cached --quiet && exit 0
+          git commit -m 'feat(mcp): govern exact decision tools'
+          git push origin HEAD:feat/knowledge-plane-p5b2-governed-decision-tools

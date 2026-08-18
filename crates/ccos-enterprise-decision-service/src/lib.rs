@@ -118,14 +118,18 @@ impl std::fmt::Display for ServiceError {
             Self::KnowledgeStore(error) => write!(f, "knowledge store: {error}"),
             Self::DecisionStore(error) => write!(f, "decision store: {error}"),
             Self::Decision(error) => write!(f, "decision: {error}"),
-            Self::InvalidArguments(detail) => write!(f, "invalid decision tool arguments: {detail}"),
+            Self::InvalidArguments(detail) => {
+                write!(f, "invalid decision tool arguments: {detail}")
+            }
             Self::UnknownTool(tool) => write!(f, "unknown decision tool {tool:?}"),
             Self::LimitExceeded {
                 field,
                 maximum,
                 found,
             } => write!(f, "{field}={found} exceeds server maximum {maximum}"),
-            Self::Serialization(detail) => write!(f, "decision response serialization failed: {detail}"),
+            Self::Serialization(detail) => {
+                write!(f, "decision response serialization failed: {detail}")
+            }
         }
     }
 }
@@ -242,10 +246,8 @@ impl DecisionService {
             precedents: input.precedents,
             knowledge: KnowledgeAnchor::capture(knowledge)?,
         };
-        let entry = DecisionJournalEntry::new(
-            self.decisions.next_sequence(),
-            DecisionOp::Record(draft),
-        );
+        let entry =
+            DecisionJournalEntry::new(self.decisions.next_sequence(), DecisionOp::Record(draft));
         self.decisions.append(&[entry], knowledge)?;
         serialize(self.decisions.state().decision(&tenant, &input.id)?)
     }
@@ -268,11 +270,7 @@ impl DecisionService {
             },
         );
         self.decisions.append(&[entry], knowledge)?;
-        serialize(
-            self.decisions
-                .state()
-                .decision(&tenant, &input.decision)?,
-        )
+        serialize(self.decisions.state().decision(&tenant, &input.decision)?)
     }
 
     fn get(&self, tenant: &str, arguments: &Value) -> Result<Value, ServiceError> {
@@ -391,11 +389,7 @@ fn require_max(field: &'static str, found: usize, maximum: usize) -> Result<(), 
 fn traversal(arguments: &Value) -> Result<(DecisionId, TraversalLimits), ServiceError> {
     let input: TraversalInput = parse(arguments)?;
     require_max("max_depth", input.max_depth, MAX_TRAVERSAL_DEPTH)?;
-    require_max(
-        "max_results",
-        input.max_results,
-        MAX_TRAVERSAL_RESULTS,
-    )?;
+    require_max("max_results", input.max_results, MAX_TRAVERSAL_RESULTS)?;
     Ok((
         input.decision,
         TraversalLimits {
@@ -601,10 +595,8 @@ mod tests {
                 RECORD_OUTCOME,
             ]
         );
-        let permissions: BTreeSet<&str> = DECISION_TOOLS
-            .iter()
-            .map(|tool| tool.permission)
-            .collect();
+        let permissions: BTreeSet<&str> =
+            DECISION_TOOLS.iter().map(|tool| tool.permission).collect();
         assert_eq!(permissions, BTreeSet::from([DECISION_READ, DECISION_WRITE]));
         assert_eq!(tool_spec("decision.future"), None);
     }
@@ -641,7 +633,10 @@ mod tests {
                 .unwrap()
                 .insert(field.to_string(), json!("attacker"));
             let error = service.dispatch("acme", &alice, RECORD, &args).unwrap_err();
-            assert!(matches!(error, ServiceError::InvalidArguments(_)), "{field}: {error}");
+            assert!(
+                matches!(error, ServiceError::InvalidArguments(_)),
+                "{field}: {error}"
+            );
             assert_eq!(service.decision_state().next_sequence(), 0);
         }
     }

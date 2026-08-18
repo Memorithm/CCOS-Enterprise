@@ -52,8 +52,8 @@
 pub mod decision;
 pub mod server;
 pub use decision::{
-    decision_governance_map, decision_governed_names, govern_decision_catalogue,
-    DecisionBackend, NoDecisionBackend,
+    decision_governance_map, decision_governed_names, govern_decision_catalogue, DecisionBackend,
+    NoDecisionBackend,
 };
 pub use server::{govern_catalogue, AdvertisedTool, Backend, GovernedMcp, McpOutcome};
 

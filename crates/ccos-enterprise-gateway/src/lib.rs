@@ -142,17 +142,26 @@ mod tests {
     fn research_namespaces_never_traverse() {
         assert_eq!(classify(&req("ccos.recall")), Disposition::Forward);
         for tool in ["rsi.status", "forge.run", "slha.q", "octa.x"] {
-            assert!(matches!(classify(&req(tool)), Disposition::Reject(_)), "{tool}");
+            assert!(
+                matches!(classify(&req(tool)), Disposition::Reject(_)),
+                "{tool}"
+            );
         }
     }
 
     #[test]
     fn boundary_rejects_non_canonical_spellings() {
         for tool in ["RSI.status", "Rsi.status", "FORGE.run", "Slha.q", "OCTA.x"] {
-            assert!(matches!(classify(&req(tool)), Disposition::Reject(_)), "{tool}");
+            assert!(
+                matches!(classify(&req(tool)), Disposition::Reject(_)),
+                "{tool}"
+            );
         }
         for tool in ["", " rsi.status", "rsi .status", "ccos.\trecall", "a\nb"] {
-            assert!(matches!(classify(&req(tool)), Disposition::Reject(_)), "{tool:?}");
+            assert!(
+                matches!(classify(&req(tool)), Disposition::Reject(_)),
+                "{tool:?}"
+            );
         }
         for tool in [
             "ccos.recall",
@@ -180,7 +189,10 @@ mod tests {
             let Disposition::Reject(why) = classify(&req(tool)) else {
                 panic!("unlisted decision capability {tool} traversed");
             };
-            assert!(why.contains("not in the Enterprise catalogue"), "{tool}: {why}");
+            assert!(
+                why.contains("not in the Enterprise catalogue"),
+                "{tool}: {why}"
+            );
         }
     }
 
@@ -190,7 +202,10 @@ mod tests {
             let Disposition::Reject(why) = classify(&req(tool)) else {
                 panic!("{tool} is not in the catalogue and must not traverse");
             };
-            assert!(why.contains("not in the Enterprise catalogue"), "{tool}: {why}");
+            assert!(
+                why.contains("not in the Enterprise catalogue"),
+                "{tool}: {why}"
+            );
         }
         let Disposition::Reject(why) = classify(&req("shell.exec")) else {
             panic!("forbidden tools never traverse");

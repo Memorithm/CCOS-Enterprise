@@ -1294,21 +1294,34 @@ fn the_audit_trail_reconciles_the_ledger() {
 /// `GatewayRequest::request_id` is documented as an "Idempotency/correlation
 /// key for audit joins", and nothing on the path read it. Replaying the
 /// identical request — the ordinary consequence of a client-side retry after a
-/// timeout — was admitted again and **billed** again: ten replays of one id
+/// timeout — was admitted again and **billed** again: ten attempts of one id
 /// drained ten times the budget and left ten audit records that all claimed to
-/// be the same request, so an operator could not tell a retried call from ten
-/// real ones.
+/// be the same request.
 ///
-/// A decided `(tenant, request_id)` is now Forwarded without being charged.
-/// The scenario is kept verbatim — the same ten replays of one id, at the same
-/// 100 tokens each — with the opposite expectation: billed once.
+/// A decided `(tenant, request_id)` is now returned as explicit `Replayed` at
+/// zero cost and is not eligible to execute again. Ten attempts therefore mean
+/// one `Forwarded`, nine `Replayed`, and one charge. Replay suppression remains
+/// tenant-scoped: a new request id or the same id in another tenant is a new
+/// decision and can execute normally.
 #[test]
 fn a_replayed_request_id_is_billed_once() {
     let mut d = two_tenant_deployment();
     let alice = actor("memorithm", "alice", AuthStrength::Token);
     let req = request("acme", "alice", "memory.ingest", "the-same-request");
 
-    for i in 0..10 {
+    assert_eq!(
+        d.admit(Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 100,
+            variant: None,
+            justification: None,
+        }),
+        Outcome::Forwarded,
+        "the first request is the one execution"
+    );
+    for i in 1..10 {
         assert_eq!(
             d.admit(Call {
                 actor: &alice,
@@ -1318,10 +1331,11 @@ fn a_replayed_request_id_is_billed_once() {
                 variant: None,
                 justification: None,
             }),
-            Outcome::Forwarded,
-            "replay {i} keeps returning the prior outcome"
+            Outcome::Replayed,
+            "replay {i} is acknowledged without a second execution"
         );
     }
+
     assert_eq!(
         d.spent("acme"),
         Some(100),
@@ -1333,11 +1347,16 @@ fn a_replayed_request_id_is_billed_once() {
         trail.iter().all(|r| r.request_id == "the-same-request"),
         "…under the id the client sent…"
     );
+    assert_eq!(trail[0].outcome, Outcome::Forwarded);
+    assert!(
+        trail[1..].iter().all(|r| r.outcome.is_replayed()),
+        "…and every duplicate is explicitly recorded as Replayed"
+    );
     let costs: Vec<u64> = trail.iter().map(|r| r.cost).collect();
     assert_eq!(
         costs,
         vec![100, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        "…and the journal now says which one of the ten was the real charge"
+        "…and the journal says which attempt was the real charge"
     );
     let billed: u64 = costs.iter().sum();
     assert_eq!(
@@ -1346,8 +1365,8 @@ fn a_replayed_request_id_is_billed_once() {
         "journal reconciles the meter"
     );
 
-    // The eleventh replay is Forwarded and free, not refused: the budget was
-    // never drained, so there is nothing for `BudgetExhausted` to fire on.
+    // A further retry stays a replay: no new charge and, critically, no new
+    // effect is eligible to execute.
     assert_eq!(
         d.admit(Call {
             actor: &alice,
@@ -1357,13 +1376,12 @@ fn a_replayed_request_id_is_billed_once() {
             variant: None,
             justification: None,
         }),
-        Outcome::Forwarded
+        Outcome::Replayed
     );
     assert_eq!(d.spent("acme"), Some(100));
 
-    // Dedup is on the id, not on the shape: a genuinely new request with the
-    // same tenant, actor, tool and price is billed. Otherwise this guard would
-    // be satisfied by a deployment that simply stopped charging.
+    // Dedup is on the id, not on request shape: a genuinely new request with
+    // the same tenant, actor, tool and price is a new execution and is billed.
     let fresh = request("acme", "alice", "memory.ingest", "a-different-request");
     assert_eq!(
         d.admit(Call {

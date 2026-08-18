@@ -199,43 +199,40 @@ fn sanitize(tool: &str) -> String {
 mod tests {
     use super::*;
 
-    fn req(tool: &str, request_id: &str) -> GatewayRequest {
-        GatewayRequest {
+    #[test]
+    fn research_namespaces_never_traverse() {
+        let req = |tool: &str| GatewayRequest {
             tenant: "acme".into(),
             actor: "agent-1".into(),
             tool: tool.into(),
-            request_id: request_id.into(),
-        }
-    }
-
-    #[test]
-    fn research_namespaces_never_traverse() {
-        assert_eq!(classify(&req("ccos.recall", "r-1")), Disposition::Forward);
+            request_id: "r-1".into(),
+        };
+        assert_eq!(classify(&req("ccos.recall")), Disposition::Forward);
         assert!(matches!(
-            classify(&req("rsi.status", "r-1")),
+            classify(&req("rsi.status")),
             Disposition::Reject(_)
         ));
         assert!(matches!(
-            classify(&req("forge.run", "r-1")),
+            classify(&req("forge.run")),
             Disposition::Reject(_)
         ));
     }
 
     #[test]
     fn boundary_rejects_non_canonical_spellings() {
+        let req = |tool: &str| GatewayRequest {
+            tenant: "acme".into(),
+            actor: "agent-1".into(),
+            tool: tool.into(),
+            request_id: "r-2".into(),
+        };
         // Case variants of a forbidden namespace never traverse.
         for t in ["RSI.status", "Rsi.status", "FORGE.run", "Slha.q", "OCTA.x"] {
-            assert!(
-                matches!(classify(&req(t, "r-2")), Disposition::Reject(_)),
-                "{t}"
-            );
+            assert!(matches!(classify(&req(t)), Disposition::Reject(_)), "{t}");
         }
         // Empty, padded and control-byte names are not classifiable → reject.
         for t in ["", " rsi.status", "rsi .status", "ccos.\trecall", "a\nb"] {
-            assert!(
-                matches!(classify(&req(t, "r-2")), Disposition::Reject(_)),
-                "{t:?}"
-            );
+            assert!(matches!(classify(&req(t)), Disposition::Reject(_)), "{t:?}");
         }
         // Catalogue names are untouched, including the `ccos.` alias and exact decision tools.
         for t in [
@@ -246,18 +243,20 @@ mod tests {
             "decision.get",
             "decision.record",
         ] {
-            assert_eq!(classify(&req(t, "r-2")), Disposition::Forward, "{t}");
+            assert_eq!(classify(&req(t)), Disposition::Forward, "{t}");
         }
     }
 
     #[test]
     fn decision_surface_is_exact_not_prefix_open() {
+        let req = |tool: &str| GatewayRequest {
+            tenant: "acme".into(),
+            actor: "agent-1".into(),
+            tool: tool.into(),
+            request_id: "r-decision".into(),
+        };
         for tool in DECISION_TOOLS {
-            assert_eq!(
-                classify(&req(tool, "r-decision")),
-                Disposition::Forward,
-                "{tool}"
-            );
+            assert_eq!(classify(&req(tool)), Disposition::Forward, "{tool}");
         }
         for tool in [
             "decision.future",
@@ -265,7 +264,7 @@ mod tests {
             "decision.execute",
             "decision.record.extra",
         ] {
-            let Disposition::Reject(why) = classify(&req(tool, "r-decision")) else {
+            let Disposition::Reject(why) = classify(&req(tool)) else {
                 panic!("unlisted decision capability {tool} traversed");
             };
             assert!(
@@ -277,10 +276,16 @@ mod tests {
 
     #[test]
     fn unlisted_tools_are_refused_but_not_as_boundary_violations() {
+        let req = |tool: &str| GatewayRequest {
+            tenant: "acme".into(),
+            actor: "agent-1".into(),
+            tool: tool.into(),
+            request_id: "r-3".into(),
+        };
         // Deny by default: merely sharing letters with a namespace, forbidden
         // or exposed, does not put a tool in the catalogue.
         for t in ["forget.nothing", "octant", "memoryleak", "systemhealth"] {
-            let Disposition::Reject(why) = classify(&req(t, "r-3")) else {
+            let Disposition::Reject(why) = classify(&req(t)) else {
                 panic!("{t} is not in the catalogue and must not traverse");
             };
             assert!(
@@ -289,7 +294,7 @@ mod tests {
             );
         }
         // …and an omission still reads differently from a violation.
-        let Disposition::Reject(why) = classify(&req("shell.exec", "r-3")) else {
+        let Disposition::Reject(why) = classify(&req("shell.exec")) else {
             panic!("forbidden tools never traverse");
         };
         assert!(why.contains("outside the Enterprise boundary"), "{why}");

@@ -1,0 +1,12 @@
+[package]
+name = "ccos-enterprise-ingest"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Tenant-scoped deterministic ingestion contracts and local filesystem source for the CCOS Enterprise Knowledge Plane."
+
+[dependencies]
+ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
+sha2.workspace = true

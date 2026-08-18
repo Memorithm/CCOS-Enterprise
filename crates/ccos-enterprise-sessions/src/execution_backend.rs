@@ -215,7 +215,9 @@ impl<B> ExecutionBackend<B> {
         &mut self,
         tenant: &str,
     ) -> Result<Vec<ToolRecovery>, ExecutionBackendError> {
-        self.journal_for(tenant)?.recover_tools().map_err(Into::into)
+        self.journal_for(tenant)?
+            .recover_tools()
+            .map_err(Into::into)
     }
 
     /// Execute one tool call under caller-supplied orchestration identifiers.
@@ -256,11 +258,13 @@ impl<B> ExecutionBackend<B> {
             Err(detail) => (false, sha256_hex(detail.as_bytes())),
         };
 
-        let finish = self.journal_for(tenant)?.append(ExecutionEvent::ToolFinished {
-            call_id: execution.call_id.clone(),
-            success,
-            output_sha256: output_hash,
-        });
+        let finish = self
+            .journal_for(tenant)?
+            .append(ExecutionEvent::ToolFinished {
+                call_id: execution.call_id.clone(),
+                success,
+                output_sha256: output_hash,
+            });
         if let Err(journal) = finish {
             return Err(ExecutionBackendError::OutcomeNotDurable {
                 backend_succeeded: success,
@@ -346,21 +350,20 @@ fn hex(bytes: &[u8]) -> String {
 // cannot perturb the workspace lockfile. A known-answer test pins correctness.
 fn sha256(input: &[u8]) -> [u8; 32] {
     const INITIAL: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
-        0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     let bit_len = (input.len() as u64).wrapping_mul(8);
@@ -523,9 +526,18 @@ mod tests {
             ToolRecoveryDisposition::Completed { success: true, .. }
         ));
         let records = backend.journal_for("acme").expect("journal").records();
-        assert!(matches!(records[0].event, ExecutionEvent::ToolRequested { .. }));
-        assert!(matches!(records[1].event, ExecutionEvent::ToolStarted { .. }));
-        assert!(matches!(records[2].event, ExecutionEvent::ToolFinished { .. }));
+        assert!(matches!(
+            records[0].event,
+            ExecutionEvent::ToolRequested { .. }
+        ));
+        assert!(matches!(
+            records[1].event,
+            ExecutionEvent::ToolStarted { .. }
+        ));
+        assert!(matches!(
+            records[2].event,
+            ExecutionEvent::ToolFinished { .. }
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -565,7 +577,9 @@ mod tests {
     fn tenant_streams_are_physically_and_logically_separate() {
         let root = scratch("tenant-separation");
         let mut backend = ExecutionBackend::new(RecordingBackend::default(), &root);
-        backend.dispatch("acme", "recall", &json!({})).expect("acme");
+        backend
+            .dispatch("acme", "recall", &json!({}))
+            .expect("acme");
         backend
             .dispatch("globex", "recall", &json!({}))
             .expect("globex");
@@ -574,9 +588,15 @@ mod tests {
             backend.journal_path_for("acme").expect("acme path"),
             backend.journal_path_for("globex").expect("globex path")
         );
-        assert_eq!(backend.recover_tools("acme").expect("acme recover").len(), 1);
         assert_eq!(
-            backend.recover_tools("globex").expect("globex recover").len(),
+            backend.recover_tools("acme").expect("acme recover").len(),
+            1
+        );
+        assert_eq!(
+            backend
+                .recover_tools("globex")
+                .expect("globex recover")
+                .len(),
             1
         );
         let _ = std::fs::remove_dir_all(root);
@@ -586,7 +606,9 @@ mod tests {
     fn bounded_cache_reopens_evicted_journal_without_losing_history() {
         let root = scratch("eviction");
         let mut backend = ExecutionBackend::with_capacity(RecordingBackend::default(), &root, 1);
-        backend.dispatch("acme", "recall", &json!({})).expect("acme");
+        backend
+            .dispatch("acme", "recall", &json!({}))
+            .expect("acme");
         backend
             .dispatch("globex", "recall", &json!({}))
             .expect("globex");
@@ -625,8 +647,13 @@ mod tests {
         backend
             .dispatch_with_context("acme", &context, "recall", &json!({}))
             .expect("second is recorded; recovery owns lifecycle verdict");
-        let error = backend.recover_tools("acme").expect_err("duplicate lifecycle");
-        assert!(matches!(error, ExecutionBackendError::Journal(JournalError::Lifecycle(_))));
+        let error = backend
+            .recover_tools("acme")
+            .expect_err("duplicate lifecycle");
+        assert!(matches!(
+            error,
+            ExecutionBackendError::Journal(JournalError::Lifecycle(_))
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 }

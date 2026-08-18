@@ -20,43 +20,50 @@ jobs:
           ref: fix/runtime-true-idempotent-replay
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Make routing test request ids unique and execute it
+      - name: Replace and execute the tenant routing guard
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path('crates/ccos-enterprise-mcp/src/server.rs')
           s = p.read_text()
-          old = '''        for tenant in ["acme", "globex", "acme"] {
-              let req = request(tenant, "alice", "memory.recall", &format!("r-{tenant}-x"));
-              let _ = mcp.call(
-          '''
-          new = '''        for (index, tenant) in ["acme", "globex", "acme"].into_iter().enumerate() {
-              let req = request(
-                  tenant,
-                  "alice",
-                  "memory.recall",
-                  &format!("r-{tenant}-{index}"),
-              );
-              let out = mcp.call(
-          '''
-          if s.count(old) != 1:
-              raise SystemExit(f'expected one tenant dispatch loop, found {s.count(old)}')
-          s = s.replace(old, new, 1)
-          old_tail = '''                &json!({}),
-              );
+          start_marker = '    #[test]\n    fn each_tenant_is_dispatched_under_its_own_name() {'
+          start = s.index(start_marker)
+          end = s.index('    #[test]\n    fn every_advertised_capability_is_actually_callable()', start)
+          replacement = r'''    #[test]
+          fn each_tenant_is_dispatched_under_its_own_name() {
+              let mut mcp = front_door();
+              let a = actor("memorithm", "alice", AuthStrength::Token);
+              for (index, tenant) in ["acme", "globex", "acme"].into_iter().enumerate() {
+                  let req = request(
+                      tenant,
+                      "alice",
+                      "memory.recall",
+                      &format!("r-{tenant}-{index}"),
+                  );
+                  let out = mcp.call(
+                      Call {
+                          actor: &a,
+                          request: &req,
+                          model: "claude-opus",
+                          cost_tokens: 1,
+                          variant: None,
+                          justification: None,
+                      },
+                      &json!({}),
+                  );
+                  assert!(matches!(out, McpOutcome::Ok(_)), "{tenant}: {out:?}");
+              }
+              let tenants: Vec<&str> = mcp
+                  .backend()
+                  .calls
+                  .iter()
+                  .map(|(t, _)| t.as_str())
+                  .collect();
+              assert_eq!(tenants, vec!["acme", "globex", "acme"]);
           }
-          let tenants: Vec<&str> = mcp
+
           '''
-          new_tail = '''                &json!({}),
-              );
-              assert!(matches!(out, McpOutcome::Ok(_)), "{tenant}: {out:?}");
-          }
-          let tenants: Vec<&str> = mcp
-          '''
-          start = s.index('    fn each_tenant_is_dispatched_under_its_own_name()')
-          tail_pos = s.index(old_tail, start)
-          s = s[:tail_pos] + s[tail_pos:].replace(old_tail, new_tail, 1)
-          p.write_text(s)
+          p.write_text(s[:start] + replacement + s[end:])
           PY
           cargo fmt --all
           cargo test -p ccos-enterprise-mcp each_tenant_is_dispatched_under_its_own_name --release -- --exact

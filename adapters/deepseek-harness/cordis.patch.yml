@@ -11,9 +11,13 @@
         model: deepseek-harness
         recallEnabled: true
         captureEnabled: true
+        toolsEnabled: true
         recallTimeoutMs: 1000
         recallHardLimitMs: 3000
         recallBudget: 2048
         contextMaxChars: 6000
+        toolRecallTimeoutMs: 3000
+        toolTimeoutMs: 60000
+        toolResultMaxChars: 6000
         failOnStartupError: false
         stateDir: ''

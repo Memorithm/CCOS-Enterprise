@@ -1,0 +1,20 @@
+{
+  "name": "@memorithm/ccos-deepseek-harness",
+  "version": "0.1.0-pre",
+  "private": true,
+  "description": "Native DeepSeek Harness adapter for the governed CCOS Enterprise front door.",
+  "type": "module",
+  "main": "./index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check bridge.js && node --check identity.js && node --check mcp-stdio.js && node --check outbox.js",
+    "test": "node --test test/*.test.js"
+  }
+}

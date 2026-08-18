@@ -16,9 +16,7 @@
 //! Consequently a crash after step 2 but before step 4 reconstructs as
 //! `OutcomeUnknown`, never as a call that is safe to replay blindly.
 
-use crate::execution::{
-    ExecutionEvent, ExecutionJournal, JournalError, ToolRecovery, ToolRecoveryDisposition,
-};
+use crate::execution::{ExecutionEvent, ExecutionJournal, JournalError, ToolRecovery};
 use ccos_enterprise_mcp::Backend;
 use ccos_enterprise_runtime::is_canonical_identifier;
 use serde_json::Value;
@@ -445,6 +443,7 @@ fn sha256(input: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::ToolRecoveryDisposition;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 

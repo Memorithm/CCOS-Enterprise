@@ -499,9 +499,14 @@ mod tests {
     fn each_tenant_is_dispatched_under_its_own_name() {
         let mut mcp = front_door();
         let a = actor("memorithm", "alice", AuthStrength::Token);
-        for tenant in ["acme", "globex", "acme"] {
-            let req = request(tenant, "alice", "memory.recall", &format!("r-{tenant}-x"));
-            let _ = mcp.call(
+        for (index, tenant) in ["acme", "globex", "acme"].into_iter().enumerate() {
+            let req = request(
+                tenant,
+                "alice",
+                "memory.recall",
+                &format!("r-{tenant}-{index}"),
+            );
+            let out = mcp.call(
                 Call {
                     actor: &a,
                     request: &req,
@@ -512,6 +517,7 @@ mod tests {
                 },
                 &json!({}),
             );
+            assert!(matches!(out, McpOutcome::Ok(_)), "{tenant}: {out:?}");
         }
         let tenants: Vec<&str> = mcp
             .backend()

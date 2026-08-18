@@ -25,58 +25,18 @@ Target host: DeepSeek Harness `0.1.x` (initial validation target: `0.1.0-rc.7`).
 
 ## Transport
 
-The adapter owns a dependency-free MCP stdio client. By default it launches:
+The adapter owns a dependency-free MCP stdio client. By default it launches
+`ccos-enterprise-mcp-server`.
 
-```text
-ccos-enterprise-mcp-server
-```
+The server binds one verified principal to one tenant, sends every call through
+`GovernedMcp`, checkpoints admitted Core writes before acknowledging them, and
+persists the Enterprise deployment ledger (budget, replay and audit state).
+A durable effect marker closes the crash window between the Core workspace and
+the Enterprise ledger: known successes are settled without re-running Core,
+known failures remain retryable, and an ambiguous started effect fails closed.
 
-Build the server from the Enterprise workspace with:
-
-```bash
-cargo build --release -p ccos-enterprise-mcp --bin ccos-enterprise-mcp-server
-```
-
-The server is a one-principal, one-tenant process boundary. It verifies a signed
-CCOS identity token at startup and again on every `tools/call`, provisions only
-the configured tenant, and sends the resulting call through `GovernedMcp` before
-Core can execute it. A governed write is acknowledged only after the tenant Core
-session checkpoints successfully.
-
-The server requires these environment variables:
-
-```text
-CCOS_ENTERPRISE_AUDIENCE
-CCOS_ENTERPRISE_ISSUER_KID
-CCOS_ENTERPRISE_ISSUER_PUBLIC_KEY_HEX   # 32-byte Ed25519 public key, 64 hex chars
-CCOS_ENTERPRISE_IDENTITY_TOKEN          # ccosid1.ed25519...
-CCOS_ENTERPRISE_TENANT
-CCOS_ENTERPRISE_ACTOR                   # adapter correlation claim; must match token actor
-CCOS_ENTERPRISE_MODEL
-CCOS_ENTERPRISE_TOKEN_BUDGET
-CCOS_ENTERPRISE_STATE_DIR
-```
-
-Optional:
-
-```text
-CCOS_ENTERPRISE_CALL_COST_TOKENS        # default 1 per governed MCP call
-```
-
-`tenantId`, `actorId`, and `model` in the Cordis plugin config override the
-corresponding environment values for the adapter-side correlation metadata. A
-mismatch never widens authority: the server rejects it because the signed token
-and server tenant configuration remain authoritative.
-
-Every `tools/call` carries host correlation data under MCP `_meta.ccos`:
-
-```text
-tenant_id, actor_id, agent_id, host,
-dsh_profile, dsh_session_id, turn_id, step_id,
-request_id, trace_id, model, workspace
-```
-
-Those fields are claims to validate, not proof of identity.
+Host correlation data is carried under MCP `_meta.ccos`; those fields are claims
+to validate, never proof of identity.
 
 ## Lifecycle
 
@@ -93,6 +53,7 @@ session/event
   -> memory.ingest
   -> GovernedMcp admission
   -> Core tenant checkpoint
+  -> Enterprise ledger commit
   -> delete outbox entry only after MCP success
 ```
 

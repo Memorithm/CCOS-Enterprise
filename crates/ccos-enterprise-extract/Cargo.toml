@@ -1,0 +1,15 @@
+[package]
+name = "ccos-enterprise-extract"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Deterministic structural extraction candidates for the CCOS Enterprise Knowledge Plane."
+
+[dependencies]
+ccos-enterprise-ingest = { path = "../ccos-enterprise-ingest" }
+ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
+ccos-enterprise-parse = { path = "../ccos-enterprise-parse" }
+serde_json.workspace = true
+sha2.workspace = true

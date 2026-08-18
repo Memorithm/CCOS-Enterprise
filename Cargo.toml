@@ -20,6 +20,8 @@ members = [
     "crates/ccos-enterprise-ingest",
     "crates/ccos-enterprise-normalize",
     "crates/ccos-enterprise-parse",
+    "crates/ccos-enterprise-extract",
+    "crates/ccos-enterprise-resolution",
     "crates/ccos-enterprise-policy",
     "crates/ccos-enterprise-gateway",
     "crates/ccos-enterprise-observability",

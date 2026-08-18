@@ -1,0 +1,16 @@
+[package]
+name = "ccos-enterprise-promotion"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Deterministic schema-gated canonical promotion plans for CCOS Enterprise Knowledge observations."
+
+[dependencies]
+ccos-enterprise-extract = { path = "../ccos-enterprise-extract" }
+ccos-enterprise-knowledge = { path = "../ccos-enterprise-knowledge" }
+ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
+ccos-enterprise-ontology = { path = "../ccos-enterprise-ontology" }
+ccos-enterprise-resolution = { path = "../ccos-enterprise-resolution" }
+sha2.workspace = true

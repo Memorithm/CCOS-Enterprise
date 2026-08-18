@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub use ccos_enterprise_tenancy::TenantId;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -168,10 +168,147 @@ pub struct EntityRecord {
     pub kind: AssertionKind,
 }
 
+/// Canonical JSON number spelling.
+///
+/// The inner string is private. Construction parses JSON-number syntax and serializes the
+/// parsed number back to one spelling. Deserialization repeats the same constructor, so a
+/// journal cannot materialize an unchecked number representation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct CanonicalNumber(String);
+
+impl CanonicalNumber {
+    pub fn new(value: impl Into<String>) -> Result<Self, LiteralError> {
+        let value = value.into();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&value).map_err(|_| LiteralError::InvalidNumber(value.clone()))?;
+        match parsed {
+            serde_json::Value::Number(number) => Ok(Self(number.to_string())),
+            _ => Err(LiteralError::InvalidNumber(value)),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CanonicalNumber {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Canonical JSON text with recursively sorted object keys and no insignificant whitespace.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct CanonicalJson(String);
+
+impl CanonicalJson {
+    pub fn new(value: impl Into<String>) -> Result<Self, LiteralError> {
+        let value = value.into();
+        let parsed: serde_json::Value = serde_json::from_str(&value)
+            .map_err(|error| LiteralError::InvalidJson(error.to_string()))?;
+        let mut output = String::new();
+        write_canonical_json(&parsed, &mut output)?;
+        Ok(Self(output))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CanonicalJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CanonicalLiteral {
+    Null,
+    Bool(bool),
+    Number(CanonicalNumber),
+    String(String),
+    Json(CanonicalJson),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiteralError {
+    InvalidNumber(String),
+    InvalidJson(String),
+}
+
+impl fmt::Display for LiteralError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidNumber(value) => write!(f, "invalid JSON number {value:?}"),
+            Self::InvalidJson(detail) => write!(f, "invalid JSON value: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for LiteralError {}
+
+fn write_canonical_json(
+    value: &serde_json::Value,
+    output: &mut String,
+) -> Result<(), LiteralError> {
+    match value {
+        serde_json::Value::Null => output.push_str("null"),
+        serde_json::Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        serde_json::Value::Number(value) => output.push_str(&value.to_string()),
+        serde_json::Value::String(value) => output.push_str(
+            &serde_json::to_string(value)
+                .map_err(|error| LiteralError::InvalidJson(error.to_string()))?,
+        ),
+        serde_json::Value::Array(values) => {
+            output.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                write_canonical_json(value, output)?;
+            }
+            output.push(']');
+        }
+        serde_json::Value::Object(values) => {
+            output.push('{');
+            let mut keys: Vec<_> = values.keys().collect();
+            keys.sort();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                output.push_str(
+                    &serde_json::to_string(key)
+                        .map_err(|error| LiteralError::InvalidJson(error.to_string()))?,
+                );
+                output.push(':');
+                write_canonical_json(&values[key], output)?;
+            }
+            output.push('}');
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum FactObject {
     Entity(EntityId),
+    /// Legacy untyped literal retained for journal/API compatibility.
     Literal(String),
+    /// Canonical typed literal used by schema-gated Knowledge promotion.
+    Typed(CanonicalLiteral),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,5 +423,25 @@ mod tests {
             valid_until: Some(UnixMillis(10)),
         };
         assert!(interval.validate().is_err());
+    }
+
+    #[test]
+    fn typed_number_and_json_are_canonicalized() {
+        assert_eq!(CanonicalNumber::new("42").unwrap().as_str(), "42");
+        assert_eq!(
+            CanonicalJson::new("{\"z\":1,\"a\":[2,1]}")
+                .unwrap()
+                .as_str(),
+            "{\"a\":[2,1],\"z\":1}"
+        );
+    }
+
+    #[test]
+    fn typed_wrappers_revalidate_on_deserialization() {
+        let number: CanonicalNumber = serde_json::from_str("\"1e2\"").unwrap();
+        assert_ne!(number.as_str(), "1e2");
+        let json: CanonicalJson = serde_json::from_str("\"{\\\"z\\\":1,\\\"a\\\":2}\"").unwrap();
+        assert_eq!(json.as_str(), "{\"a\":2,\"z\":1}");
+        assert!(serde_json::from_str::<CanonicalNumber>("\"not-a-number\"").is_err());
     }
 }

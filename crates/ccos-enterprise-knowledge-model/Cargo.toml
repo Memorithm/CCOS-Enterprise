@@ -10,3 +10,4 @@ description = "Canonical tenant-scoped data model for the CCOS Enterprise Knowle
 [dependencies]
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
 serde.workspace = true
+serde_json.workspace = true

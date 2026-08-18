@@ -246,6 +246,7 @@ version = "0.1.0-pre"
 dependencies = [
  "ccos-enterprise-tenancy",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -321,6 +322,18 @@ version = "0.1.0-pre"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ccos-enterprise-promotion"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-extract",
+ "ccos-enterprise-knowledge",
+ "ccos-enterprise-knowledge-model",
+ "ccos-enterprise-ontology",
+ "ccos-enterprise-resolution",
+ "sha2",
 ]
 
 [[package]]
@@ -403,10 +416,12 @@ dependencies = [
  "ccos-enterprise-ingest",
  "ccos-enterprise-kg",
  "ccos-enterprise-knowledge",
+ "ccos-enterprise-knowledge-model",
  "ccos-enterprise-knowledge-store",
  "ccos-enterprise-normalize",
  "ccos-enterprise-ontology",
  "ccos-enterprise-parse",
+ "ccos-enterprise-promotion",
  "ccos-enterprise-resolution",
 ]
 

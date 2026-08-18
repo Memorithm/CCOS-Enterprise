@@ -12,10 +12,12 @@ for await (const line of rl) {
   } else if (message.method === 'tools/call') {
     if (log) appendFileSync(log, `${JSON.stringify(message.params)}\n`)
     const tool = message.params?.name
-    result = {
-      content: [{ type: 'text', text: tool === 'memory.recall' ? 'remembered fact' : 'stored' }],
-      isError: false,
-    }
+    result = tool === 'memory.fail'
+      ? { content: [{ type: 'text', text: 'governed refusal' }], isError: true }
+      : {
+          content: [{ type: 'text', text: tool === 'memory.recall' ? 'remembered fact' : 'stored' }],
+          isError: false,
+        }
   } else {
     result = {}
   }

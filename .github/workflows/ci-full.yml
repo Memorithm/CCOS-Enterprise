@@ -19,6 +19,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: gateway namespace contract (Hermes/OpenClaw surface)
         run: cargo test -p ccos-enterprise-gateway --release
+      - name: Knowledge Plane P0 conformance
+        run: cargo test -p ccos-enterprise-knowledge-model -p ccos-enterprise-knowledge -p ccos-enterprise-knowledge-store -p ccos-knowledge-conformance --release
       - name: RBAC + tenancy + policy contracts
         run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
       - name: governance wire formats (claim, manifest, revocation)

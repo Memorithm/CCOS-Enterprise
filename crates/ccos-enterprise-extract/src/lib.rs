@@ -13,7 +13,7 @@ use ccos_enterprise_ingest::RawArtifact;
 use ccos_enterprise_knowledge_model::{
     AssertionKind, EvidenceId, EvidenceRecord, SourceId, TenantId,
 };
-use ccos_enterprise_parse::{parse, ParseError, ParsedDocument, ParsedUnit, ParsedUnitKind};
+use ccos_enterprise_parse::{parse, ParseError, ParsedDocument, ParsedUnit};
 use sha2::{Digest, Sha256};
 
 pub const EXTRACTION_CONTRACT_VERSION: u32 = 1;
@@ -96,10 +96,12 @@ impl fmt::Display for ExtractError {
             Self::InvalidJson { unit, detail } => {
                 write!(f, "unit {unit} contains invalid JSON: {detail}")
             }
-            Self::JsonTopLevelUnsupported { unit } => write!(
-                f,
-                "unit {unit} JSON top level is not an object or object array"
-            ),
+            Self::JsonTopLevelUnsupported { unit } => {
+                write!(
+                    f,
+                    "unit {unit} JSON top level is not an object or object array"
+                )
+            }
             Self::CsvMissingHeader => f.write_str("CSV source has no header record"),
             Self::CsvEmptyHeader { column } => write!(f, "CSV header column {column} is empty"),
             Self::CsvDuplicateHeader(header) => {

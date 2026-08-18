@@ -39,14 +39,16 @@ jobs:
         run: |
           cargo test -p ccos-enterprise-extract --release
           cargo test -p ccos-knowledge-conformance --test p2_extract --release
+      - name: Knowledge Plane P2 exact-key resolution
+        run: |
+          cargo test -p ccos-enterprise-resolution --release
+          cargo test -p ccos-knowledge-conformance --test p2_resolution --release
       - name: RBAC + tenancy + policy contracts
         run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
       - name: governance wire formats (claim, manifest, revocation)
         run: cargo test -p ccos-enterprise-governance --all-features --release
       - name: license server integration
         run: cargo test -p ccos-license-server --release
-      # The composed product path — the behaviour that only exists once the
-      # crates are wired together (see tests/ccos-enterprise-conformance).
       - name: Hermes/OpenClaw tool-catalogue contract
         run: cargo test -p ccos-enterprise-conformance --test boundary_contract --release
       - name: governed request path (identity → tenancy → authz → policy → boundary → audit)
@@ -64,23 +66,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Exactly one Core in the tree (never a copy)
         run: |
-          # The rule is "Enterprise never carries a *second* copy of Core"
-          # (README). Before Core moved in it was two repositories kept in
-          # step by a grep; now it is one workspace member, so the check is
-          # that nothing has re-introduced a second one. A structural fact
-          # beats a grep for a function name.
           test "$(cargo metadata --no-deps --format-version 1 \
                   | python3 -c 'import json,sys; print(sum(1 for p in json.load(sys.stdin)["packages"] if p["name"]=="ccos-core"))')" = 1
-          # …and Enterprise still reaches it as a dependency, not by copying
-          # sources into its own crates.
           ! find crates tools -name '*.rs' | xargs grep -l 'pub fn qbelief' | grep -v target
           echo "one Core, referenced not duplicated"
       - name: "Enterprise boundary (§4.2): no Research-Lab in the product graph"
         run: |
-          # The boundary used to be enforced by repository separation. Living
-          # in the same tree is not depending, so the boundary becomes a
-          # property of the dependency *graph* — which is stronger, because it
-          # cannot be satisfied by a crate that merely lives elsewhere.
           for p in $(cargo metadata --no-deps --format-version 1 \
                      | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"] if p["name"].startswith("ccos-enterprise")]'); do
             cargo tree -p "$p" --edges normal --prefix none 2>/dev/null \
@@ -94,27 +85,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
-      # NOT `--all-features` across the whole workspace. Core is a member now,
-      # and it carries opt-in Pro features of its own — `octasoma` pulls a
-      # premium engine over git. Turning every feature on would build exactly
-      # what §4.2 forbids. Core packages are excluded from *selection*, so they
-      # still build as dependencies with precisely the features Enterprise asks
-      # for (`default-features = false`); only Enterprise's own feature matrix
-      # is swept, which is the one this gate exists to cover.
       - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
-
-  # ── Expansion contract (charter §41): authentication · RBAC · tenant
-  # isolation · cross-tenant leakage · encryption · key rotation · quota ·
-  # budget · model governance · backup/restore · migration · rollback ·
-  # Hermes contract · OpenClaw contract · secure MCP · load · concurrency ·
-  # backpressure · failure recovery · cognitive isolation · agent identity.
-  #
-  # Covered by the contract job above (tests/ccos-enterprise-conformance):
-  # authentication · agent identity · RBAC · tenant isolation · cross-tenant
-  # leakage · quota · budget · model governance · restore gates · Hermes
-  # tool-catalogue contract · concurrency · determinism under replay.
-  #
-  # Still to land as the crates grow: encryption · key rotation · backup
-  # round-trip against real snapshots · schema migration · rollback ·
-  # OpenClaw contract · secure MCP transport · load · backpressure ·
-  # failure recovery · cognitive isolation.

@@ -185,6 +185,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-decision"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-auth",
+ "ccos-enterprise-knowledge",
+ "ccos-enterprise-knowledge-model",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ccos-enterprise-extract"
 version = "0.1.0-pre"
 dependencies = [
@@ -423,6 +435,8 @@ dependencies = [
 name = "ccos-knowledge-conformance"
 version = "0.1.0-pre"
 dependencies = [
+ "ccos-enterprise-auth",
+ "ccos-enterprise-decision",
  "ccos-enterprise-extract",
  "ccos-enterprise-ingest",
  "ccos-enterprise-kg",

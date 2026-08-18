@@ -67,6 +67,10 @@ jobs:
         run: |
           cargo test -p ccos-enterprise-decision --release
           cargo test -p ccos-knowledge-conformance --test p5_decision --release
+      - name: Knowledge Plane P5b1 durable decision journal
+        run: |
+          cargo test -p ccos-enterprise-decision-store --release
+          cargo test -p ccos-knowledge-conformance --test p5b_decision_store --release
       - name: RBAC + tenancy + policy contracts
         run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
       - name: governance wire formats (claim, manifest, revocation)

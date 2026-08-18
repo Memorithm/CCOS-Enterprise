@@ -10,6 +10,7 @@ description = "End-to-end conformance tests for the canonical CCOS Enterprise Kn
 [dependencies]
 ccos-enterprise-auth = { path = "../../crates/ccos-enterprise-auth" }
 ccos-enterprise-decision = { path = "../../crates/ccos-enterprise-decision" }
+ccos-enterprise-decision-store = { path = "../../crates/ccos-enterprise-decision-store" }
 ccos-enterprise-extract = { path = "../../crates/ccos-enterprise-extract" }
 ccos-enterprise-ingest = { path = "../../crates/ccos-enterprise-ingest" }
 ccos-enterprise-kg = { path = "../../crates/ccos-enterprise-kg" }

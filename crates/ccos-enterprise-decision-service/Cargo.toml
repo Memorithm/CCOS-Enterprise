@@ -1,0 +1,21 @@
+[package]
+name = "ccos-enterprise-decision-service"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Server-owned Decision Intelligence tool service over canonical Knowledge and durable decision journals."
+
+[dependencies]
+ccos-enterprise-auth = { path = "../ccos-enterprise-auth" }
+ccos-enterprise-decision = { path = "../ccos-enterprise-decision" }
+ccos-enterprise-decision-store = { path = "../ccos-enterprise-decision-store" }
+ccos-enterprise-knowledge = { path = "../ccos-enterprise-knowledge" }
+ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
+ccos-enterprise-knowledge-store = { path = "../ccos-enterprise-knowledge-store" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+ccos-enterprise-auth = { path = "../ccos-enterprise-auth", features = ["test-identities"] }

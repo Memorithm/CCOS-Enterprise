@@ -10,9 +10,11 @@
 //! only by talking to Core directly — that is, by going *around* every gate
 //! Enterprise exists to impose.
 //!
-//! This crate is the translation table and the front door built on it. It adds
-//! no capability of its own: every admitted call is one Core already had, and
-//! every refusal is [`ccos_enterprise_runtime::Deployment::admit`]'s.
+//! Core's translation table remains a closed contract. Enterprise-local
+//! capabilities such as Decision Intelligence live in a separate catalogue
+//! (`decision`) and never masquerade as Core tools. Both paths still share the
+//! one composed admission policy:
+//! [`ccos_enterprise_runtime::Deployment::admit`].
 //!
 //! ## The table is the contract
 //!
@@ -47,7 +49,12 @@
 //! namespace rules, and `the_excluded_tool_is_not_saved_by_the_prefix_rule`
 //! pins exactly that.
 
+pub mod decision;
 pub mod server;
+pub use decision::{
+    decision_governance_map, decision_governed_names, govern_decision_catalogue, DecisionBackend,
+    NoDecisionBackend,
+};
 pub use server::{govern_catalogue, AdvertisedTool, Backend, GovernedMcp, McpOutcome};
 
 use std::collections::BTreeMap;

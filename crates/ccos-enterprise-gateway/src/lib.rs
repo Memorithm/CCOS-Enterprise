@@ -64,12 +64,26 @@ pub const ALLOWED_PREFIXES: &[&str] = &["memory.", "context.", "policy.", "audit
 /// not an open `system.` namespace.
 pub const ALLOWED_TOOLS: &[&str] = &["system.health"];
 
+/// Decision Intelligence is deliberately an exact allowlist, not an open
+/// `decision.` namespace. A future sibling must be reviewed and added here
+/// explicitly before the gateway can forward it.
+pub const DECISION_TOOLS: &[&str] = &[
+    "decision.ancestry",
+    "decision.dependents",
+    "decision.get",
+    "decision.impact",
+    "decision.regulatory_trail",
+    "decision.similar",
+    "decision.record",
+    "decision.record_outcome",
+];
+
 /// Classify a fully qualified request against the Enterprise boundary.
 ///
 /// **Deny by default**, matching the posture of every other gate in the
 /// product (unknown roles grant nothing; unlisted models are denied): a tool
-/// traverses only if it is in [`ALLOWED_PREFIXES`] or [`ALLOWED_TOOLS`].
-/// The refusals are distinguishable on purpose —
+/// traverses only if it is in [`ALLOWED_PREFIXES`], [`ALLOWED_TOOLS`] or the
+/// exact [`DECISION_TOOLS`] list. The refusals are distinguishable on purpose —
 ///
 /// - *outside the Enterprise boundary* — [`FORBIDDEN_PREFIXES`] /
 ///   [`FORBIDDEN_TOOLS`]: a capability the product must never carry, checked
@@ -110,7 +124,8 @@ pub fn classify(req: &GatewayRequest) -> Disposition {
         ));
     }
     let exposed = ALLOWED_PREFIXES.iter().any(|p| lowered.starts_with(p))
-        || ALLOWED_TOOLS.contains(&lowered.as_str());
+        || ALLOWED_TOOLS.contains(&lowered.as_str())
+        || DECISION_TOOLS.contains(&lowered.as_str());
     if !exposed {
         return Disposition::Reject(format!(
             "tool '{}' is not in the Enterprise catalogue",
@@ -219,14 +234,43 @@ mod tests {
         for t in ["", " rsi.status", "rsi .status", "ccos.\trecall", "a\nb"] {
             assert!(matches!(classify(&req(t)), Disposition::Reject(_)), "{t:?}");
         }
-        // Catalogue names are untouched, including the `ccos.` alias.
+        // Catalogue names are untouched, including the `ccos.` alias and exact decision tools.
         for t in [
             "ccos.recall",
             "ccos.qpage.read",
             "memory.recall",
             "system.health",
+            "decision.get",
+            "decision.record",
         ] {
             assert_eq!(classify(&req(t)), Disposition::Forward, "{t}");
+        }
+    }
+
+    #[test]
+    fn decision_surface_is_exact_not_prefix_open() {
+        let req = |tool: &str| GatewayRequest {
+            tenant: "acme".into(),
+            actor: "agent-1".into(),
+            tool: tool.into(),
+            request_id: "r-decision".into(),
+        };
+        for tool in DECISION_TOOLS {
+            assert_eq!(classify(&req(tool)), Disposition::Forward, "{tool}");
+        }
+        for tool in [
+            "decision.future",
+            "decision.delete",
+            "decision.execute",
+            "decision.record.extra",
+        ] {
+            let Disposition::Reject(why) = classify(&req(tool)) else {
+                panic!("unlisted decision capability {tool} traversed");
+            };
+            assert!(
+                why.contains("not in the Enterprise catalogue"),
+                "{tool}: {why}"
+            );
         }
     }
 

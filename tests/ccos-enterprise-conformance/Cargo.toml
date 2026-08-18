@@ -18,6 +18,10 @@ ccos-enterprise-backup = { path = "../../crates/ccos-enterprise-backup" }
 ccos-enterprise-qpages = { path = "../../crates/ccos-enterprise-qpages" }
 ccos-enterprise-admin = { path = "../../crates/ccos-enterprise-admin" }
 ccos-enterprise-runtime = { path = "../../crates/ccos-enterprise-runtime" }
+ccos-enterprise-mcp = { path = "../../crates/ccos-enterprise-mcp" }
+ccos-enterprise-decision-service = { path = "../../crates/ccos-enterprise-decision-service" }
+ccos-enterprise-knowledge = { path = "../../crates/ccos-enterprise-knowledge" }
+ccos-enterprise-knowledge-model = { path = "../../crates/ccos-enterprise-knowledge-model" }
 # The stress suite drives the licensing stack too: claim-code parsing, the
 # base64url wire codec, and the counter's vault + HTTP loop are as much a part
 # of the product's blast radius as the governed request path.

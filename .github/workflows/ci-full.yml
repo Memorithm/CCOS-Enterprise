@@ -59,6 +59,10 @@ jobs:
         run: |
           cargo test -p ccos-enterprise-ontology-migration --release
           cargo test -p ccos-knowledge-conformance --test p4_migration --release
+      - name: Knowledge Plane P5 Decision Intelligence
+        run: |
+          cargo test -p ccos-enterprise-decision --release
+          cargo test -p ccos-knowledge-conformance --test p5_decision --release
       - name: RBAC + tenancy + policy contracts
         run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
       - name: governance wire formats (claim, manifest, revocation)

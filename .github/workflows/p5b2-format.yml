@@ -1,0 +1,29 @@
+name: P5b2 format
+
+on:
+  push:
+    branches: [feat/knowledge-plane-p5b2-governed-decision-tools]
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/knowledge-plane-p5b2-governed-decision-tools
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply rustfmt and commit only formatting
+        run: |
+          cargo fmt --all
+          git config user.name 'MEMOPERF'
+          git config user.email 'contact@checkupauto.fr'
+          git add crates/ccos-enterprise-decision-service/src/lib.rs crates/ccos-enterprise-gateway/src/lib.rs crates/ccos-enterprise-mcp/src/lib.rs crates/ccos-enterprise-mcp/src/decision.rs crates/ccos-enterprise-mcp/tests/decision_surface.rs tests/ccos-enterprise-conformance/tests/decision_tools.rs
+          git diff --cached --quiet && exit 0
+          git commit -m 'style: apply rustfmt to P5b2'
+          git push origin HEAD:feat/knowledge-plane-p5b2-governed-decision-tools

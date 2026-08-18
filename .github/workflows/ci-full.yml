@@ -2,7 +2,7 @@ name: CI (full)
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/runtime-true-idempotent-replay]
   pull_request:
   schedule:
     - cron: "0 5 * * *"
@@ -81,6 +81,103 @@ jobs:
         run: cargo test -p ccos-enterprise-conformance --test isolation --release
       - name: adversarial (escalation, quota abuse, forged restore, admin trail)
         run: cargo test -p ccos-enterprise-conformance --test adversarial --release
+
+  stress_patch:
+    name: align stress classifier with replay
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/runtime-true-idempotent-replay
+          fetch-depth: 0
+      - name: Patch explicit replay classification
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs')
+          s = p.read_text()
+          def rep(old, new):
+              global s
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'expected one match, found {n}: {old[:80]!r}')
+              s = s.replace(old, new, 1)
+
+          rep('''enum Kind {
+              Forwarded,
+              Unauthenticated,
+          ''', '''enum Kind {
+              Forwarded,
+              Replayed,
+              Unauthenticated,
+          ''')
+
+          rep('''/// The one refusal `admit` cannot produce, so it is deliberately absent from
+          /// `ALL_KINDS` above.
+          ///
+          /// [`Refusal::StorageExhausted`] comes from the governed **cell** path
+          /// (`put_cell`), which runs `admit` first and then its own effect; the storm
+          /// drives `admit` directly, so demanding it here would be demanding a refusal
+          /// this harness structurally cannot reach. It is classified in `kind_of` all
+          /// the same, so a future storm that does drive `put_cell` gets it for free —
+          /// and `stress_tenancy_fuzz` covers it, under concurrency included.
+          const NOT_REACHABLE_THROUGH_ADMIT: &[Kind] = &[Kind::StorageExhausted];
+          ''', '''/// Outcomes this particular storm cannot produce, each for an explicit reason.
+          ///
+          /// `Replayed` is a real `admit` outcome, but every scripted request id below is
+          /// globally unique, so replay suppression must never fire in this harness.
+          /// [`Refusal::StorageExhausted`] comes from the governed **cell** path
+          /// (`put_cell`), which runs `admit` first and then its own effect; this storm
+          /// drives `admit` directly. Both remain classified in `kind_of` so future
+          /// harnesses cannot silently forget either outcome.
+          const NOT_REACHABLE_IN_STORM: &[Kind] = &[Kind::Replayed, Kind::StorageExhausted];
+          ''')
+
+          rep('''    match o {
+                  Outcome::Forwarded => Kind::Forwarded,
+                  Outcome::Refused(Refusal::Unauthenticated) => Kind::Unauthenticated,
+          ''', '''    match o {
+                  Outcome::Forwarded => Kind::Forwarded,
+                  Outcome::Replayed => Kind::Replayed,
+                  Outcome::Refused(Refusal::Unauthenticated) => Kind::Unauthenticated,
+          ''')
+
+          rep('''    // cosmetic: a repeated (tenant, request_id) is suppressed as a replay and
+              // forwarded *free*, which would silently collapse the billing this file
+              // reconciles. `run_storm` asserts it before the storm starts.
+          ''', '''    // cosmetic: a repeated (tenant, request_id) is suppressed as explicit
+              // `Replayed` with no second effect and zero cost, which would silently collapse
+              // the billing this file reconciles. `run_storm` asserts uniqueness first.
+          ''')
+
+          rep('''    for kind in NOT_REACHABLE_THROUGH_ADMIT {
+                  assert!(
+                      !seen_kinds.contains(kind),
+                      "{kind:?} is documented as unreachable through `admit` and the \\
+                       storm just produced it — the classification above is stale"
+                  );
+              }
+          ''', '''    for kind in NOT_REACHABLE_IN_STORM {
+                  assert!(
+                      !seen_kinds.contains(kind),
+                      "{kind:?} is documented as unreachable in this storm and was produced — \\
+                       either the script invariants or the classification above are stale"
+                  );
+              }
+          ''')
+
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          cargo test -p ccos-enterprise-conformance --test stress_concurrency_chaos --release --no-run
+          git diff --quiet -- tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs && exit 0
+          git config user.name 'ZEKRITI Tarek'
+          git config user.email 'contact@checkupauto.fr'
+          git add tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs
+          git commit -m 'test(runtime): classify replay explicitly in stress harness'
+          git push origin HEAD:fix/runtime-true-idempotent-replay
 
   conformance:
     name: Core dependency conformance

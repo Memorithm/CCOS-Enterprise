@@ -2,109 +2,111 @@ name: CI (full)
 
 on:
   push:
-    branches: [fix/runtime-true-idempotent-replay]
+    branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 5 * * *"
 
 permissions:
   contents: read
 
 jobs:
-  qpage_replay_fix:
-    name: repair Q-Page replay conformance
+  contract:
+    name: boundary + contract tests
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/runtime-true-idempotent-replay
-          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Replace and execute the complete Q-Page replay guard
+      - name: gateway namespace contract (Hermes/OpenClaw surface)
+        run: cargo test -p ccos-enterprise-gateway --release
+      - name: Knowledge Plane P0 conformance
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('tests/ccos-enterprise-conformance/tests/stress_qpages_exhaustive.rs')
-          s = p.read_text()
-          start_marker = '/// REPAIRED (was an aside in the F2 test above, asserting the defect): the\n'
-          end_marker = '/// FINDING F3 (spec-violation), still open:'
-          start = s.index(start_marker)
-          end = s.index(end_marker, start)
-          replacement = r'''/// REPAIRED (was an aside in the F2 test above, asserting the defect): the
-          /// `request_id` is documented as an "idempotency/correlation key" and nothing
-          /// read it, so **the same id was charged on every retry** — a client whose
-          /// connection dropped mid-call paid twice for one decision, and a retry loop
-          /// could drain a tenant's budget without ever presenting a new request.
-          ///
-          /// A `(tenant, request_id)` already decided now returns explicit `Replayed`
-          /// without charging or becoming eligible to execute again. This test is the
-          /// regression guard: same inputs — one id, five attempts — one `Forwarded`,
-          /// four `Replayed`, one charge.
-          #[test]
-          fn a_replayed_request_id_is_never_billed_twice() {
-              let mut d = deployment_activating(SUBSETS - 1);
-              let a = actor(ORG, "alice", AuthStrength::Token);
-              let req = request("acme", "alice", "memory.recall", "same-id");
+          cargo test -p ccos-enterprise-knowledge-model -p ccos-enterprise-knowledge -p ccos-enterprise-knowledge-store --release
+          cargo test -p ccos-knowledge-conformance --test p0 --release
+      - name: Knowledge Plane P1 local ingestion
+        run: |
+          cargo test -p ccos-enterprise-ingest --release
+          cargo test -p ccos-knowledge-conformance --test p1_local_ingest --release
+      - name: Knowledge Plane P1 normalization
+        run: |
+          cargo test -p ccos-enterprise-normalize --release
+          cargo test -p ccos-knowledge-conformance --test p1_normalize --release
+      - name: Knowledge Plane P1 source-span parsing
+        run: |
+          cargo test -p ccos-enterprise-parse --release
+          cargo test -p ccos-knowledge-conformance --test p1_parse --release
+      - name: Knowledge Plane P2 structural extraction
+        run: |
+          cargo test -p ccos-enterprise-extract --release
+          cargo test -p ccos-knowledge-conformance --test p2_extract --release
+      - name: Knowledge Plane P2 exact-key resolution
+        run: |
+          cargo test -p ccos-enterprise-resolution --release
+          cargo test -p ccos-knowledge-conformance --test p2_resolution --release
+      - name: Knowledge Plane P3 canonical graph view
+        run: |
+          cargo test -p ccos-enterprise-kg --release
+          cargo test -p ccos-knowledge-conformance --test p3_graph --release
+      - name: Knowledge Plane P4 ontology validation
+        run: |
+          cargo test -p ccos-enterprise-ontology --release
+          cargo test -p ccos-knowledge-conformance --test p4_ontology --release
+      - name: Knowledge Plane P4 typed canonical promotion
+        run: |
+          cargo test -p ccos-enterprise-promotion --release
+          cargo test -p ccos-knowledge-conformance --test p4_promotion --release
+      - name: Knowledge Plane P4 reversible ontology migration
+        run: |
+          cargo test -p ccos-enterprise-ontology-migration --release
+          cargo test -p ccos-knowledge-conformance --test p4_migration --release
+      - name: Knowledge Plane P4 semantic interoperability
+        run: |
+          cargo test -p ccos-enterprise-semantic --release
+          cargo test -p ccos-knowledge-conformance --test p4_semantic --release
+      - name: Knowledge Plane P5 Decision Intelligence
+        run: |
+          cargo test -p ccos-enterprise-decision --release
+          cargo test -p ccos-knowledge-conformance --test p5_decision --release
+      - name: RBAC + tenancy + policy contracts
+        run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
+      - name: governance wire formats (claim, manifest, revocation)
+        run: cargo test -p ccos-enterprise-governance --all-features --release
+      - name: license server integration
+        run: cargo test -p ccos-license-server --release
+      - name: Hermes/OpenClaw tool-catalogue contract
+        run: cargo test -p ccos-enterprise-conformance --test boundary_contract --release
+      - name: governed request path (identity → tenancy → authz → policy → boundary → audit)
+        run: cargo test -p ccos-enterprise-conformance --test governed_path --release
+      - name: tenant isolation + cross-tenant leakage + concurrency
+        run: cargo test -p ccos-enterprise-conformance --test isolation --release
+      - name: adversarial (escalation, quota abuse, forged restore, admin trail)
+        run: cargo test -p ccos-enterprise-conformance --test adversarial --release
 
-              let first = d.admit(Call {
-                  actor: &a,
-                  request: &req,
-                  model: "claude-opus",
-                  cost_tokens: 1,
-                  variant: Some(AdvancedQPageVariant::ExperimentalBridge),
-                  justification: None,
-              });
-              assert_eq!(first, Outcome::Forwarded, "the first attempt executes");
+  conformance:
+    name: Core dependency conformance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Exactly one Core in the tree (never a copy)
+        run: |
+          test "$(cargo metadata --no-deps --format-version 1 \
+                  | python3 -c 'import json,sys; print(sum(1 for p in json.load(sys.stdin)["packages"] if p["name"]=="ccos-core"))')" = 1
+          ! find crates tools -name '*.rs' | xargs grep -l 'pub fn qbelief' | grep -v target
+          echo "one Core, referenced not duplicated"
+      - name: "Enterprise boundary (§4.2): no Research-Lab in the product graph"
+        run: |
+          for p in $(cargo metadata --no-deps --format-version 1 \
+                     | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"] if p["name"].startswith("ccos-enterprise")]'); do
+            cargo tree -p "$p" --edges normal --prefix none 2>/dev/null \
+              | grep -qiE 'research-lab|ccos-forge|ccos-rsi' \
+              && { echo "BOUNDARY VIOLATION: $p reaches a forbidden crate"; exit 1; }
+          done
+          echo "no Enterprise crate reaches Research-Lab, Forge or RSI"
 
-              for attempt in 1..5 {
-                  let out = d.admit(Call {
-                      actor: &a,
-                      request: &req,
-                      model: "claude-opus",
-                      cost_tokens: 1,
-                      variant: Some(AdvancedQPageVariant::ExperimentalBridge),
-                      justification: None,
-                  });
-                  assert_eq!(
-                      out,
-                      Outcome::Replayed,
-                      "attempt {attempt}: a duplicate id is acknowledged without another execution"
-                  );
-              }
-
-              assert_eq!(
-                  d.spent("acme"),
-                  Some(1),
-                  "billed once, replayed four times: the same request_id is not a new call"
-              );
-
-              // Suppression is observable, not silence: all attempts are journaled,
-              // with exactly one executable/charged decision and four zero-cost replays.
-              let trail: Vec<_> = d.audit().collect();
-              assert_eq!(trail.len(), 5, "every attempt is still journaled");
-              assert_eq!(trail[0].outcome, Outcome::Forwarded);
-              assert!(trail[1..].iter().all(|r| r.outcome.is_replayed()));
-              let costs: Vec<u64> = trail.iter().map(|r| r.cost).collect();
-              assert_eq!(costs, vec![1, 0, 0, 0, 0]);
-              let billed: u64 = costs.iter().sum();
-              assert_eq!(Some(billed), d.spent("acme"), "the journal reconciles");
-
-              let replayed = d
-                  .metrics()
-                  .into_iter()
-                  .find(|(k, _)| k == "gateway.replayed")
-                  .map(|(_, v)| v);
-              assert_eq!(replayed, Some(4), "and the suppression is observable");
-          }
-
-          '''
-          p.write_text(s[:start] + replacement + s[end:])
-          PY
-          cargo fmt --all
-          cargo test -p ccos-enterprise-conformance --test stress_qpages_exhaustive a_replayed_request_id_is_never_billed_twice --release -- --exact
-          git config user.name 'MEMOPERF'
-          git config user.email 'contact@checkupauto.fr'
-          git add tests/ccos-enterprise-conformance/tests/stress_qpages_exhaustive.rs
-          git diff --cached --quiet && exit 0
-          git commit -m 'test(runtime): expect explicit Q-Page replays'
-          git push origin HEAD:fix/runtime-true-idempotent-replay
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features

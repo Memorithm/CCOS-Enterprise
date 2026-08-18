@@ -171,8 +171,12 @@ dependencies = [
  "ccos-enterprise-admin",
  "ccos-enterprise-auth",
  "ccos-enterprise-backup",
+ "ccos-enterprise-decision-service",
  "ccos-enterprise-gateway",
  "ccos-enterprise-governance",
+ "ccos-enterprise-knowledge",
+ "ccos-enterprise-knowledge-model",
+ "ccos-enterprise-mcp",
  "ccos-enterprise-observability",
  "ccos-enterprise-policy",
  "ccos-enterprise-qpages",
@@ -194,6 +198,20 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "ccos-enterprise-decision-service"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-auth",
+ "ccos-enterprise-decision",
+ "ccos-enterprise-decision-store",
+ "ccos-enterprise-knowledge",
+ "ccos-enterprise-knowledge-model",
+ "ccos-enterprise-knowledge-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -286,11 +304,15 @@ version = "0.1.0-pre"
 dependencies = [
  "ccos-core",
  "ccos-enterprise-auth",
+ "ccos-enterprise-decision-service",
  "ccos-enterprise-gateway",
  "ccos-enterprise-qpages",
  "ccos-enterprise-runtime",
+ "ccos-enterprise-store",
+ "ed25519-dalek",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

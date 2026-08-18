@@ -38,6 +38,29 @@ back the admission reservation and charge.
 Host correlation travels under `_meta.ccos`; those fields are claims to validate,
 not proof of identity.
 
+### Idempotency versus execution attempts
+
+The adapter carries two deliberately different identifiers:
+
+- `request_id` is the stable Enterprise idempotency identity. A durable outbox
+  retry reuses it so governance can suppress an already-committed effect.
+- `execution_attempt_id` is freshly generated for every physical MCP call. It
+  identifies one concrete `ToolRequested -> ToolStarted -> ToolFinished`
+  lifecycle in the execution journal.
+
+That distinction means a backend attempt that definitely failed can be retried
+with the same `request_id` without corrupting the execution journal with a
+duplicate call id. A governance replay never reaches the backend and therefore
+never creates a second execution attempt.
+
+The server stores the per-tenant execution journal beneath
+`<state_dir>/.execution/<tenant>/execution.jsonl`. Every record is append-only,
+hash-linked and fsynced. The durable effect marker carries the active DSH
+turn/step, `execution_attempt_id` and output hash so restart recovery can close
+an interrupted `ToolStarted` only when a stronger durable witness proves the
+exact result. Any unexplained `OutcomeUnknown` fails closed rather than guessing
+whether Core executed.
+
 ## Native governed tools
 
 When `toolsEnabled` is true, the adapter asks the Enterprise server for its live
@@ -92,14 +115,19 @@ agent/pre-step
 native ccos_* call
   -> shared read-only manifest
   -> live Enterprise schema
-  -> DSH turn/step/tool_call correlation
+  -> fresh execution_attempt_id
+  -> ToolRequested / ToolStarted
   -> governed read capability
+  -> ToolFinished
 
 turn/end
   -> durable outbox
   -> memory.ingest
+  -> ToolRequested / ToolStarted
   -> governed admission
   -> tenant Core checkpoint
+  -> durable effect outcome
+  -> ToolFinished
   -> Enterprise ledger commit
   -> outbox delete only after success
 ```

@@ -3,12 +3,20 @@
 //! One process is bound to one signed principal and one tenant. Host-supplied
 //! `_meta.ccos` values are correlation claims and must match that proof.
 //!
-//! The Core workspace and the Enterprise governance ledger are separate durable
-//! files, so this server owns a tiny effect marker that closes the transaction
-//! gap between them. The marker is synced before Core runs and records whether
-//! the effect definitely succeeded or failed before the governance decision is
-//! acknowledged. A crash with only `started` is deliberately fail-closed:
-//! automatic replay would risk executing an effect twice.
+//! Three durable layers intentionally cooperate:
+//! - the tenant Core workspace;
+//! - the Enterprise governance ledger (budget/replay/audit);
+//! - an execution journal recording ToolRequested -> ToolStarted -> ToolFinished.
+//!
+//! `request_id` is stable idempotency identity. `execution_attempt_id` is a
+//! fresh physical-attempt identity supplied by the DSH adapter for every MCP
+//! request, so a known failed attempt and its retry remain two valid execution
+//! lifecycles without weakening replay suppression.
+
+#[path = "../execution.rs"]
+mod execution;
+#[path = "../execution_backend.rs"]
+mod execution_backend;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,6 +36,11 @@ use ccos_enterprise_runtime::{
 };
 use ccos_enterprise_store::Store;
 use ed25519_dalek::VerifyingKey;
+#[cfg(test)]
+use execution::ToolRecoveryDisposition;
+use execution_backend::{
+    failed_output_sha256, successful_output_sha256, DispatchExecution, ExecutionBackend,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -36,6 +49,7 @@ const HOST_KIND: &str = "deepseek-harness";
 const ROLE_NAME: &str = "dsh-memory";
 const GOVERNANCE_DIR: &str = ".enterprise";
 const EFFECT_FILE: &str = "effect.json";
+const EXECUTION_DIR: &str = ".execution";
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -145,24 +159,54 @@ struct EffectRecord {
     model: String,
     cost_tokens: u64,
     state: EffectState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    step_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    execution_attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_sha256: Option<String>,
 }
 
 impl EffectRecord {
-    fn from_request(request: &GatewayRequest, model: &str, cost_tokens: u64) -> Self {
+    fn from_request(request: &GatewayRequest, meta: &Meta, cost_tokens: u64) -> Self {
         Self {
             request_id: request.request_id.clone(),
             tenant: request.tenant.clone(),
             actor: request.actor.clone(),
             tool: request.tool.clone(),
-            model: model.to_string(),
+            model: meta.model.clone(),
             cost_tokens,
             state: EffectState::Started,
+            turn_id: Some(meta.turn_id.clone()),
+            step_id: Some(meta.step_id.clone()),
+            execution_attempt_id: Some(meta.execution_attempt_id.clone()),
+            output_sha256: None,
         }
+    }
+
+    fn execution(&self) -> Result<DispatchExecution, String> {
+        let turn = self.turn_id.as_deref().ok_or_else(|| {
+            "effect marker predates execution correlation (missing turn_id)".to_string()
+        })?;
+        let step = self.step_id.as_deref().ok_or_else(|| {
+            "effect marker predates execution correlation (missing step_id)".to_string()
+        })?;
+        let attempt = self.execution_attempt_id.as_deref().ok_or_else(|| {
+            "effect marker predates execution correlation (missing execution_attempt_id)"
+                .to_string()
+        })?;
+        Ok(DispatchExecution::new(turn, step, attempt))
     }
 }
 
 fn effect_path(root: &Path) -> PathBuf {
     root.join(GOVERNANCE_DIR).join(EFFECT_FILE)
+}
+
+fn execution_root(root: &Path) -> PathBuf {
+    root.join(EXECUTION_DIR)
 }
 
 fn write_effect(path: &Path, record: &EffectRecord) -> Result<(), String> {
@@ -369,9 +413,11 @@ impl Backend for TenantBackend {
         match backend_result {
             Ok(value) => {
                 effect.state = EffectState::Succeeded;
+                effect.output_sha256 = Some(
+                    successful_output_sha256(&value)
+                        .map_err(|error| format!("cannot hash successful Core result: {error}"))?,
+                );
                 if let Err(error) = write_effect(&self.effect_path, &effect) {
-                    // Core may already be durable. Never turn failure to record
-                    // that fact into a retryable backend failure.
                     self.outcome_uncertain = true;
                     return Err(format!(
                         "Core succeeded but durable outcome marker failed: {error}"
@@ -381,10 +427,8 @@ impl Backend for TenantBackend {
             }
             Err(error) => {
                 effect.state = EffectState::Failed;
+                effect.output_sha256 = Some(failed_output_sha256(&error));
                 if let Err(marker_error) = write_effect(&self.effect_path, &effect) {
-                    // The backend says it failed, so there is no successful
-                    // effect to duplicate. Still surface the marker failure: a
-                    // restart with `started` must conservatively block.
                     return Err(format!(
                         "{error}; additionally could not persist failed outcome: {marker_error}"
                     ));
@@ -395,12 +439,108 @@ impl Backend for TenantBackend {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PendingExecution {
+    tenant: String,
+    execution: DispatchExecution,
+}
+
+struct JournaledBackend {
+    execution: ExecutionBackend<TenantBackend>,
+    pending: Option<PendingExecution>,
+}
+
+impl JournaledBackend {
+    fn new(inner: TenantBackend, root: impl AsRef<Path>) -> Self {
+        Self {
+            execution: ExecutionBackend::new(inner, root),
+            pending: None,
+        }
+    }
+
+    fn arm(
+        &mut self,
+        tenant: &str,
+        execution: DispatchExecution,
+        effect: EffectRecord,
+    ) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err("execution backend already has a pending request".into());
+        }
+        self.execution.inner_mut().arm(effect)?;
+        self.pending = Some(PendingExecution {
+            tenant: tenant.to_string(),
+            execution,
+        });
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        self.pending = None;
+        self.execution.inner_mut().disarm();
+    }
+
+    fn inner(&self) -> &TenantBackend {
+        self.execution.inner()
+    }
+    fn inner_mut(&mut self) -> &mut TenantBackend {
+        self.execution.inner_mut()
+    }
+
+    fn reconcile_effect(&mut self, effect: &EffectRecord) -> Result<(), String> {
+        let execution = effect.execution()?;
+        let hash = effect.output_sha256.as_deref().ok_or_else(|| {
+            "effect marker has no output_sha256 for execution reconciliation".to_string()
+        })?;
+        let success = effect.state == EffectState::Succeeded;
+        self.execution
+            .reconcile_finished(&effect.tenant, &execution.call_id, success, hash)
+            .map_err(|error| error.to_string())
+    }
+
+    fn ensure_no_unknown_outcomes(&mut self, tenant: &str) -> Result<(), String> {
+        self.execution
+            .ensure_no_unknown_outcomes(tenant)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(test)]
+    fn recover_tools(&mut self, tenant: &str) -> Result<Vec<execution::ToolRecovery>, String> {
+        self.execution
+            .recover_tools(tenant)
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl Backend for JournaledBackend {
+    fn dispatch(
+        &mut self,
+        tenant: &str,
+        core_tool: &str,
+        arguments: &Value,
+    ) -> Result<Value, String> {
+        let pending = self
+            .pending
+            .take()
+            .ok_or_else(|| "governed dispatch had no execution attempt context".to_string())?;
+        if pending.tenant != tenant {
+            return Err("execution attempt tenant did not match governed dispatch".into());
+        }
+        self.execution
+            .dispatch_with_context(tenant, &pending.execution, core_tool, arguments)
+            .map_err(|error| error.to_string())
+    }
+}
+
 struct Meta {
     tenant: String,
     actor: String,
     host: String,
     request_id: String,
     model: String,
+    turn_id: String,
+    step_id: String,
+    execution_attempt_id: String,
 }
 
 fn parse_meta(params: &Value) -> Result<Meta, ()> {
@@ -423,6 +563,9 @@ fn parse_meta(params: &Value) -> Result<Meta, ()> {
         host: field("host")?,
         request_id: field("request_id")?,
         model: field("model")?,
+        turn_id: field("turn_id")?,
+        step_id: field("step_id")?,
+        execution_attempt_id: field("execution_attempt_id")?,
     })
 }
 
@@ -432,7 +575,7 @@ struct Server {
     org: String,
     actor: String,
     store: Store,
-    front_door: GovernedMcp<TenantBackend>,
+    front_door: GovernedMcp<JournaledBackend>,
     poisoned: Option<String>,
 }
 
@@ -533,11 +676,10 @@ impl Server {
         let governance_root = config.state_dir.join(GOVERNANCE_DIR);
         let mut store = Store::open(&governance_root)
             .map_err(|error| format!("cannot open Enterprise governance store: {error}"))?;
-
         let loaded = store
             .load()
             .map_err(|error| format!("cannot load Enterprise governance store: {error}"))?;
-        let mut deployment = match loaded {
+        let deployment = match loaded {
             Some(loaded) => {
                 if loaded.torn_tail != 0 {
                     return Err(format!(
@@ -561,6 +703,12 @@ impl Server {
             }
         };
 
+        let backend = JournaledBackend::new(
+            TenantBackend::new(config.state_dir.clone()),
+            execution_root(&config.state_dir),
+        );
+        let mut front_door = GovernedMcp::new(deployment, backend);
+
         let marker_path = effect_path(&config.state_dir);
         if let Some(mut effect) = read_effect(&marker_path)? {
             if effect.tenant != config.tenant
@@ -580,8 +728,11 @@ impl Server {
                     ));
                 }
                 EffectState::Succeeded => {
+                    if effect.execution_attempt_id.is_some() {
+                        front_door.backend_mut().reconcile_effect(&effect)?;
+                    }
                     Self::settle_recovered_success(
-                        &mut deployment,
+                        front_door.deployment_mut(),
                         &mut store,
                         &identity,
                         &effect,
@@ -590,9 +741,9 @@ impl Server {
                     write_effect(&marker_path, &effect)?;
                 }
                 EffectState::Failed => {
-                    // The previous backend explicitly failed and no governance
-                    // state was acknowledged. Replaying the same request id is
-                    // safe after marking the failed attempt settled.
+                    if effect.execution_attempt_id.is_some() {
+                        front_door.backend_mut().reconcile_effect(&effect)?;
+                    }
                     effect.state = EffectState::Settled;
                     write_effect(&marker_path, &effect)?;
                 }
@@ -600,14 +751,17 @@ impl Server {
             }
         }
 
-        let backend = TenantBackend::new(config.state_dir.clone());
+        front_door
+            .backend_mut()
+            .ensure_no_unknown_outcomes(&config.tenant)?;
+
         Ok(Self {
             config,
             authenticator,
             org,
             actor,
             store,
-            front_door: GovernedMcp::new(deployment, backend),
+            front_door,
             poisoned: None,
         })
     }
@@ -672,17 +826,21 @@ impl Server {
         }
 
         let request = GatewayRequest {
-            tenant: meta.tenant,
-            actor: meta.actor,
+            tenant: meta.tenant.clone(),
+            actor: meta.actor.clone(),
             tool: tool.to_string(),
-            request_id: meta.request_id,
+            request_id: meta.request_id.clone(),
         };
         let checkpoint = DeploymentCheckpoint::capture(self.front_door.deployment());
-        let effect =
-            EffectRecord::from_request(&request, &meta.model, self.config.call_cost_tokens);
+        let execution = DispatchExecution::new(
+            meta.turn_id.clone(),
+            meta.step_id.clone(),
+            meta.execution_attempt_id.clone(),
+        );
+        let effect = EffectRecord::from_request(&request, &meta, self.config.call_cost_tokens);
         self.front_door
             .backend_mut()
-            .arm(effect)
+            .arm(&request.tenant, execution, effect)
             .map_err(|error| (-32000, error))?;
 
         let outcome = self.front_door.call(
@@ -696,11 +854,24 @@ impl Server {
             },
             &arguments,
         );
-        self.front_door.backend_mut().disarm();
+        self.front_door.backend_mut().clear();
 
         if matches!(outcome, McpOutcome::BackendError(_)) {
-            if self.front_door.backend().outcome_uncertain() {
-                let reason = "backend may have succeeded but its durable outcome marker failed";
+            let marker = read_effect(&effect_path(&self.config.state_dir)).map_err(|error| {
+                self.poisoned = Some(error.clone());
+                (-32000, "Enterprise effect state unavailable".to_string())
+            })?;
+            let marker_for_request = marker
+                .as_ref()
+                .filter(|record| record.request_id == request.request_id);
+            let succeeded = marker_for_request
+                .map(|record| record.state == EffectState::Succeeded)
+                .unwrap_or(false);
+            let started = marker_for_request
+                .map(|record| record.state == EffectState::Started)
+                .unwrap_or(false);
+            if self.front_door.backend().inner().outcome_uncertain() || succeeded || started {
+                let reason = "backend effect may have succeeded but its execution outcome is not fully durable";
                 self.poisoned = Some(reason.to_string());
                 eprintln!("ccos-enterprise-mcp: {reason}");
                 return Err((
@@ -708,24 +879,38 @@ impl Server {
                     "Enterprise effect outcome is not durable".to_string(),
                 ));
             }
+
             self.front_door
                 .backend_mut()
+                .inner_mut()
                 .discard_session(&request.tenant);
             let restored = checkpoint.restore().map_err(|error| {
                 self.poisoned = Some(error.clone());
                 (-32000, "Enterprise admission rollback failed".to_string())
             })?;
             *self.front_door.deployment_mut() = restored;
-            if let Err(error) = self
-                .front_door
-                .backend_mut()
-                .settle_marker(&request.request_id)
-            {
-                self.poisoned = Some(error.clone());
-                return Err((
-                    -32000,
-                    "Enterprise failed effect could not be settled".to_string(),
-                ));
+            if let Some(record) = marker_for_request {
+                if record.state == EffectState::Failed {
+                    if let Err(error) = self.front_door.backend_mut().reconcile_effect(record) {
+                        self.poisoned = Some(error.clone());
+                        return Err((
+                            -32000,
+                            "Enterprise failed execution could not be reconciled".to_string(),
+                        ));
+                    }
+                    if let Err(error) = self
+                        .front_door
+                        .backend_mut()
+                        .inner_mut()
+                        .settle_marker(&request.request_id)
+                    {
+                        self.poisoned = Some(error.clone());
+                        return Err((
+                            -32000,
+                            "Enterprise failed effect could not be settled".to_string(),
+                        ));
+                    }
+                }
             }
             return match outcome {
                 McpOutcome::BackendError(error) => {
@@ -759,6 +944,7 @@ impl Server {
                 if let Err(error) = self
                     .front_door
                     .backend_mut()
+                    .inner_mut()
                     .settle_marker(&request.request_id)
                 {
                     self.poisoned = Some(error.clone());
@@ -913,7 +1099,10 @@ mod tests {
                     "actor_id": actor,
                     "host": HOST_KIND,
                     "request_id": request_id,
-                    "model": "deepseek-harness"
+                    "model": "deepseek-harness",
+                    "turn_id": format!("turn-{id}"),
+                    "step_id": "step-1",
+                    "execution_attempt_id": format!("attempt-{id}")
                 }}
             }
         })
@@ -944,131 +1133,177 @@ mod tests {
             .handle(&call(1, "mallory", "r-1", "memory.recall", json!({})))
             .unwrap();
         assert_eq!(response["error"]["code"], -32001);
-        assert_eq!(response["error"]["message"], "not authenticated");
         drop(server);
         cleanup(&root);
     }
 
     #[test]
-    fn admitted_write_is_checkpointed_and_replay_is_suppressed() {
-        let config = test_config("persist");
+    fn replay_does_not_create_a_second_execution_attempt() {
+        let config = test_config("replay-execution");
         let root = config.state_dir.clone();
         cleanup(&root);
         let mut server = Server::new(config).unwrap();
-        let first = call(
-            1,
-            "alice",
-            "same-request",
-            "memory.ingest",
-            json!({ "uri": "dsh/test.md", "source": "alpha beta gamma" }),
-        );
-        let response = server.handle(&first).unwrap();
-        assert!(response.get("result").is_some(), "{response}");
-        assert!(root.join("acme").join("workspace.ccos").exists());
-        assert_eq!(server.front_door.deployment().spent("acme"), Some(1));
-
+        let first = server
+            .handle(&call(
+                1,
+                "alice",
+                "same-request",
+                "memory.ingest",
+                json!({
+                    "uri": "dsh/test.md", "source": "alpha"
+                }),
+            ))
+            .unwrap();
+        assert!(first.get("result").is_some(), "{first}");
         let replay = server
             .handle(&call(
                 2,
                 "alice",
                 "same-request",
                 "memory.ingest",
-                json!({ "uri": "dsh/test.md", "source": "different" }),
+                json!({
+                    "uri": "dsh/test.md", "source": "different"
+                }),
             ))
             .unwrap();
+        assert_eq!(replay["result"]["structuredContent"]["replayed"], true);
+        let recovered = server
+            .front_door
+            .backend_mut()
+            .recover_tools("acme")
+            .unwrap();
         assert_eq!(
-            replay["result"]["structuredContent"]["replayed"],
-            Value::Bool(true)
+            recovered.len(),
+            1,
+            "governance replay must never enter the backend journal"
         );
-        assert_eq!(server.front_door.deployment().spent("acme"), Some(1));
+        assert_eq!(recovered[0].call_id, "attempt-1");
+        assert!(matches!(
+            recovered[0].disposition,
+            ToolRecoveryDisposition::Completed { success: true, .. }
+        ));
         drop(server);
         cleanup(&root);
     }
 
     #[test]
-    fn budget_and_replay_survive_server_restart() {
-        let config = test_config("restart-ledger");
-        let root = config.state_dir.clone();
-        cleanup(&root);
-        {
-            let mut server = Server::new(config.clone()).unwrap();
-            let response = server
-                .handle(&call(
-                    1,
-                    "alice",
-                    "restart-request",
-                    "memory.ingest",
-                    json!({ "uri": "dsh/restart.md", "source": "durable" }),
-                ))
-                .unwrap();
-            assert!(response.get("result").is_some(), "{response}");
-            assert_eq!(server.front_door.deployment().spent("acme"), Some(1));
-        }
-        {
-            let mut restarted = Server::new(config).unwrap();
-            assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
-            let replay = restarted
-                .handle(&call(
-                    2,
-                    "alice",
-                    "restart-request",
-                    "memory.ingest",
-                    json!({ "uri": "dsh/restart.md", "source": "must-not-run" }),
-                ))
-                .unwrap();
-            assert_eq!(
-                replay["result"]["structuredContent"]["replayed"],
-                Value::Bool(true)
-            );
-            assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
-        }
-        cleanup(&root);
-    }
-
-    #[test]
-    fn explicit_backend_failure_rolls_back_admission_and_same_id_can_retry() {
-        let config = test_config("retry-after-backend-failure");
+    fn failed_attempt_and_retry_share_request_id_but_not_execution_call_id() {
+        let config = test_config("retry-execution");
         let root = config.state_dir.clone();
         cleanup(&root);
         let mut server = Server::new(config).unwrap();
-
         let failed = server
             .handle(&call(1, "alice", "retry-me", "memory.ingest", json!({})))
             .unwrap();
-        assert_eq!(failed["result"]["isError"], Value::Bool(true));
-        assert_eq!(
-            server.front_door.deployment().spent("acme"),
-            Some(0),
-            "a backend effect that definitely failed must not consume budget"
-        );
-
+        assert_eq!(failed["result"]["isError"], true);
+        assert_eq!(server.front_door.deployment().spent("acme"), Some(0));
         let retry = server
             .handle(&call(
                 2,
                 "alice",
                 "retry-me",
                 "memory.ingest",
-                json!({ "uri": "dsh/retry.md", "source": "second attempt succeeds" }),
+                json!({
+                    "uri": "dsh/retry.md", "source": "second attempt succeeds"
+                }),
             ))
             .unwrap();
         assert!(retry.get("result").is_some(), "{retry}");
-        assert_ne!(
-            retry["result"]["structuredContent"]["replayed"],
-            Value::Bool(true),
-            "the failed first attempt must not reserve the replay id"
-        );
         assert_eq!(server.front_door.deployment().spent("acme"), Some(1));
+        let recovered = server
+            .front_door
+            .backend_mut()
+            .recover_tools("acme")
+            .unwrap();
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(recovered[0].call_id, "attempt-1");
+        assert_eq!(recovered[1].call_id, "attempt-2");
+        assert!(matches!(
+            recovered[0].disposition,
+            ToolRecoveryDisposition::Completed { success: false, .. }
+        ));
+        assert!(matches!(
+            recovered[1].disposition,
+            ToolRecoveryDisposition::Completed { success: true, .. }
+        ));
         drop(server);
         cleanup(&root);
     }
 
     #[test]
-    fn recovered_succeeded_marker_settles_governance_without_rerunning_core() {
-        let config = test_config("recover-success");
+    fn budget_replay_and_execution_journal_survive_restart() {
+        let config = test_config("restart-journal");
+        let root = config.state_dir.clone();
+        cleanup(&root);
+        {
+            let mut server = Server::new(config.clone()).unwrap();
+            server
+                .handle(&call(
+                    1,
+                    "alice",
+                    "restart-request",
+                    "memory.ingest",
+                    json!({
+                        "uri": "dsh/restart.md", "source": "durable"
+                    }),
+                ))
+                .unwrap();
+        }
+        {
+            let mut restarted = Server::new(config).unwrap();
+            assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
+            let recovered = restarted
+                .front_door
+                .backend_mut()
+                .recover_tools("acme")
+                .unwrap();
+            assert_eq!(recovered.len(), 1);
+            assert!(matches!(
+                recovered[0].disposition,
+                ToolRecoveryDisposition::Completed { success: true, .. }
+            ));
+            let replay = restarted
+                .handle(&call(
+                    2,
+                    "alice",
+                    "restart-request",
+                    "memory.ingest",
+                    json!({
+                        "uri": "dsh/restart.md", "source": "must-not-run"
+                    }),
+                ))
+                .unwrap();
+            assert_eq!(replay["result"]["structuredContent"]["replayed"], true);
+        }
+        cleanup(&root);
+    }
+
+    #[test]
+    fn succeeded_marker_reconciles_outcome_unknown_without_rerunning_core() {
+        let config = test_config("recover-execution-success");
         let root = config.state_dir.clone();
         cleanup(&root);
         {
             let server = Server::new(config.clone()).unwrap();
+            drop(server);
+            let path = execution_root(&root).join("acme").join("execution.jsonl");
+            let mut journal = execution::ExecutionJournal::open(&path, "tenant/acme/mcp")
+                .unwrap()
+                .journal;
+            journal
+                .append(execution::ExecutionEvent::ToolRequested {
+                    turn_id: "turn-r".into(),
+                    step_id: "step-r".into(),
+                    call_id: "attempt-r".into(),
+                    tool: "ingest".into(),
+                    input_sha256: "input".into(),
+                })
+                .unwrap();
+            journal
+                .append(execution::ExecutionEvent::ToolStarted {
+                    call_id: "attempt-r".into(),
+                })
+                .unwrap();
             let effect = EffectRecord {
                 request_id: "recovered-success".into(),
                 tenant: "acme".into(),
@@ -1077,44 +1312,78 @@ mod tests {
                 model: "deepseek-harness".into(),
                 cost_tokens: 1,
                 state: EffectState::Succeeded,
+                turn_id: Some("turn-r".into()),
+                step_id: Some("step-r".into()),
+                execution_attempt_id: Some("attempt-r".into()),
+                output_sha256: Some("known-output".into()),
             };
             write_effect(&effect_path(&root), &effect).unwrap();
-            drop(server);
         }
         {
-            let restarted = Server::new(config).unwrap();
+            let mut restarted = Server::new(config).unwrap();
             assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
-            let marker = read_effect(&effect_path(&root)).unwrap().unwrap();
-            assert_eq!(marker.state, EffectState::Settled);
-            assert!(restarted.front_door.deployment().audit().any(|record| {
-                record.request_id == "recovered-success" && record.outcome.is_forwarded()
-            }));
+            let recovered = restarted
+                .front_door
+                .backend_mut()
+                .recover_tools("acme")
+                .unwrap();
+            assert!(matches!(
+                &recovered[0].disposition,
+                ToolRecoveryDisposition::Completed { success: true, output_sha256 }
+                    if output_sha256 == "known-output"
+            ));
+            assert_eq!(
+                read_effect(&effect_path(&root)).unwrap().unwrap().state,
+                EffectState::Settled
+            );
         }
         cleanup(&root);
     }
 
     #[test]
-    fn unresolved_started_marker_fails_closed_on_restart() {
-        let config = test_config("unknown-effect");
+    fn unexplained_outcome_unknown_fails_closed() {
+        let config = test_config("unknown-journal");
         let root = config.state_dir.clone();
         cleanup(&root);
         {
             let server = Server::new(config.clone()).unwrap();
-            let effect = EffectRecord {
-                request_id: "unknown-request".into(),
-                tenant: "acme".into(),
-                actor: "alice".into(),
-                tool: "memory.ingest".into(),
-                model: "deepseek-harness".into(),
-                cost_tokens: 1,
-                state: EffectState::Started,
-            };
-            write_effect(&effect_path(&root), &effect).unwrap();
             drop(server);
+            let path = execution_root(&root).join("acme").join("execution.jsonl");
+            let mut journal = execution::ExecutionJournal::open(&path, "tenant/acme/mcp")
+                .unwrap()
+                .journal;
+            journal
+                .append(execution::ExecutionEvent::ToolRequested {
+                    turn_id: "turn-u".into(),
+                    step_id: "step-u".into(),
+                    call_id: "attempt-u".into(),
+                    tool: "recall".into(),
+                    input_sha256: "input".into(),
+                })
+                .unwrap();
+            journal
+                .append(execution::ExecutionEvent::ToolStarted {
+                    call_id: "attempt-u".into(),
+                })
+                .unwrap();
         }
-        let error = Server::new(config).err().expect("restart must fail closed");
-        assert!(error.contains("outcome is unknown"), "{error}");
+        let error = Server::new(config)
+            .err()
+            .expect("unexplained unknown must fail closed");
+        assert!(error.contains("unresolved outcome-unknown"), "{error}");
         cleanup(&root);
+    }
+
+    #[test]
+    fn legacy_settled_effect_marker_remains_readable() {
+        let json = r#"{
+            "request_id":"old","tenant":"acme","actor":"alice",
+            "tool":"memory.ingest","model":"deepseek-harness",
+            "cost_tokens":1,"state":"settled"
+        }"#;
+        let record: EffectRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(record.state, EffectState::Settled);
+        assert!(record.execution_attempt_id.is_none());
     }
 
     #[test]

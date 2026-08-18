@@ -1,0 +1,17 @@
+[package]
+name = "ccos-enterprise-decision-store"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Durable deterministic journal for CCOS Enterprise Decision Intelligence."
+
+[dependencies]
+ccos-enterprise-decision = { path = "../ccos-enterprise-decision" }
+ccos-enterprise-knowledge = { path = "../ccos-enterprise-knowledge" }
+serde_json.workspace = true
+
+[dev-dependencies]
+ccos-enterprise-auth = { path = "../ccos-enterprise-auth" }
+ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }

@@ -1,22 +1,21 @@
 //! The governed front door.
 //!
-//! [`GovernedMcp`] is the only way a client is meant to reach Core or an
-//! explicitly enabled Enterprise-local capability in an Enterprise deployment.
-//! It does three things and refuses to do a fourth:
+//! [`GovernedMcp`] is the only way a client is meant to reach Core in an
+//! Enterprise deployment. It does three things and refuses to do a fourth:
 //!
 //! 1. advertises **Enterprise** capability names, never Core's bare ones, so a
 //!    client cannot learn a name that bypasses the table;
 //! 2. runs every call through [`Deployment::admit`] — identity, credential
 //!    binding, tenant ownership, boundary, authorization, model governance,
 //!    Q-Page activation, replay and budget, in that order;
-//! 3. dispatches only on [`Outcome::Forwarded`], under the verified tenant and,
-//!    for Enterprise-local capabilities, with the verified actor.
+//! 3. dispatches to the backend **only** on [`Outcome::Forwarded`], under the
+//!    Core name and the verified tenant.
 //!
-//! The fourth thing — deciding policy itself — is what it must not do. Every
+//! The fourth thing — deciding anything itself — is what it must not do. Every
 //! refusal here is the runtime's, so there is exactly one admission policy in
 //! the product and this crate cannot drift from it.
 //!
-//! ## Why the backends are traits
+//! ## Why the backend is a trait
 //!
 //! A governed deployment needs one Core session **per tenant**: two tenants
 //! sharing a session share a memory graph, and tenant isolation is the
@@ -26,20 +25,17 @@
 //! it receives the verified tenant id on every dispatch precisely so the
 //! implementation cannot forget to scope by it.
 //!
-//! Enterprise-local Decision Intelligence is separate from Core's catalogue.
-//! [`DecisionBackend`] receives both the verified tenant and the verified
-//! [`ccos_enterprise_auth::AuthenticatedActor`], so authority fields cannot be
-//! reconstructed from caller JSON.
+//! What ships today is the protocol layer and the admission wiring, tested
+//! against a recording backend that proves nothing reaches Core unadmitted.
+//! What does not ship is a Core-session-per-tenant manager. That is stated
+//! rather than implied: a `Backend` that ignores its tenant argument is
+//! unsound, and no type here can stop it.
 
-use ccos_enterprise_decision_service::DECISION_TOOLS;
 use ccos_enterprise_runtime::{Call, Deployment, Outcome, Refusal};
 
-use crate::decision::{
-    govern_decision_catalogue, is_decision_tool, DecisionBackend, NoDecisionBackend,
-};
 use crate::{governed_names, to_core, Disposition, CATALOGUE};
 
-/// Where an admitted Core call actually runs.
+/// Where an admitted call actually runs.
 ///
 /// Implementations **must** scope every effect by `tenant`. The front door
 /// verifies which tenant a caller may name; it cannot verify what a backend
@@ -64,21 +60,22 @@ pub struct AdvertisedTool {
 /// What the front door answered.
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpOutcome {
-    /// Admitted and executed. Carries the selected backend's result.
+    /// Admitted and executed. Carries the backend's result.
     Ok(serde_json::Value),
-    /// Admitted, executed, and the selected backend failed. The distinction
-    /// matters: a governance refusal and a backend fault are different
-    /// incidents, and collapsing them hides one behind the other.
+    /// Admitted, executed, and the backend failed. The distinction matters: a
+    /// governance refusal and a backend fault are different incidents, and
+    /// collapsing them hides one behind the other.
     BackendError(String),
-    /// The request_id was already forwarded earlier. No backend is called
-    /// again; callers can correlate this acknowledgement to the original
-    /// request without duplicating its effect.
+    /// The request_id was already forwarded earlier. The backend is deliberately
+    /// not called again; callers can correlate this acknowledgement to the
+    /// original request without duplicating its effect.
     Replayed,
-    /// Refused by the admission path. Never reached a backend.
+    /// Refused by the admission path. Never reached the backend.
     Refused(Refusal),
-    /// The call was admitted but no enabled local/Core executor owns the tool.
-    /// This remains separate from `Refused`: the latter is a governance
-    /// decision, this is a front-door catalogue mismatch.
+    /// The client named a capability this deployment does not advertise. Kept
+    /// separate from `Refused` because it is a catalogue error, not a
+    /// governance decision — and because answering "unknown tool" for a tool
+    /// the caller merely lacks permission for would leak the permission model.
     UnknownTool,
 }
 
@@ -89,43 +86,19 @@ impl McpOutcome {
 }
 
 /// The governed MCP front door.
-///
-/// `D = NoDecisionBackend` preserves the historical Core-only surface.
-/// Decision capabilities become governed and advertised only through
-/// [`GovernedMcp::with_decisions`].
-pub struct GovernedMcp<B: Backend, D: DecisionBackend = NoDecisionBackend> {
+pub struct GovernedMcp<B: Backend> {
     deployment: Deployment,
     backend: B,
-    decision_backend: D,
 }
 
-impl<B: Backend> GovernedMcp<B, NoDecisionBackend> {
-    /// Existing Core-only front door. Decision tools remain absent.
+impl<B: Backend> GovernedMcp<B> {
     pub fn new(deployment: Deployment, backend: B) -> Self {
         Self {
             deployment,
             backend,
-            decision_backend: NoDecisionBackend,
         }
     }
 
-    /// Build a front door with the exact Enterprise-local Decision Intelligence
-    /// catalogue enabled and governed by its declared permissions.
-    pub fn with_decisions<D: DecisionBackend>(
-        mut deployment: Deployment,
-        backend: B,
-        decision_backend: D,
-    ) -> GovernedMcp<B, D> {
-        govern_decision_catalogue(&mut deployment);
-        GovernedMcp {
-            deployment,
-            backend,
-            decision_backend,
-        }
-    }
-}
-
-impl<B: Backend, D: DecisionBackend> GovernedMcp<B, D> {
     /// The deployment underneath, for provisioning and for reading the trail.
     pub fn deployment(&self) -> &Deployment {
         &self.deployment
@@ -139,26 +112,18 @@ impl<B: Backend, D: DecisionBackend> GovernedMcp<B, D> {
         &self.backend
     }
 
-    /// The Core backend, mutably — for lifecycle calls a deployment owns, such
-    /// as checkpointing sessions on a clean shutdown. Not a governance
-    /// surface: nothing reached through `call` goes past `admit`.
+    /// The backend, mutably — for lifecycle calls a deployment owns, such as
+    /// checkpointing sessions on a clean shutdown. Not a governance surface:
+    /// nothing reached through here goes past `admit`.
     pub fn backend_mut(&mut self) -> &mut B {
         &mut self.backend
     }
 
-    pub fn decision_backend(&self) -> &D {
-        &self.decision_backend
-    }
-
-    pub fn decision_backend_mut(&mut self) -> &mut D {
-        &mut self.decision_backend
-    }
-
     /// The `tools/list` answer: Enterprise names only.
     ///
-    /// Core names remain translated by [`crate::CATALOGUE`]. The local
-    /// Decision Intelligence catalogue is appended only when a decision
-    /// backend is enabled; there is no open `decision.*` wildcard.
+    /// Note what is absent — Core's bare names, and the one excluded tool. A
+    /// client of this deployment has no way to learn that `octa_feedback`
+    /// exists, let alone name it.
     pub fn list_tools(&self) -> Vec<AdvertisedTool> {
         let mut tools: Vec<AdvertisedTool> = CATALOGUE
             .iter()
@@ -173,60 +138,58 @@ impl<B: Backend, D: DecisionBackend> GovernedMcp<B, D> {
                 Disposition::OutsideBoundary { .. } => None,
             })
             .collect();
-        if self.decision_backend.enabled() {
-            tools.extend(DECISION_TOOLS.iter().map(|tool| AdvertisedTool {
-                name: tool.name,
-                permission: tool.permission,
-            }));
-        }
         tools.sort_by_key(|t| t.name);
         tools
     }
 
     /// Run one `tools/call`.
     ///
-    /// The runtime decides admission exactly once. Only the first forwarded
-    /// call may dispatch; [`Outcome::Replayed`] suppresses both Core and local
-    /// Decision Intelligence effects.
+    /// `request.tool` is an **Enterprise** name. It is translated only after
+    /// the call is admitted, so a caller cannot reach a Core tool by naming it
+    /// directly: `recall` is not in the catalogue, `memory.recall` is.
+    ///
+    /// The call is the runtime's own [`Call`], not a re-exploded copy of its
+    /// fields: one shape for "a call" across the product, and a front door
+    /// that cannot silently drop something the admission path reads. That
+    /// includes `justification` — none of Core's 16 tools is administrative
+    /// today, but a front door unable to carry a reason would make layer 6
+    /// unreachable through the only surface clients use.
     pub fn call(&mut self, call: Call<'_>, arguments: &serde_json::Value) -> McpOutcome {
         let tool = call.request.tool.clone();
         let tenant = call.request.tenant.clone();
-        // `AuthenticatedActor` is produced by a verifier and is intentionally
-        // cloned before `admit` consumes the Call wrapper. The decision backend
-        // never receives an actor string parsed from client arguments.
-        let actor = call.actor.clone();
-
+        // The catalogue check is deliberately *after* nothing and *before*
+        // admission only in the sense that an unknown name has no Core tool to
+        // run. It does not short-circuit governance: an unknown name is still
+        // journaled, because "who asked for what" is the question an audit
+        // trail exists to answer, and a probe for capabilities that do not
+        // exist is exactly the traffic worth keeping.
         match self.deployment.admit(call) {
             Outcome::Refused(r) => return McpOutcome::Refused(r),
             Outcome::Replayed => return McpOutcome::Replayed,
             Outcome::Forwarded => {}
         }
 
-        if let Some(core_tool) = to_core(&tool) {
-            return match self.backend.dispatch(&tenant, core_tool, arguments) {
-                Ok(value) => McpOutcome::Ok(value),
-                Err(error) => McpOutcome::BackendError(error),
-            };
-        }
+        let Some(core_tool) = to_core(&tool) else {
+            // Admitted by governance, but not in the table. Reachable only if
+            // a deployment governs a tool this crate does not translate, which
+            // `the_governance_map_covers_every_advertised_capability` and the
+            // Core contract test both work to prevent.
+            return McpOutcome::UnknownTool;
+        };
 
-        if self.decision_backend.enabled() && is_decision_tool(&tool) {
-            return match self
-                .decision_backend
-                .dispatch_decision(&tenant, &actor, &tool, arguments)
-            {
-                Ok(value) => McpOutcome::Ok(value),
-                Err(error) => McpOutcome::BackendError(error),
-            };
+        match self.backend.dispatch(&tenant, core_tool, arguments) {
+            Ok(value) => McpOutcome::Ok(value),
+            Err(e) => McpOutcome::BackendError(e),
         }
-
-        McpOutcome::UnknownTool
     }
 }
 
-/// Provision a deployment so it governs exactly Core's translated catalogue.
+/// Provision a deployment so it governs exactly this crate's catalogue.
 ///
-/// Enterprise-local decision tools are deliberately absent here; they are
-/// added only by [`GovernedMcp::with_decisions`].
+/// Every advertised capability gets its declared permission, so none can fall
+/// through to `ToolNotGoverned` by omission — the failure mode where a tool is
+/// advertised, admitted by the boundary, and then refused for a reason that
+/// reads to the client as a bug.
 pub fn govern_catalogue(deployment: &mut Deployment) {
     for (tool, permission) in crate::governance_map() {
         deployment.govern_tool(tool, permission);

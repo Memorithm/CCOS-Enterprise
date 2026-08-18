@@ -2,7 +2,7 @@ name: CI (full)
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/runtime-true-idempotent-replay]
   pull_request:
   schedule:
     - cron: "0 5 * * *"
@@ -81,6 +81,162 @@ jobs:
         run: cargo test -p ccos-enterprise-conformance --test isolation --release
       - name: adversarial (escalation, quota abuse, forged restore, admin trail)
         run: cargo test -p ccos-enterprise-conformance --test adversarial --release
+
+  endurance_patch:
+    name: align endurance accounting with replay
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/runtime-true-idempotent-replay
+          fetch-depth: 0
+      - name: Patch explicit replay accounting
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/ccos-enterprise-conformance/tests/stress_endurance.rs')
+          s = p.read_text()
+          def rep(old, new):
+              global s
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'expected one match, found {n}: {old[:100]!r}')
+              s = s.replace(old, new, 1)
+
+          rep('''    match o {
+                  Outcome::Forwarded => fnv_field(state, b"forwarded"),
+                  Outcome::Refused(r) => {
+          ''', '''    match o {
+                  Outcome::Forwarded => fnv_field(state, b"forwarded"),
+                  Outcome::Replayed => fnv_field(state, b"replayed"),
+                  Outcome::Refused(r) => {
+          ''')
+
+          rep('''    match o {
+                  Outcome::Forwarded => "forwarded",
+                  Outcome::Refused(r) => tag_of(r),
+              }
+          ''', '''    match o {
+                  Outcome::Forwarded => "forwarded",
+                  Outcome::Replayed => "replayed",
+                  Outcome::Refused(r) => tag_of(r),
+              }
+          ''')
+
+          rep('''    forwarded: u64,
+              refused: u64,
+          ''', '''    forwarded: u64,
+              replayed: u64,
+              refused: u64,
+          ''')
+          rep('''            forwarded: 0,
+                      refused: 0,
+          ''', '''            forwarded: 0,
+                      replayed: 0,
+                      refused: 0,
+          ''')
+          rep('''            Outcome::Forwarded => {
+                          self.forwarded += 1;
+                          assert!(step.tenant < TENANTS, "an unknown tenant cannot be charged");
+                          self.spent[step.tenant] += u128::from(step.cost);
+                      }
+                      Outcome::Refused(r) => {
+          ''', '''            Outcome::Forwarded => {
+                          self.forwarded += 1;
+                          assert!(step.tenant < TENANTS, "an unknown tenant cannot be charged");
+                          self.spent[step.tenant] += u128::from(step.cost);
+                      }
+                      Outcome::Replayed => {
+                          self.replayed += 1;
+                      }
+                      Outcome::Refused(r) => {
+          ''')
+
+          rep('''    let forwarded = metric(&m, "gateway.forwarded");
+              let refused = metric(&m, "gateway.refused");
+              assert_eq!(
+                  requests,
+                  forwarded + refused,
+                  "call {at}: requests != forwarded + refused"
+              );
+          ''', '''    let forwarded = metric(&m, "gateway.forwarded");
+              let replayed = metric(&m, "gateway.replayed");
+              let refused = metric(&m, "gateway.refused");
+              assert_eq!(
+                  requests,
+                  forwarded + replayed + refused,
+                  "call {at}: requests != forwarded + replayed + refused"
+              );
+          ''')
+          rep('''    assert_eq!(
+                  refused, l.refused,
+                  "call {at}: refused counter != journal's refused count"
+              );
+          ''', '''    assert_eq!(
+                  replayed, l.replayed,
+                  "call {at}: replayed counter != journal's replay count"
+              );
+              assert_eq!(
+                  refused, l.refused,
+                  "call {at}: refused counter != journal's refused count"
+              );
+          ''')
+          rep('''    assert_eq!(
+                  metric(&m, "gateway.replayed"),
+                  0,
+                  "call {at}: a replay was suppressed, but every request id in this \\
+                   workload is distinct — an unbilled forward would silently hollow out \\
+                   every billing assertion in this file"
+              );
+          ''', '''    assert_eq!(
+                  replayed,
+                  0,
+                  "call {at}: a replay was suppressed, but every request id in this \\
+                   workload is distinct — a duplicate id would invalidate the workload"
+              );
+          ''')
+
+          rep('''    let mut journal_forwarded = 0u64;
+              let mut journal_tags: BTreeMap<&'static str, u64> = BTreeMap::new();
+          ''', '''    let mut journal_forwarded = 0u64;
+              let mut journal_replayed = 0u64;
+              let mut journal_tags: BTreeMap<&'static str, u64> = BTreeMap::new();
+          ''')
+          rep('''        match &r.outcome {
+                      Outcome::Forwarded => journal_forwarded += 1,
+                      Outcome::Refused(x) => *journal_tags.entry(tag_of(x)).or_insert(0) += 1,
+                  }
+          ''', '''        match &r.outcome {
+                      Outcome::Forwarded => journal_forwarded += 1,
+                      Outcome::Replayed => journal_replayed += 1,
+                      Outcome::Refused(x) => *journal_tags.entry(tag_of(x)).or_insert(0) += 1,
+                  }
+          ''')
+          rep('''        journal_forwarded + journal_tags.values().sum::<u64>(),
+                  DEFAULT_AUDIT_CAPACITY as u64
+          ''', '''        journal_forwarded + journal_replayed + journal_tags.values().sum::<u64>(),
+                  DEFAULT_AUDIT_CAPACITY as u64
+          ''')
+          rep('''    let fleet_spend: u128 = ledger.spent.iter().sum();
+          ''', '''    assert_eq!(
+                  journal_replayed, 0,
+                  "the retained endurance window contains a replay despite globally unique ids"
+              );
+              let fleet_spend: u128 = ledger.spent.iter().sum();
+          ''')
+
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          cargo test -p ccos-enterprise-conformance --test stress_endurance --release --no-run
+          git diff --quiet -- tests/ccos-enterprise-conformance/tests/stress_endurance.rs && exit 0
+          git config user.name 'ZEKRITI Tarek'
+          git config user.email 'contact@checkupauto.fr'
+          git add tests/ccos-enterprise-conformance/tests/stress_endurance.rs
+          git commit -m 'test(runtime): account for replay in endurance harness'
+          git push origin HEAD:fix/runtime-true-idempotent-replay
 
   conformance:
     name: Core dependency conformance

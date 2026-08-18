@@ -8,6 +8,7 @@ publish = false
 description = "Deterministic tenant-scoped decision intelligence over the CCOS Enterprise Knowledge Plane."
 
 [dependencies]
+ccos-enterprise-auth = { path = "../ccos-enterprise-auth" }
 ccos-enterprise-knowledge = { path = "../ccos-enterprise-knowledge" }
 ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
 serde.workspace = true

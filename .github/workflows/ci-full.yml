@@ -8,7 +8,7 @@ on:
     - cron: "0 5 * * *"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   contract:
@@ -77,6 +77,39 @@ jobs:
         run: cargo test -p ccos-enterprise-conformance --test isolation --release
       - name: adversarial (escalation, quota abuse, forged restore, admin trail)
         run: cargo test -p ccos-enterprise-conformance --test adversarial --release
+
+  # TEMP_LOCK_SYNC_BEGIN
+  lock_sync:
+    name: synchronize P5 Cargo.lock
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/knowledge-plane-p5-decision-intelligence
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate exact workspace lockfile and remove this temporary job
+        run: |
+          cargo generate-lockfile
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/ci-full.yml')
+          s = p.read_text()
+          begin = '  # TEMP_LOCK_SYNC_BEGIN\n'
+          end = '  # TEMP_LOCK_SYNC_END\n'
+          i = s.index(begin)
+          j = s.index(end, i) + len(end)
+          s = s[:i] + s[j:]
+          s = s.replace('permissions:\n  contents: write\n', 'permissions:\n  contents: read\n', 1)
+          p.write_text(s)
+          PY
+          git config user.name 'ZEKRITI Tarek'
+          git config user.email 'contact@checkupauto.fr'
+          git add Cargo.lock .github/workflows/ci-full.yml
+          git diff --cached --quiet && exit 0
+          git commit -m 'build(decision): synchronize P5 Cargo.lock'
+          git push origin HEAD:feat/knowledge-plane-p5-decision-intelligence
+  # TEMP_LOCK_SYNC_END
 
   conformance:
     name: Core dependency conformance

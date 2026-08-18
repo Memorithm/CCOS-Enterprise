@@ -36,6 +36,7 @@ use ccos_enterprise_runtime::{
 };
 use ccos_enterprise_store::Store;
 use ed25519_dalek::VerifyingKey;
+#[cfg(test)]
 use execution::ToolRecoveryDisposition;
 use execution_backend::{
     failed_output_sha256, successful_output_sha256, DispatchExecution, ExecutionBackend,
@@ -678,7 +679,7 @@ impl Server {
         let loaded = store
             .load()
             .map_err(|error| format!("cannot load Enterprise governance store: {error}"))?;
-        let mut deployment = match loaded {
+        let deployment = match loaded {
             Some(loaded) => {
                 if loaded.torn_tail != 0 {
                     return Err(format!(
@@ -727,10 +728,6 @@ impl Server {
                     ));
                 }
                 EffectState::Succeeded => {
-                    // New-format markers close the interrupted execution event
-                    // before governance settlement. A pre-#44 marker has no
-                    // execution fields; there was no execution journal then,
-                    // so keep the #42 compatibility recovery path.
                     if effect.execution_attempt_id.is_some() {
                         front_door.backend_mut().reconcile_effect(&effect)?;
                     }
@@ -754,8 +751,6 @@ impl Server {
             }
         }
 
-        // Anything still OutcomeUnknown was not explained by the durable
-        // effect witness above. Never guess whether Core ran.
         front_door
             .backend_mut()
             .ensure_no_unknown_outcomes(&config.tenant)?;

@@ -89,6 +89,7 @@ pub enum TailRepair {
 
 pub struct OpenReport {
     pub journal: ExecutionJournal,
+    #[cfg(test)]
     pub tail_repair: TailRepair,
 }
 
@@ -99,6 +100,7 @@ pub enum JournalError {
     InvalidStreamId(String),
     Integrity(String),
     Lifecycle(String),
+    Poisoned(String),
 }
 
 impl std::fmt::Display for JournalError {
@@ -109,6 +111,7 @@ impl std::fmt::Display for JournalError {
             Self::InvalidStreamId(detail) => write!(f, "invalid execution stream id: {detail}"),
             Self::Integrity(detail) => write!(f, "execution journal integrity: {detail}"),
             Self::Lifecycle(detail) => write!(f, "execution lifecycle: {detail}"),
+            Self::Poisoned(detail) => write!(f, "execution journal poisoned: {detail}"),
         }
     }
 }
@@ -129,6 +132,7 @@ pub struct ExecutionJournal {
     path: PathBuf,
     stream_id: String,
     records: Vec<ExecutionRecord>,
+    poisoned: bool,
 }
 
 impl ExecutionJournal {
@@ -186,17 +190,45 @@ impl ExecutionJournal {
             }
             cursor = bytes.len();
         }
-        Ok(OpenReport {
-            journal: Self {
-                path,
-                stream_id,
-                records,
-            },
-            tail_repair,
-        })
+        let journal = ExecutionJournal {
+            path,
+            stream_id,
+            records,
+            poisoned: false,
+        };
+        #[cfg(test)]
+        {
+            Ok(OpenReport {
+                journal,
+                tail_repair,
+            })
+        }
+        #[cfg(not(test))]
+        {
+            let _ = tail_repair;
+            Ok(OpenReport { journal })
+        }
     }
 
     pub fn append(&mut self, event: ExecutionEvent) -> Result<&ExecutionRecord, JournalError> {
+        self.append_with_writer(event, |file, encoded| file.write_all(encoded))
+    }
+
+    fn append_with_writer<F>(
+        &mut self,
+        event: ExecutionEvent,
+        writer: F,
+    ) -> Result<&ExecutionRecord, JournalError>
+    where
+        F: FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    {
+        if self.poisoned {
+            return Err(JournalError::Poisoned(
+                "append refused after a previous durable write error; reopen the journal to repair the tail"
+                    .into(),
+            ));
+        }
+
         let sequence = self.records.len() as u64;
         let previous_hash = self
             .records
@@ -214,37 +246,33 @@ impl ExecutionJournal {
         };
         let mut encoded = serde_json::to_vec(&record)?;
         encoded.push(b'\n');
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        file.write_all(&encoded)?;
-        file.sync_data()?;
+
+        let persist_result = (|| -> std::io::Result<()> {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            writer(&mut file, &encoded)?;
+            file.sync_data()
+        })();
+        if let Err(error) = persist_result {
+            self.poisoned = true;
+            return Err(JournalError::Io(error));
+        }
+
         self.records.push(record);
         Ok(self.records.last().expect("record was just pushed"))
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-    pub fn stream_id(&self) -> &str {
-        &self.stream_id
-    }
-    pub fn records(&self) -> &[ExecutionRecord] {
-        &self.records
-    }
     pub fn len(&self) -> usize {
         self.records.len()
     }
-    pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+
+    #[cfg(test)]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
     }
-    pub fn head_hash(&self) -> &str {
-        self.records
-            .last()
-            .map(|record| record.hash.as_str())
-            .unwrap_or(GENESIS_HASH)
-    }
+
     pub fn recover_tools(&self) -> Result<Vec<ToolRecovery>, JournalError> {
         recover_tools(&self.records)
     }
@@ -463,6 +491,56 @@ mod tests {
             journal.recover_tools().unwrap()[0].disposition,
             ToolRecoveryDisposition::Completed { success: true, .. }
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn append_error_poisons_instance_until_reopen_repairs_tail() {
+        let root = std::env::temp_dir().join(format!(
+            "ccos-mcp-execution-poison-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("execution.jsonl");
+        let mut journal = ExecutionJournal::open(&path, "tenant/acme/mcp")
+            .unwrap()
+            .journal;
+
+        let error = journal
+            .append_with_writer(
+                ExecutionEvent::TurnStarted {
+                    turn_id: "turn-partial".into(),
+                },
+                |file, encoded| {
+                    let partial = (encoded.len() / 2).max(1);
+                    file.write_all(&encoded[..partial])?;
+                    file.sync_data()?;
+                    Err(std::io::Error::other("simulated append failure"))
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, JournalError::Io(_)));
+        assert!(journal.is_poisoned());
+
+        let refused = journal.append(ExecutionEvent::TurnStarted {
+            turn_id: "must-not-append".into(),
+        });
+        assert!(matches!(refused, Err(JournalError::Poisoned(_))));
+        drop(journal);
+
+        let report = ExecutionJournal::open(&path, "tenant/acme/mcp").unwrap();
+        assert!(matches!(
+            report.tail_repair,
+            TailRepair::DiscardedPartialTail { bytes } if bytes > 0
+        ));
+        let mut repaired = report.journal;
+        assert!(!repaired.is_poisoned());
+        repaired
+            .append(ExecutionEvent::TurnStarted {
+                turn_id: "after-repair".into(),
+            })
+            .unwrap();
+        assert_eq!(repaired.len(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
 }

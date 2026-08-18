@@ -132,12 +132,6 @@ impl<B> ExecutionBackend<B> {
     pub fn inner_mut(&mut self) -> &mut B {
         &mut self.inner
     }
-    pub fn into_inner(self) -> B {
-        self.inner
-    }
-    pub fn live_journal_count(&self) -> usize {
-        self.journals.len()
-    }
 
     pub fn journal_path_for(&self, tenant: &str) -> Result<PathBuf, ExecutionBackendError> {
         validate_tenant(tenant)?;

@@ -2,7 +2,7 @@ name: CI (full)
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/runtime-true-idempotent-replay]
   pull_request:
   schedule:
     - cron: "0 5 * * *"
@@ -11,6 +11,55 @@ permissions:
   contents: read
 
 jobs:
+  admin_replay_fix:
+    name: repair admin replay conformance
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/runtime-true-idempotent-replay'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/runtime-true-idempotent-replay
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Update the one historical administrative replay assertion
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/ccos-enterprise-conformance/tests/stress_admin_fuzz.rs')
+          s = p.read_text()
+          old = '''    // STILL OPEN, and worth keeping separate from the repair above: the
+              // administrative path inherits the *general* replay rule rather than a
+              // stricter one. A replayed administrative `request_id` returns its prior
+              // outcome without re-charging, which is right for billing — but it means a
+              // captured administrative call replays as "forwarded" forever, and nothing
+              // requires a fresh reason for a fresh act.
+          '''
+          new = '''    // The administrative path inherits the same effect-idempotent replay rule
+              // as every other governed call. A captured request_id is acknowledged as a
+              // replay at zero cost, but it is NOT eligible to execute the administrative
+              // effect again. A fresh administrative act therefore needs a fresh request_id.
+          '''
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one historical replay comment, found {s.count(old)}')
+          s = s.replace(old, new, 1)
+          old_assert = '    assert!(again.is_forwarded());\n'
+          new_assert = '    assert!(again.is_replayed());\n'
+          if s.count(old_assert) != 1:
+              raise SystemExit(f'expected one historical replay assertion, found {s.count(old_assert)}')
+          s = s.replace(old_assert, new_assert, 1)
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          cargo test -p ccos-enterprise-conformance --test stress_admin_fuzz the_composed_path_now_demands_and_records_a_justification --release -- --exact
+          git config user.name 'MEMOPERF'
+          git config user.email 'contact@checkupauto.fr'
+          git add tests/ccos-enterprise-conformance/tests/stress_admin_fuzz.rs
+          git diff --cached --quiet && exit 0
+          git commit -m 'test(runtime): expect non-executing admin replay'
+          git push origin HEAD:fix/runtime-true-idempotent-replay
+
   contract:
     name: boundary + contract tests
     runs-on: ubuntu-24.04

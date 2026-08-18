@@ -7,6 +7,9 @@ license.workspace = true
 publish = false
 description = "One CCOS Core session per tenant: the backend the governed MCP front door dispatches into, with the isolation the front door can verify but not enforce."
 
+[lib]
+path = "src/crate_root.rs"
+
 [dependencies]
 ccos-enterprise-mcp = { path = "../ccos-enterprise-mcp" }
 ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }

@@ -1,19 +1,31 @@
+import { readFileSync } from 'node:fs'
+
 import { clampRecallTimeout } from './bridge.js'
 import { textFromMcpToolResult } from './mcp-stdio.js'
 
-export const GOVERNED_READ_TOOLS = Object.freeze([
-  Object.freeze({ enterprise: 'memory.recall', dsh: 'ccos_recall' }),
-  Object.freeze({ enterprise: 'memory.recall_what_if', dsh: 'ccos_recall_what_if' }),
-  Object.freeze({ enterprise: 'memory.get', dsh: 'ccos_get' }),
-  Object.freeze({ enterprise: 'memory.stats', dsh: 'ccos_stats' }),
-  Object.freeze({ enterprise: 'memory.timeline', dsh: 'ccos_timeline' }),
-  Object.freeze({ enterprise: 'memory.verify', dsh: 'ccos_verify' }),
-  Object.freeze({ enterprise: 'context.retrieve', dsh: 'ccos_context_retrieve' }),
-  Object.freeze({ enterprise: 'ccos.causal_blame', dsh: 'ccos_causal_blame' }),
-  Object.freeze({ enterprise: 'ccos.causal_flash', dsh: 'ccos_causal_flash' }),
-  Object.freeze({ enterprise: 'ccos.drift_cause', dsh: 'ccos_drift_cause' }),
-  Object.freeze({ enterprise: 'ccos.retrodict_belief', dsh: 'ccos_retrodict_belief' }),
-])
+function loadGovernedReadTools() {
+  const raw = JSON.parse(readFileSync(new URL('./governed-read-tools.json', import.meta.url), 'utf8'))
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error('CCOS governed read-tool manifest is empty or invalid')
+  }
+  const enterpriseNames = new Set()
+  const dshNames = new Set()
+  return Object.freeze(raw.map((entry, index) => {
+    const enterprise = typeof entry?.enterprise === 'string' ? entry.enterprise.trim() : ''
+    const dsh = typeof entry?.dsh === 'string' ? entry.dsh.trim() : ''
+    if (!enterprise || !dsh || !/^ccos_[A-Za-z0-9_]+$/.test(dsh)) {
+      throw new Error(`CCOS governed read-tool manifest row ${index} is invalid`)
+    }
+    if (enterpriseNames.has(enterprise) || dshNames.has(dsh)) {
+      throw new Error(`CCOS governed read-tool manifest contains a duplicate at row ${index}`)
+    }
+    enterpriseNames.add(enterprise)
+    dshNames.add(dsh)
+    return Object.freeze({ enterprise, dsh })
+  }))
+}
+
+export const GOVERNED_READ_TOOLS = loadGovernedReadTools()
 
 const OUTPUT_SCHEMA = Object.freeze({ type: 'object' })
 const MAX_TOOL_TIMEOUT_MS = 300_000

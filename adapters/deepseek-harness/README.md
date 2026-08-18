@@ -57,8 +57,14 @@ When `toolsEnabled` is true, the adapter asks the Enterprise server for its live
 | `ccos_drift_cause` | `ccos.drift_cause` |
 | `ccos_retrodict_belief` | `ccos.retrodict_belief` |
 
-Input schemas and descriptions come from the live governed catalogue, so a Core
-schema change cannot silently drift from the adapter copy. Missing expected
+`governed-read-tools.json` is the single allowlist source consumed by the JS
+adapter. A Rust conformance test reads the same manifest and proves that every
+listed Enterprise capability still maps to a Core tool requiring exactly
+`memory.read`. If a future catalogue change turns one of these names into a
+write, CI fails instead of silently widening the model-visible surface.
+
+Descriptions and input schemas still come from the live governed catalogue, so
+a Core schema change cannot drift from a copied adapter schema. Missing expected
 capabilities roll back the partial DSH tool generation.
 
 No `memory.ingest`, `memory.page_fault`, `memory.sync`, causal mutation,
@@ -84,6 +90,7 @@ agent/pre-step
   -> append untrusted context
 
 native ccos_* call
+  -> shared read-only manifest
   -> live Enterprise schema
   -> DSH turn/step/tool_call correlation
   -> governed read capability

@@ -1,0 +1,32 @@
+name: P5b1 bootstrap
+
+on:
+  push:
+    branches: [feat/knowledge-plane-p5b1-decision-store]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/knowledge-plane-p5b1-decision-store
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format, refresh workspace lock, and test P5b1
+        run: |
+          cargo fmt --all
+          cargo test -p ccos-enterprise-decision-store --release
+          cargo test -p ccos-knowledge-conformance --test p5b_decision_store --release
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+          git config user.name 'MEMOPERF'
+          git config user.email 'contact@checkupauto.fr'
+          git add Cargo.lock crates/ccos-enterprise-decision-store tests/ccos-knowledge-conformance/tests/p5b_decision_store.rs
+          git diff --cached --quiet && exit 0
+          git commit -m 'test(decision): validate durable decision store'
+          git push origin HEAD:feat/knowledge-plane-p5b1-decision-store

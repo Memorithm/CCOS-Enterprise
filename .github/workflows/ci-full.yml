@@ -2,7 +2,7 @@ name: CI (full)
 
 on:
   push:
-    branches: [main, feat/knowledge-plane-p4d-semantic-interop-rebased]
+    branches: [main]
   pull_request:
   schedule:
     - cron: "0 5 * * *"
@@ -81,27 +81,6 @@ jobs:
         run: cargo test -p ccos-enterprise-conformance --test isolation --release
       - name: adversarial (escalation, quota abuse, forged restore, admin trail)
         run: cargo test -p ccos-enterprise-conformance --test adversarial --release
-
-  lock_sync:
-    name: synchronize P4d Cargo.lock
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: feat/knowledge-plane-p4d-semantic-interop-rebased
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Generate and commit exact workspace lockfile
-        run: |
-          cargo generate-lockfile
-          git diff --quiet -- Cargo.lock && exit 0
-          git config user.name 'ZEKRITI Tarek'
-          git config user.email 'contact@checkupauto.fr'
-          git add Cargo.lock
-          git commit -m 'build(semantic): synchronize P4d Cargo.lock'
-          git push origin HEAD:feat/knowledge-plane-p4d-semantic-interop-rebased
 
   conformance:
     name: Core dependency conformance

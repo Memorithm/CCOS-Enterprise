@@ -5,12 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "The governed MCP front door: Core's bare tool catalogue, translated into Enterprise capability classes and served only through the composed admission path."
+description = "The governed MCP front door for Core and explicitly enabled Enterprise-local capabilities."
 
 [dependencies]
 ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }
 ccos-enterprise-gateway = { path = "../ccos-enterprise-gateway" }
 ccos-enterprise-auth = { path = "../ccos-enterprise-auth" }
+ccos-enterprise-decision-service = { path = "../ccos-enterprise-decision-service" }
 ccos-enterprise-qpages = { path = "../ccos-enterprise-qpages" }
 serde.workspace = true
 serde_json.workspace = true

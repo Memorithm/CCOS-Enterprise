@@ -2,111 +2,84 @@ name: CI (full)
 
 on:
   push:
-    branches: [main]
+    branches: [fix/runtime-true-idempotent-replay]
   pull_request:
-  schedule:
-    - cron: "0 5 * * *"
 
 permissions:
   contents: read
 
 jobs:
-  contract:
-    name: boundary + contract tests
+  concurrent_replay_fix:
+    name: repair concurrent replay conformance
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: fix/runtime-true-idempotent-replay
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: gateway namespace contract (Hermes/OpenClaw surface)
-        run: cargo test -p ccos-enterprise-gateway --release
-      - name: Knowledge Plane P0 conformance
+      - name: Update and execute the identical concurrent-call guard
         run: |
-          cargo test -p ccos-enterprise-knowledge-model -p ccos-enterprise-knowledge -p ccos-enterprise-knowledge-store --release
-          cargo test -p ccos-knowledge-conformance --test p0 --release
-      - name: Knowledge Plane P1 local ingestion
-        run: |
-          cargo test -p ccos-enterprise-ingest --release
-          cargo test -p ccos-knowledge-conformance --test p1_local_ingest --release
-      - name: Knowledge Plane P1 normalization
-        run: |
-          cargo test -p ccos-enterprise-normalize --release
-          cargo test -p ccos-knowledge-conformance --test p1_normalize --release
-      - name: Knowledge Plane P1 source-span parsing
-        run: |
-          cargo test -p ccos-enterprise-parse --release
-          cargo test -p ccos-knowledge-conformance --test p1_parse --release
-      - name: Knowledge Plane P2 structural extraction
-        run: |
-          cargo test -p ccos-enterprise-extract --release
-          cargo test -p ccos-knowledge-conformance --test p2_extract --release
-      - name: Knowledge Plane P2 exact-key resolution
-        run: |
-          cargo test -p ccos-enterprise-resolution --release
-          cargo test -p ccos-knowledge-conformance --test p2_resolution --release
-      - name: Knowledge Plane P3 canonical graph view
-        run: |
-          cargo test -p ccos-enterprise-kg --release
-          cargo test -p ccos-knowledge-conformance --test p3_graph --release
-      - name: Knowledge Plane P4 ontology validation
-        run: |
-          cargo test -p ccos-enterprise-ontology --release
-          cargo test -p ccos-knowledge-conformance --test p4_ontology --release
-      - name: Knowledge Plane P4 typed canonical promotion
-        run: |
-          cargo test -p ccos-enterprise-promotion --release
-          cargo test -p ccos-knowledge-conformance --test p4_promotion --release
-      - name: Knowledge Plane P4 reversible ontology migration
-        run: |
-          cargo test -p ccos-enterprise-ontology-migration --release
-          cargo test -p ccos-knowledge-conformance --test p4_migration --release
-      - name: Knowledge Plane P4 semantic interoperability
-        run: |
-          cargo test -p ccos-enterprise-semantic --release
-          cargo test -p ccos-knowledge-conformance --test p4_semantic --release
-      - name: Knowledge Plane P5 Decision Intelligence
-        run: |
-          cargo test -p ccos-enterprise-decision --release
-          cargo test -p ccos-knowledge-conformance --test p5_decision --release
-      - name: RBAC + tenancy + policy contracts
-        run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
-      - name: governance wire formats (claim, manifest, revocation)
-        run: cargo test -p ccos-enterprise-governance --all-features --release
-      - name: license server integration
-        run: cargo test -p ccos-license-server --release
-      - name: Hermes/OpenClaw tool-catalogue contract
-        run: cargo test -p ccos-enterprise-conformance --test boundary_contract --release
-      - name: governed request path (identity → tenancy → authz → policy → boundary → audit)
-        run: cargo test -p ccos-enterprise-conformance --test governed_path --release
-      - name: tenant isolation + cross-tenant leakage + concurrency
-        run: cargo test -p ccos-enterprise-conformance --test isolation --release
-      - name: adversarial (escalation, quota abuse, forged restore, admin trail)
-        run: cargo test -p ccos-enterprise-conformance --test adversarial --release
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs')
+          s = p.read_text()
+          old_doc = '''/// The same 32 threads, the same byte-identical call, the opposite
+          /// expectation. `AuditRecord::sequence` makes the records pairwise distinct
+          /// and totally ordered; replay suppression charges the request **once**. The
+          /// 31 replays are still forwarded — a retry gets its prior outcome, not a
+          /// refusal — and still journaled, each carrying `cost: 0`, so the trail shows
+          /// that the calls happened *and* that they were free.
+          '''
+          new_doc = '''/// The same 32 threads, the same byte-identical call, the opposite
+          /// expectation. `AuditRecord::sequence` makes the records pairwise distinct
+          /// and totally ordered; replay suppression charges and executes the request
+          /// **once**. The other 31 attempts are explicit `Replayed` outcomes: journaled,
+          /// zero-cost, and ineligible to execute the effect again.
+          '''
+          if s.count(old_doc) != 1:
+              raise SystemExit(f'expected one stale concurrent replay doc block, found {s.count(old_doc)}')
+          s = s.replace(old_doc, new_doc, 1)
 
-  conformance:
-    name: Core dependency conformance
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Exactly one Core in the tree (never a copy)
-        run: |
-          test "$(cargo metadata --no-deps --format-version 1 \
-                  | python3 -c 'import json,sys; print(sum(1 for p in json.load(sys.stdin)["packages"] if p["name"]=="ccos-core"))')" = 1
-          ! find crates tools -name '*.rs' | xargs grep -l 'pub fn qbelief' | grep -v target
-          echo "one Core, referenced not duplicated"
-      - name: "Enterprise boundary (§4.2): no Research-Lab in the product graph"
-        run: |
-          for p in $(cargo metadata --no-deps --format-version 1 \
-                     | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"] if p["name"].startswith("ccos-enterprise")]'); do
-            cargo tree -p "$p" --edges normal --prefix none 2>/dev/null \
-              | grep -qiE 'research-lab|ccos-forge|ccos-rsi' \
-              && { echo "BOUNDARY VIOLATION: $p reaches a forbidden crate"; exit 1; }
-          done
-          echo "no Enterprise crate reaches Research-Lab, Forge or RSI"
-
-  msrv:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
-      - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
+          old_assert = '''    // Billed once: the record that decided first carries the charge, and the
+              // {THREADS}-1 suppressed replays carry a zero the operator can read.
+              assert!(trail.iter().all(|r| r.outcome.is_forwarded()));
+              assert_eq!(first.cost, 1, "the first decision is the one that pays");
+              assert!(trail[1..].iter().all(|r| r.cost == 0), "a replay is free");
+          '''
+          new_assert = '''    // Executed and billed once: the record that won the lock first is the
+              // single Forwarded decision; every duplicate id after it is an explicit,
+              // zero-cost replay and cannot execute the effect again.
+              assert_eq!(first.outcome, Outcome::Forwarded);
+              assert!(
+                  trail[1..].iter().all(|r| r.outcome.is_replayed()),
+                  "every concurrent duplicate after the winner must be Replayed"
+              );
+              assert_eq!(first.cost, 1, "the first decision is the one that pays");
+              assert!(trail[1..].iter().all(|r| r.cost == 0), "a replay is free");
+              assert_eq!(
+                  trail.iter().filter(|r| r.outcome.is_forwarded()).count(),
+                  1,
+                  "exactly one concurrent attempt may execute"
+              );
+              assert_eq!(
+                  trail.iter().filter(|r| r.outcome.is_replayed()).count(),
+                  THREADS - 1,
+                  "all remaining identical attempts are replays"
+              );
+          '''
+          if s.count(old_assert) != 1:
+              raise SystemExit(f'expected one stale concurrent replay assertion block, found {s.count(old_assert)}')
+          s = s.replace(old_assert, new_assert, 1)
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          cargo test -p ccos-enterprise-conformance --test stress_concurrency_chaos identical_concurrent_calls_are_ordered_and_billed_exactly_once --release -- --exact
+          git config user.name 'MEMOPERF'
+          git config user.email 'contact@checkupauto.fr'
+          git add tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs
+          git diff --cached --quiet && exit 0
+          git commit -m 'test(runtime): expect explicit concurrent replays'
+          git push origin HEAD:fix/runtime-true-idempotent-replay

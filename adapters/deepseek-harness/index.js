@@ -68,14 +68,22 @@ export async function apply(ctx, rawConfig = {}) {
 
   const unregister = []
   let toolsReady = false
-  try {
-    if (config.toolsEnabled && connected) {
+  if (config.toolsEnabled && connected) {
+    try {
       unregister.push(await registerGovernedTools(ctx, { client, bridge, config }))
       toolsReady = true
-    } else if (config.toolsEnabled) {
-      ctx.logger?.warn?.('ccos-enterprise-memory: governed tools unavailable because the Enterprise MCP startup connection failed')
+    } catch (error) {
+      ctx.logger?.warn?.(`ccos-enterprise-memory: governed tool discovery failed: ${error?.message || String(error)}`)
+      if (config.failOnStartupError) {
+        await bridge.dispose()
+        throw error
+      }
     }
+  } else if (config.toolsEnabled) {
+    ctx.logger?.warn?.('ccos-enterprise-memory: governed tools unavailable because the Enterprise MCP startup connection failed')
+  }
 
+  try {
     if (ctx.systemPrompt?.section) {
       unregister.push(ctx.systemPrompt.section({
         name: 'tool:ccos-enterprise-memory',
@@ -93,9 +101,7 @@ export async function apply(ctx, rawConfig = {}) {
       try { dispose?.() } catch { /* best-effort rollback */ }
     }
     await bridge.dispose()
-    ctx.logger?.warn?.(`ccos-enterprise-memory: plugin registration failed: ${error?.message || String(error)}`)
-    if (config.failOnStartupError) throw error
-    return async () => undefined
+    throw error
   }
 
   ctx.logger?.info?.(

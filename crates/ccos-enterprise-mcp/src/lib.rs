@@ -10,9 +10,10 @@
 //! only by talking to Core directly — that is, by going *around* every gate
 //! Enterprise exists to impose.
 //!
-//! Core's translation table remains a closed contract. Enterprise-local capabilities
-//! such as Decision Intelligence live in a separate catalogue (`decision`) and never
-//! masquerade as Core tools. Both paths still share the one composed admission policy:
+//! Core's translation table remains a closed contract. Enterprise-local
+//! capabilities such as Decision Intelligence live in a separate catalogue
+//! (`decision`) and never masquerade as Core tools. Both paths still share the
+//! one composed admission policy:
 //! [`ccos_enterprise_runtime::Deployment::admit`].
 //!
 //! ## The table is the contract
@@ -107,6 +108,7 @@ const fn governed(
 /// and canonical under its grammar; `every_governed_name_clears_the_boundary`
 /// proves it rather than assuming it.
 pub const CATALOGUE: &[CoreTool] = &[
+    // ── Memory primitives ────────────────────────────────────────────────
     governed("recall", "memory.recall", "memory.read"),
     governed("recall_what_if", "memory.recall_what_if", "memory.read"),
     governed("get", "memory.get", "memory.read"),
@@ -116,13 +118,18 @@ pub const CATALOGUE: &[CoreTool] = &[
     governed("ingest", "memory.ingest", "memory.write"),
     governed("page_fault", "memory.page_fault", "memory.write"),
     governed("sync", "memory.sync", "memory.write"),
+    // ── Working-set assembly ─────────────────────────────────────────────
     governed("ccos_retrieve", "context.retrieve", "memory.read"),
+    // ── Causal and belief revision ───────────────────────────────────────
     governed("causal_blame", "ccos.causal_blame", "memory.read"),
     governed("causal_flash", "ccos.causal_flash", "memory.read"),
     governed("drift_cause", "ccos.drift_cause", "memory.read"),
     governed("retrodict_belief", "ccos.retrodict_belief", "memory.read"),
+    // `causal_intervene` and `signal_failure` change what later recalls
+    // return, so they are writes however read-only their names sound.
     governed("causal_intervene", "ccos.causal_intervene", "memory.write"),
     governed("signal_failure", "ccos.signal_failure", "memory.write"),
+    // ── Deliberately outside the boundary ────────────────────────────────
     CoreTool {
         core: OCTA_FEEDBACK,
         disposition: Disposition::OutsideBoundary {
@@ -133,6 +140,7 @@ pub const CATALOGUE: &[CoreTool] = &[
     },
 ];
 
+/// The Enterprise capability name for a Core tool, if it has one.
 pub fn to_enterprise(core: &str) -> Option<&'static str> {
     match CATALOGUE.iter().find(|t| t.core == core)?.disposition {
         Disposition::Governed { enterprise, .. } => Some(enterprise),
@@ -140,6 +148,7 @@ pub fn to_enterprise(core: &str) -> Option<&'static str> {
     }
 }
 
+/// The Core tool an Enterprise capability name resolves to.
 pub fn to_core(enterprise: &str) -> Option<&'static str> {
     CATALOGUE
         .iter()
@@ -150,6 +159,7 @@ pub fn to_core(enterprise: &str) -> Option<&'static str> {
         .map(|t| t.core)
 }
 
+/// The permission a Core tool requires once governed.
 pub fn permission_for(core: &str) -> Option<&'static str> {
     match CATALOGUE.iter().find(|t| t.core == core)?.disposition {
         Disposition::Governed { permission, .. } => Some(permission),
@@ -157,6 +167,7 @@ pub fn permission_for(core: &str) -> Option<&'static str> {
     }
 }
 
+/// Why a Core tool is not exposed, if it is not.
 pub fn excluded_because(core: &str) -> Option<&'static str> {
     match CATALOGUE.iter().find(|t| t.core == core)?.disposition {
         Disposition::OutsideBoundary { why } => Some(why),
@@ -164,6 +175,7 @@ pub fn excluded_because(core: &str) -> Option<&'static str> {
     }
 }
 
+/// Every Enterprise capability this front door serves, in wire order.
 pub fn governed_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = CATALOGUE
         .iter()
@@ -176,6 +188,12 @@ pub fn governed_names() -> Vec<&'static str> {
     names
 }
 
+/// The `tool -> permission` map a [`ccos_enterprise_runtime::Deployment`] needs
+/// in order to govern this catalogue.
+///
+/// A deployment built from this is exhaustive by construction: every capability
+/// the front door advertises has a declared permission, so none of them can
+/// fall through to `ToolNotGoverned` by omission.
 pub fn governance_map() -> BTreeMap<&'static str, &'static str> {
     CATALOGUE
         .iter()
@@ -189,6 +207,11 @@ pub fn governance_map() -> BTreeMap<&'static str, &'static str> {
         .collect()
 }
 
+/// Whether the gateway would admit this Enterprise name at all.
+///
+/// The front door never advertises a name the boundary would refuse: a
+/// catalogue entry that cannot be called is worse than an absent one, because
+/// it reads to a client as a permissions problem.
 pub fn clears_the_boundary(enterprise: &str) -> bool {
     let request = ccos_enterprise_gateway::GatewayRequest {
         tenant: "t".into(),
@@ -246,12 +269,27 @@ mod tests {
         }
     }
 
+    /// The trap named in the module docs, pinned. `octa_feedback` is excluded
+    /// by **data**, not by the namespace rules: the gateway forbids the
+    /// `octa.` prefix, and an underscore is not a dot, so every plausible
+    /// spelling of this tool sails through `classify`. If the exclusion is
+    /// ever removed from `CATALOGUE`, nothing else stops it.
     #[test]
     fn the_excluded_tool_is_not_saved_by_the_prefix_rule() {
-        assert!(excluded_because(OCTA_FEEDBACK).is_some());
+        assert!(
+            excluded_because(OCTA_FEEDBACK).is_some(),
+            "the exclusion must be explicit data"
+        );
         assert_eq!(to_enterprise(OCTA_FEEDBACK), None);
+
+        // …and the boundary would NOT have caught it on its own.
         for spelling in ["ccos.octa_feedback", "memory.octa_feedback"] {
-            assert!(clears_the_boundary(spelling));
+            assert!(
+                clears_the_boundary(spelling),
+                "if the gateway now refuses {spelling:?} this test can be \
+                 tightened — but do not delete the catalogue exclusion, which \
+                 is still the only thing that refuses the bare name"
+            );
         }
     }
 
@@ -260,20 +298,31 @@ mod tests {
         let map = governance_map();
         assert_eq!(map.len(), governed_names().len());
         for name in governed_names() {
-            assert!(map.contains_key(name));
+            assert!(
+                map.contains_key(name),
+                "{name} is advertised with no permission, so it would be \
+                 refused as ungoverned"
+            );
         }
+        // Permissions are drawn from a small closed set on purpose: a
+        // permission per tool is a permission nobody administers.
         let perms: BTreeSet<&str> = map.values().copied().collect();
         assert_eq!(
             perms,
             BTreeSet::from(["memory.read", "memory.write"]),
-            "the Core permission vocabulary drifted"
+            "the permission vocabulary drifted"
         );
     }
 
     #[test]
     fn writes_are_classified_as_writes() {
+        // The three that read as queries but change what later recalls return.
         for tool in ["causal_intervene", "signal_failure", "page_fault"] {
-            assert_eq!(permission_for(tool), Some("memory.write"));
+            assert_eq!(
+                permission_for(tool),
+                Some("memory.write"),
+                "{tool} mutates retrieval state and must need a write grant"
+            );
         }
         for tool in ["recall", "get", "stats", "causal_blame"] {
             assert_eq!(permission_for(tool), Some("memory.read"));

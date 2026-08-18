@@ -226,6 +226,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-execution"
+version = "0.1.0-pre"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ccos-enterprise-extract"
 version = "0.1.0-pre"
 dependencies = [
@@ -305,6 +314,7 @@ dependencies = [
  "ccos-core",
  "ccos-enterprise-auth",
  "ccos-enterprise-decision-service",
+ "ccos-enterprise-execution",
  "ccos-enterprise-gateway",
  "ccos-enterprise-qpages",
  "ccos-enterprise-runtime",
@@ -451,6 +461,7 @@ version = "0.1.0-pre"
 dependencies = [
  "ccos-core",
  "ccos-enterprise-auth",
+ "ccos-enterprise-execution",
  "ccos-enterprise-mcp",
  "ccos-enterprise-runtime",
  "serde",

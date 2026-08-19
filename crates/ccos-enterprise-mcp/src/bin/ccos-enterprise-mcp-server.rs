@@ -17,6 +17,8 @@
 mod execution;
 #[path = "../execution_backend.rs"]
 mod execution_backend;
+#[path = "../skill_projection.rs"]
+mod skill_projection;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -34,6 +36,7 @@ use ccos_enterprise_runtime::{
     is_canonical_identifier, AuditRecord, Call, Deployment, DeploymentSnapshot, GovernanceRecord,
     Outcome, TenantState,
 };
+use ccos_enterprise_skills::{parse_capture, SkillConfig, SkillStore};
 use ccos_enterprise_store::Store;
 use ed25519_dalek::VerifyingKey;
 #[cfg(test)]
@@ -43,6 +46,7 @@ use execution_backend::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use skill_projection::{source_sha256, ProjectionState};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const HOST_KIND: &str = "deepseek-harness";
@@ -51,6 +55,7 @@ const GOVERNANCE_DIR: &str = ".enterprise";
 const EFFECT_FILE: &str = "effect.json";
 const EXECUTION_DIR: &str = ".execution";
 const CORRELATION_FILE: &str = "correlation.jsonl";
+const SKILLS_DIR: &str = ".skills";
 const MAX_HOST_META_BYTES: usize = 256;
 
 #[derive(Debug, Clone)]
@@ -168,11 +173,18 @@ struct EffectRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     execution_attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    skill_source_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     output_sha256: Option<String>,
 }
 
 impl EffectRecord {
-    fn from_request(request: &GatewayRequest, meta: &Meta, cost_tokens: u64) -> Self {
+    fn from_request(
+        request: &GatewayRequest,
+        meta: &Meta,
+        cost_tokens: u64,
+        arguments: &Value,
+    ) -> Self {
         Self {
             request_id: request.request_id.clone(),
             tenant: request.tenant.clone(),
@@ -184,6 +196,14 @@ impl EffectRecord {
             turn_id: Some(meta.turn_id.clone()),
             step_id: Some(meta.step_id.clone()),
             execution_attempt_id: Some(meta.execution_attempt_id.clone()),
+            skill_source_sha256: if request.tool == "memory.ingest" {
+                arguments
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .map(source_sha256)
+            } else {
+                None
+            },
             output_sha256: None,
         }
     }
@@ -618,6 +638,8 @@ struct Server {
     org: String,
     actor: String,
     store: Store,
+    skill_store: SkillStore,
+    skill_projection: ProjectionState,
     correlation: execution::ExecutionJournal,
     front_door: GovernedMcp<JournaledBackend>,
     poisoned: Option<String>,
@@ -747,6 +769,11 @@ impl Server {
             }
         };
 
+        let skills_root = config.state_dir.join(SKILLS_DIR).join(&config.tenant);
+        let skill_store = SkillStore::open(&skills_root)
+            .map_err(|error| format!("cannot open Enterprise skill store: {error}"))?;
+        let mut skill_projection = ProjectionState::open(&skills_root, &config.tenant)?;
+
         let backend = JournaledBackend::new(
             TenantBackend::new(config.state_dir.clone()),
             execution_root(&config.state_dir),
@@ -781,6 +808,11 @@ impl Server {
                         &identity,
                         &effect,
                     )?;
+                    if effect.tool == "memory.ingest" {
+                        if let Some(source_hash) = effect.skill_source_sha256.as_deref() {
+                            skill_projection.prepare(&effect.request_id, source_hash)?;
+                        }
+                    }
                     effect.state = EffectState::Settled;
                     write_effect(&marker_path, &effect)?;
                 }
@@ -812,10 +844,84 @@ impl Server {
             org,
             actor,
             store,
+            skill_store,
+            skill_projection,
             correlation,
             front_door,
             poisoned: None,
         })
+    }
+
+    /// Returns true when the current source was permanently rejected as malformed
+    /// L1 evidence. Durable store/snapshot failures remain pending and retryable.
+    fn finish_skill_projection(&mut self, request_id: &str, source: &str) -> Result<bool, String> {
+        let source_hash = source_sha256(source);
+        self.skill_projection
+            .require_match(request_id, &source_hash)?;
+
+        if let Err(error) = parse_capture(source) {
+            eprintln!(
+                "ccos-enterprise-mcp: quarantining malformed DSH L1 evidence for request {request_id:?}: {error}"
+            );
+            self.skill_projection.clear(request_id, &source_hash)?;
+            return Ok(true);
+        }
+
+        self.skill_store
+            .observe_capture(SkillConfig::default(), source)
+            .map_err(|error| format!("cannot project DSH L1 skill evidence: {error}"))?;
+        self.skill_projection.clear(request_id, &source_hash)?;
+        Ok(false)
+    }
+
+    fn recover_pending_projection(
+        &mut self,
+        tool: &str,
+        arguments: &Value,
+        request_id: &str,
+    ) -> Result<Option<Value>, (i64, String)> {
+        if tool != "memory.ingest" || self.skill_projection.pending().is_none() {
+            return Ok(None);
+        }
+        let source = arguments
+            .get("source")
+            .and_then(Value::as_str)
+            .ok_or_else(|| (-32602, "pending memory.ingest requires source".to_string()))?;
+        let source_hash = source_sha256(source);
+        self.skill_projection
+            .require_match(request_id, &source_hash)
+            .map_err(|error| {
+                eprintln!("ccos-enterprise-mcp: skill projection retry refused: {error}");
+                (-32000, "Enterprise skill projection mismatch".to_string())
+            })?;
+        let quarantined = self
+            .finish_skill_projection(request_id, source)
+            .map_err(|error| {
+                eprintln!("ccos-enterprise-mcp: skill projection remains pending: {error}");
+                (
+                    -32000,
+                    "Enterprise skill projection remains pending".to_string(),
+                )
+            })?;
+        if let Some(marker) =
+            read_effect(&effect_path(&self.config.state_dir)).map_err(|error| (-32000, error))?
+        {
+            if marker.request_id == request_id && marker.state == EffectState::Succeeded {
+                self.front_door
+                    .backend_mut()
+                    .inner_mut()
+                    .settle_marker(request_id)
+                    .map_err(|error| (-32000, error))?;
+            }
+        }
+        Ok(Some(json!({
+            "content": [{ "type": "text", "text": "CCOS Enterprise replay suppressed after skill projection recovery" }],
+            "structuredContent": {
+                "replayed": true,
+                "skill_projection_recovered": true,
+                "skill_projection_quarantined": quarantined
+            }
+        })))
     }
 
     fn append_host_correlation(&mut self, tool: &str, meta: &Meta) -> Result<(), String> {
@@ -912,6 +1018,12 @@ impl Server {
             ));
         }
 
+        if let Some(recovered) =
+            self.recover_pending_projection(tool, &arguments, &meta.request_id)?
+        {
+            return Ok(recovered);
+        }
+
         let request = GatewayRequest {
             tenant: meta.tenant.clone(),
             actor: meta.actor.clone(),
@@ -924,10 +1036,11 @@ impl Server {
             meta.step_id.clone(),
             meta.execution_attempt_id.clone(),
         );
-        let effect = EffectRecord::from_request(&request, &meta, self.config.call_cost_tokens);
+        let effect =
+            EffectRecord::from_request(&request, &meta, self.config.call_cost_tokens, &arguments);
         self.front_door
             .backend_mut()
-            .arm(&request.tenant, execution, effect)
+            .arm(&request.tenant, execution, effect.clone())
             .map_err(|error| (-32000, error))?;
 
         let outcome = self.front_door.call(
@@ -1028,6 +1141,41 @@ impl Server {
 
         match outcome {
             McpOutcome::Ok(value) => {
+                if request.tool == "memory.ingest" {
+                    if let Some(source) = arguments.get("source").and_then(Value::as_str) {
+                        let source_hash =
+                            effect.skill_source_sha256.as_deref().ok_or_else(|| {
+                                self.poisoned = Some(
+                                    "successful memory.ingest lost its skill source hash"
+                                        .to_string(),
+                                );
+                                (
+                                    -32000,
+                                    "Enterprise skill projection state unavailable".to_string(),
+                                )
+                            })?;
+                        if let Err(error) = self
+                            .skill_projection
+                            .prepare(&request.request_id, source_hash)
+                        {
+                            self.poisoned = Some(error.clone());
+                            eprintln!("ccos-enterprise-mcp: skill projection receipt is not durable: {error}");
+                            return Err((
+                                -32000,
+                                "Enterprise skill projection receipt is not durable".to_string(),
+                            ));
+                        }
+                        if let Err(error) =
+                            self.finish_skill_projection(&request.request_id, source)
+                        {
+                            eprintln!("ccos-enterprise-mcp: successful ingest retained pending skill projection: {error}");
+                            return Err((
+                                -32000,
+                                "Enterprise skill projection remains pending".to_string(),
+                            ));
+                        }
+                    }
+                }
                 if let Err(error) = self
                     .front_door
                     .backend_mut()
@@ -1485,6 +1633,7 @@ mod tests {
                 turn_id: Some("turn-r".into()),
                 step_id: Some("step-r".into()),
                 execution_attempt_id: Some("attempt-r".into()),
+                skill_source_sha256: None,
                 output_sha256: Some("known-output".into()),
             };
             write_effect(&effect_path(&root), &effect).unwrap();

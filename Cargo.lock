@@ -318,6 +318,7 @@ dependencies = [
  "ccos-enterprise-gateway",
  "ccos-enterprise-qpages",
  "ccos-enterprise-runtime",
+ "ccos-enterprise-skills",
  "ccos-enterprise-store",
  "ed25519-dalek",
  "serde",

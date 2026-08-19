@@ -16,6 +16,7 @@
 mod exposure;
 mod observational;
 mod parser;
+mod provenance;
 mod registry;
 mod store;
 mod trial_store;
@@ -27,6 +28,7 @@ pub use parser::{
     parse_capture, skill_fingerprint, EpisodeObservation, ToolObservation, ToolOutcome,
     EPISODE_SCHEMA,
 };
+pub use provenance::{index_skill_trial_provenance, SkillTrialProvenance};
 pub use registry::{
     ObserveDisposition, ObserveResult, SkillConfig, SkillRecord, SkillRegistry, SkillSnapshot,
     SkillStatus, SKILL_SNAPSHOT_SCHEMA,

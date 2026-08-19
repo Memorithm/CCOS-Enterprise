@@ -24,4 +24,5 @@ ccos-enterprise-gateway = { path = "../ccos-enterprise-gateway" }
 ccos-enterprise-observability = { path = "../ccos-enterprise-observability" }
 ccos-enterprise-qpages = { path = "../ccos-enterprise-qpages" }
 ccos-enterprise-admin = { path = "../ccos-enterprise-admin" }
+ccos-enterprise-approval = { path = "../ccos-enterprise-approval" }
 serde.workspace = true

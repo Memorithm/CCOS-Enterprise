@@ -1184,6 +1184,7 @@ fn refusal_index(r: &Refusal) -> usize {
         Refusal::MalformedRequest(_) => 10,
         Refusal::JustificationRequired => 11,
         Refusal::StorageExhausted => 12,
+        Refusal::RequiresApproval => 13,
     }
 }
 

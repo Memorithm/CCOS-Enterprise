@@ -224,6 +224,11 @@ pub enum Refusal {
     /// only a delete clears. An operator alerting on one must not be woken by
     /// the other.
     StorageExhausted,
+    /// The tool is gated on a recorded human approval
+    /// ([`Deployment::require_approval`], `docs/HUMAN_APPROVAL_POLICIES.md`)
+    /// and no live approval exists for this call's artifact. Unrecorded
+    /// approval is denial.
+    RequiresApproval,
 }
 
 /// The outcome of one admission decision, as journaled.
@@ -346,6 +351,14 @@ pub enum GovernanceChange {
     /// A tool became an administrative act.
     ToolMadeAdministrative {
         tool: String,
+    },
+    /// A tool became gated on a recorded human approval.
+    ToolMadeApprovalGated {
+        tool: String,
+    },
+    /// A human approval was recorded in the deployment's ledger.
+    ApprovalRecorded {
+        approval_id: String,
     },
     /// The identity floor moved.
     StrengthRequired {
@@ -526,6 +539,13 @@ pub struct Deployment {
     decided_order: VecDeque<(TenantId, String)>,
     replay_memory: usize,
     required_strength: AuthStrength,
+    /// Tools that are gated on a recorded human approval
+    /// (docs/HUMAN_APPROVAL_POLICIES.md). An admitted call for one of these is
+    /// refused with [`Refusal::RequiresApproval`] unless the deployment's
+    /// approval ledger holds a live approval for the call's artifact.
+    approval_required: BTreeSet<String>,
+    /// The durable human approval ledger: unrecorded approval is denial.
+    approvals: ApprovalLedger,
 }
 
 impl Default for Deployment {
@@ -558,6 +578,8 @@ impl Deployment {
             decided_order: VecDeque::new(),
             replay_memory: DEFAULT_REPLAY_MEMORY,
             required_strength: AuthStrength::Token,
+            approval_required: BTreeSet::new(),
+            approvals: ApprovalLedger::default(),
         }
     }
 
@@ -953,6 +975,89 @@ impl Deployment {
     /// Whether a tool is an administrative act in this deployment.
     pub fn requires_justification(&self, tool: &str) -> bool {
         self.justification_required.contains(tool)
+    }
+
+    // ── Human approval gates (docs/HUMAN_APPROVAL_POLICIES.md) ──────────
+
+    /// Mark a governed tool as requiring a recorded human approval for every
+    /// call: the tool is admitted by every other gate, then refused with
+    /// [`Refusal::RequiresApproval`] unless the approval ledger holds a live
+    /// (unrevoked, unexpired) approval for the call's artifact hash.
+    ///
+    /// Unrecorded approval is denial; the requirement itself is durable state
+    /// (carried in the snapshot) so a restart never silently drops it.
+    pub fn require_approval(&mut self, tool: &str) -> &mut Self {
+        if self.approval_required.insert(tool.to_string()) {
+            self.record(
+                GovernanceChange::ToolMadeApprovalGated {
+                    tool: tool.to_string(),
+                },
+                None,
+                None,
+            );
+        }
+        self
+    }
+
+    /// Whether a tool is gated on a recorded human approval.
+    pub fn requires_approval(&self, tool: &str) -> bool {
+        self.approval_required.contains(tool)
+    }
+
+    /// Evaluate the approval gate for one admitted call.
+    ///
+    /// Returns `Ok(())` when the call is not approval-gated, or when a live
+    /// approval exists for exactly this artifact; returns
+    /// [`Refusal::RequiresApproval`] otherwise. This is the executable form
+    /// of "unrecorded approval == denial".
+    ///
+    /// `artifact_hash` is the SHA-256 (lowercase hex) of the artifact the
+    /// call would affect. It must be canonical, or the gate fails closed.
+    pub fn approval_gate(&self, call: &Call<'_>, artifact_hash: &str) -> Result<(), Refusal> {
+        if !self.approval_required.contains(&call.request.tool) {
+            return Ok(());
+        }
+        let tenant = TenantId(call.request.tenant.clone());
+        let query = ccos_enterprise_approval::ApprovalQuery {
+            tenant: &tenant,
+            action: &call.request.tool,
+            artifact_hash,
+            now: now_unix(),
+        };
+        match self.approvals.evaluate(&query) {
+            ccos_enterprise_approval::GateOutcome::Approved => Ok(()),
+            _ => Err(Refusal::RequiresApproval),
+        }
+    }
+
+    /// Record one human approval in the deployment's ledger.
+    ///
+    /// Returns the approval id. Refuses duplicates, malformed requests and
+    /// non-canonical identifiers; the record is journaled as a governance
+    /// change so the ledger has a complete trail.
+    pub fn record_approval(
+        &mut self,
+        request: ccos_enterprise_approval::ApprovalRequest,
+    ) -> Result<String, ccos_enterprise_approval::ApprovalError> {
+        let id = self.approvals.record(request)?;
+        self.record(
+            GovernanceChange::ApprovalRecorded {
+                approval_id: id.clone(),
+            },
+            None,
+            None,
+        );
+        Ok(id)
+    }
+
+    /// The current approval ledger (validated state only).
+    pub fn approvals(&self) -> &ApprovalLedger {
+        &self.approvals
+    }
+
+    /// The approval-required tool set, in name order.
+    pub fn approval_required(&self) -> impl Iterator<Item = &str> {
+        self.approval_required.iter().map(String::as_str)
     }
 
     /// Declare which permission a tool requires. Undeclared tools are refused.
@@ -1613,6 +1718,7 @@ fn tag(r: &Refusal) -> &'static str {
         Refusal::BudgetExhausted => "budget_exhausted",
         Refusal::JustificationRequired => "justification_required",
         Refusal::StorageExhausted => "storage_exhausted",
+        Refusal::RequiresApproval => "requires_approval",
     }
 }
 
@@ -1630,6 +1736,57 @@ pub struct TenantSnapshot {
     pub budget: TokenBudget,
     pub models: ModelAllowlist,
     pub qpages: QPageRegistry,
+}
+
+/// The deployment's durable human approval ledger.
+///
+/// Thin wrapper over the validated approval registry so the snapshot can
+/// carry it. Construction refuses corrupt or schema-unknown state; an empty
+/// ledger is fine (a genuinely fresh deployment).
+#[derive(Debug, Default)]
+pub struct ApprovalLedger {
+    registry: ccos_enterprise_approval::ApprovalRegistry,
+}
+
+impl ApprovalLedger {
+    pub fn evaluate(
+        &self,
+        query: &ccos_enterprise_approval::ApprovalQuery<'_>,
+    ) -> ccos_enterprise_approval::GateOutcome {
+        self.registry.evaluate(query)
+    }
+
+    pub fn record(
+        &mut self,
+        request: ccos_enterprise_approval::ApprovalRequest,
+    ) -> Result<String, ccos_enterprise_approval::ApprovalError> {
+        self.registry.record(request)
+    }
+
+    pub fn snapshot(&self) -> &ccos_enterprise_approval::ApprovalSnapshot {
+        self.registry.snapshot()
+    }
+
+    pub fn from_snapshot(
+        snapshot: ccos_enterprise_approval::ApprovalSnapshot,
+    ) -> Result<Self, ccos_enterprise_approval::ApprovalError> {
+        Ok(Self {
+            registry: ccos_enterprise_approval::ApprovalRegistry::from_snapshot(snapshot)?,
+        })
+    }
+
+    pub fn registry(&self) -> &ccos_enterprise_approval::ApprovalRegistry {
+        &self.registry
+    }
+}
+
+/// Unix seconds, saturating to `0` if the system clock is before the epoch
+/// (which a governance product must not trust as a negative timestamp).
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// A deployment's governed state, as plain data.
@@ -1664,6 +1821,13 @@ pub struct DeploymentSnapshot {
     /// snapshot, for the same reason `audit_dropped` is carried.
     #[serde(default)]
     pub governance_dropped: u64,
+    /// Tools gated on a recorded human approval. Persisted because a restart
+    /// that forgot them would silently stop demanding approvals.
+    #[serde(default)]
+    pub approval_required: BTreeSet<String>,
+    /// The human approval ledger. Empty by default so older snapshots load.
+    #[serde(default)]
+    pub approvals: ccos_enterprise_approval::ApprovalSnapshot,
     /// Tenant-scoped cells, as `(tenant, key, value)` triples.
     pub cells: Vec<(String, String, String)>,
 }
@@ -1692,6 +1856,10 @@ pub enum RestoreError {
     /// A journaled record whose tenant no longer exists cannot be re-applied,
     /// so the ledger it implies cannot be reproduced.
     JournalTenantUnknown { sequence: u64, tenant: String },
+    /// The approval ledger carried in the snapshot is corrupt or
+    /// schema-unknown. Refused rather than silently dropping approvals:
+    /// unrecorded approval must stay a denial, never an accident.
+    ApprovalLedgerCorrupt { detail: String },
     /// The journal does not continue the snapshot: replaying it would either
     /// skip decisions or double-count them.
     JournalDiscontinuity { expected: u64, found: u64 },
@@ -1722,6 +1890,9 @@ impl std::fmt::Display for RestoreError {
                 f,
                 "journal record {sequence} names tenant {tenant:?}, which the snapshot does not have"
             ),
+            Self::ApprovalLedgerCorrupt { detail } => {
+                write!(f, "approval ledger is corrupt: {detail}")
+            }
             Self::JournalDiscontinuity { expected, found } => write!(
                 f,
                 "journal resumes at sequence {found}, snapshot expects {expected}"
@@ -1777,6 +1948,8 @@ impl Deployment {
             governed_tools: self.governed_tools.clone(),
             justification_required: self.justification_required.clone(),
             governance_dropped: self.governance_dropped,
+            approval_required: self.approval_required.clone(),
+            approvals: self.approvals.snapshot().clone(),
             cells: self
                 .store
                 .iter()
@@ -1820,6 +1993,12 @@ impl Deployment {
         d.justification_required = snapshot.justification_required;
         d.audit_dropped = snapshot.audit_dropped;
         d.governance_dropped = snapshot.governance_dropped;
+        d.approval_required = snapshot.approval_required;
+        d.approvals = ApprovalLedger::from_snapshot(snapshot.approvals).map_err(|error| {
+            RestoreError::ApprovalLedgerCorrupt {
+                detail: error.to_string(),
+            }
+        })?;
 
         for (name, t) in snapshot.tenants {
             check_identifier("tenant", &name)?;
@@ -2366,5 +2545,165 @@ mod tests {
         let d = two_tenant_deployment();
         assert_eq!(d.spent("acme"), Some(0));
         assert_eq!(d.spent("nowhere"), None);
+    }
+
+    #[test]
+    fn approval_gate_denies_without_a_recorded_approval() {
+        let mut d = two_tenant_deployment();
+        d.require_approval("policy.set");
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+        let req = request("acme", "alice", "policy.set", "r-approval");
+        let call = Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: Some("an operator reason"),
+        };
+        // The call is otherwise admissible; the approval gate is the only
+        // thing standing in its way.
+        assert_eq!(
+            d.approval_gate(&call, &"a".repeat(64)),
+            Err(Refusal::RequiresApproval),
+            "unrecorded approval must be denial"
+        );
+        // A non-gated tool is untouched by the gate.
+        let recall = request("acme", "alice", "memory.recall", "r-plain");
+        let call = Call {
+            actor: &alice,
+            request: &recall,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: None,
+        };
+        assert_eq!(d.approval_gate(&call, &"b".repeat(64)), Ok(()));
+    }
+
+    #[test]
+    fn recorded_approval_authorizes_exactly_one_artifact_and_tenant() {
+        let mut d = two_tenant_deployment();
+        d.require_approval("policy.set");
+        let artifact = "c".repeat(64);
+        let recorded = d
+            .record_approval(
+                ccos_enterprise_approval::ApprovalRequest::new(
+                    ccos_enterprise_tenancy::TenantId("acme".into()),
+                    "policy.set",
+                    &artifact,
+                    "ZEKRITI Tarek",
+                    ccos_enterprise_approval::ApprovalDecision::Approved,
+                    1_000,
+                    None,
+                    "approve the allowlist change",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(recorded.starts_with("approval-v1-"));
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+        let req = request("acme", "alice", "policy.set", "r-approved");
+        let call = Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: Some("operator reason"),
+        };
+        assert_eq!(d.approval_gate(&call, &artifact), Ok(()));
+        // Same action, different artifact: denial.
+        assert_eq!(
+            d.approval_gate(&call, &"d".repeat(64)),
+            Err(Refusal::RequiresApproval)
+        );
+        // Same artifact, other tenant: denial.
+        let globex_req = request("globex", "alice", "policy.set", "r-other-tenant");
+        let call = Call {
+            actor: &alice,
+            request: &globex_req,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: Some("operator reason"),
+        };
+        assert_eq!(
+            d.approval_gate(&call, &artifact),
+            Err(Refusal::RequiresApproval)
+        );
+    }
+
+    #[test]
+    fn approval_ledger_survives_snapshot_and_restore() {
+        let mut d = two_tenant_deployment();
+        d.require_approval("policy.set");
+        let artifact = "e".repeat(64);
+        d.record_approval(
+            ccos_enterprise_approval::ApprovalRequest::new(
+                ccos_enterprise_tenancy::TenantId("acme".into()),
+                "policy.set",
+                &artifact,
+                "ZEKRITI Tarek",
+                ccos_enterprise_approval::ApprovalDecision::Approved,
+                1_000,
+                None,
+                "durable approval",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let snapshot = d.snapshot();
+        assert!(snapshot.approval_required.contains("policy.set"));
+        assert_eq!(snapshot.approvals.approvals.len(), 1);
+
+        let restored = Deployment::restore(snapshot, &[], &[]).expect("restored deployment");
+        assert!(restored.requires_approval("policy.set"));
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+        let req = request("acme", "alice", "policy.set", "r-restored");
+        let call = Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: Some("operator reason"),
+        };
+        assert_eq!(
+            restored.approval_gate(&call, &artifact),
+            Ok(()),
+            "the approval survives a restart"
+        );
+    }
+
+    #[test]
+    fn corrupt_approval_ledger_is_refused_on_restore() {
+        let d = two_tenant_deployment();
+        let mut snapshot = d.snapshot();
+        let mut approvals = ccos_enterprise_approval::ApprovalSnapshot::default();
+        approvals.approvals.insert(
+            "approval-v1-broken".into(),
+            ccos_enterprise_approval::ApprovalRecord {
+                id: "approval-v1-broken".into(),
+                tenant: "acme".into(),
+                approver: "ZEKRITI Tarek".into(),
+                action: "policy.set".into(),
+                artifact_hash: "f".repeat(64),
+                decision: ccos_enterprise_approval::ApprovalDecision::Approved,
+                recorded_at: 1_000,
+                expires_at: None,
+                justification: Some("x".into()),
+                schema_version: 1,
+            },
+        );
+        snapshot.approvals = approvals;
+        let err = match Deployment::restore(snapshot, &[], &[]) {
+            Ok(_) => panic!("a corrupt approval ledger must refuse restore"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(err, RestoreError::ApprovalLedgerCorrupt { .. }),
+            "{err}"
+        );
     }
 }

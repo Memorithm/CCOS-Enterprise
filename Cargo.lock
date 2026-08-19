@@ -180,6 +180,7 @@ name = "ccos-enterprise-conformance"
 version = "0.1.0-pre"
 dependencies = [
  "ccos-enterprise-admin",
+ "ccos-enterprise-approval",
  "ccos-enterprise-auth",
  "ccos-enterprise-backup",
  "ccos-enterprise-decision-service",

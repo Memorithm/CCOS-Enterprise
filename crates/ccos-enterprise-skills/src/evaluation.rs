@@ -218,7 +218,10 @@ mod tests {
         assert!(evaluation.has_not_observed);
         assert_eq!(evaluation.summary.failed, 0);
         assert_eq!(evaluation.summary.not_observed, 1);
-        assert!(!evaluation.drift, "NotObserved must never count toward drift");
+        assert!(
+            !evaluation.drift,
+            "NotObserved must never count toward drift"
+        );
         assert_eq!(evaluation.summary.passed, 4);
         assert_eq!(evaluation.completion_rate, 100, "NotObserved is resolved");
         assert_eq!(evaluation.pass_rate_of_terminal, 100);
@@ -237,7 +240,11 @@ mod tests {
             trials
                 .resolve_episode(
                     &EpisodeObservation {
-                        evidence_id: if turn == 1 { "c".repeat(64) } else { "d".repeat(64) },
+                        evidence_id: if turn == 1 {
+                            "c".repeat(64)
+                        } else {
+                            "d".repeat(64)
+                        },
                         session_id: "s".into(),
                         turn,
                         reason_kind: "error".into(),
@@ -252,15 +259,24 @@ mod tests {
                 .unwrap();
         }
         let evaluation = SkillEvaluation::from_ledger(&trials, &skill_id).unwrap();
-        assert!(evaluation.insufficient_evidence, "the pending third exposure is not evidence");
-        assert!(!evaluation.drift, "two failures plus one pending must not raise drift");
+        assert!(
+            evaluation.insufficient_evidence,
+            "the pending third exposure is not evidence"
+        );
+        assert!(
+            !evaluation.drift,
+            "two failures plus one pending must not raise drift"
+        );
 
         trials
             .resolve_episode(&episode("s", 3, 'e'), &skills)
             .unwrap();
         let evaluation = SkillEvaluation::from_ledger(&trials, &skill_id).unwrap();
         assert!(!evaluation.insufficient_evidence);
-        assert!(evaluation.drift, "two failures among three observed outcomes");
+        assert!(
+            evaluation.drift,
+            "two failures among three observed outcomes"
+        );
         assert_eq!(evaluation.pass_rate_of_terminal, 33);
     }
 

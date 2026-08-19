@@ -58,8 +58,9 @@ pub use decision::{
 };
 pub use server::{govern_catalogue, AdvertisedTool, Backend, GovernedMcp, McpOutcome};
 pub use skills::{
-    active_skill_tool_result, govern_skill_catalogue, skill_permission_for, skill_tool_spec,
-    DEFAULT_SKILL_READ_LIMIT, MAX_SKILL_READ_LIMIT, SKILL_READ_PERMISSION, SKILL_READ_TOOL,
+    active_skill_tool_result, active_skill_tool_result_with_observational, govern_skill_catalogue,
+    skill_permission_for, skill_tool_spec, DEFAULT_SKILL_READ_LIMIT, MAX_SKILL_READ_LIMIT,
+    SKILL_READ_PERMISSION, SKILL_READ_TOOL,
 };
 
 use std::collections::BTreeMap;

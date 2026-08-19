@@ -160,8 +160,10 @@ dependencies = [
 name = "ccos-enterprise-backup"
 version = "0.1.0-pre"
 dependencies = [
+ "ccos-core",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

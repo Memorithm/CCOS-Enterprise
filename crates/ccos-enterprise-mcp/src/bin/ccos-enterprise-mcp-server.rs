@@ -778,6 +778,10 @@ impl Server {
             "ping" => Ok(json!({})),
             "tools/list" => enterprise_specs().map(|tools| json!({ "tools": tools })),
             "tools/call" => self.call_tool(message.get("params").unwrap_or(&Value::Null)),
+            "ccos/execution/event" => execution_backend::handle_lifecycle_event(
+                self,
+                message.get("params").unwrap_or(&Value::Null),
+            ),
             _ => Err((-32601, "method not found".to_string())),
         };
         Some(match result {
@@ -1108,6 +1112,23 @@ mod tests {
         })
     }
 
+    fn lifecycle(id: u64, actor: &str, event: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "ccos/execution/event",
+            "params": {
+                "event": event,
+                "_meta": { "ccos": {
+                    "tenant_id": "acme",
+                    "actor_id": actor,
+                    "host": HOST_KIND,
+                    "model": "deepseek-harness"
+                }}
+            }
+        })
+    }
+
     fn cleanup(root: &Path) {
         let _ = fs::remove_dir_all(root);
     }
@@ -1121,6 +1142,54 @@ mod tests {
             .iter()
             .all(|tool| tool["name"].as_str().unwrap().contains('.')));
         assert!(!tools.iter().any(|tool| tool["name"] == "octa_feedback"));
+    }
+
+    #[test]
+    fn lifecycle_rpc_is_authenticated_idempotent_and_not_a_tool() {
+        let config = test_config("lifecycle-rpc");
+        let root = config.state_dir.clone();
+        cleanup(&root);
+        let mut server = Server::new(config).unwrap();
+        let event = json!({
+            "type": "turn_started",
+            "turn_id": "dsh-session-1:turn:1"
+        });
+        let first = server
+            .handle(&lifecycle(90, "alice", event.clone()))
+            .unwrap();
+        assert_eq!(first["result"]["recorded"], true);
+        assert_eq!(first["result"]["replayed"], false);
+        let replay = server.handle(&lifecycle(91, "alice", event)).unwrap();
+        assert_eq!(replay["result"]["recorded"], false);
+        assert_eq!(replay["result"]["replayed"], true);
+        let forged = server
+            .handle(&lifecycle(
+                92,
+                "mallory",
+                json!({
+                    "type": "turn_finished",
+                    "turn_id": "dsh-session-1:turn:1",
+                    "success": true
+                }),
+            ))
+            .unwrap();
+        assert_eq!(forged["error"]["code"], -32001);
+        let tools = enterprise_specs().unwrap();
+        assert!(!tools
+            .iter()
+            .any(|tool| tool["name"] == "ccos/execution/event"));
+        let path = execution_root(&root).join("acme").join("execution.jsonl");
+        let reopened = execution::ExecutionJournal::open(&path, "tenant/acme/mcp")
+            .unwrap()
+            .journal;
+        assert_eq!(reopened.len(), 1);
+        assert!(matches!(
+            &reopened.records()[0].event,
+            execution::ExecutionEvent::TurnStarted { turn_id }
+                if turn_id == "dsh-session-1:turn:1"
+        ));
+        drop(server);
+        cleanup(&root);
     }
 
     #[test]

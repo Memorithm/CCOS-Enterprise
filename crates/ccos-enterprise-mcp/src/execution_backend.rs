@@ -163,14 +163,27 @@ impl<B> ExecutionBackend<B> {
             .expect("journal was inserted or already existed"))
     }
 
-    pub fn append_event(
+    pub fn append_lifecycle_event(
         &mut self,
         tenant: &str,
         event: ExecutionEvent,
-    ) -> Result<(), ExecutionBackendError> {
+    ) -> Result<bool, ExecutionBackendError> {
         validate_tenant(tenant)?;
-        self.journal_for(tenant)?.append(event)?;
-        Ok(())
+        let journal = self.journal_for(tenant)?;
+        let prior = journal.records().iter().find_map(|record| {
+            lifecycle_identity_matches(&record.event, &event).then(|| record.event == event)
+        });
+        match prior {
+            Some(true) => return Ok(false),
+            Some(false) => {
+                return Err(ExecutionBackendError::RecoveryMismatch(
+                    "conflicting durable lifecycle event for the same host identity".into(),
+                ))
+            }
+            None => {}
+        }
+        journal.append(event)?;
+        Ok(true)
     }
 
     pub fn recover_tools(
@@ -384,8 +397,8 @@ fn lifecycle_meta(params: &Value) -> Result<LifecycleMeta, ()> {
 }
 
 fn lifecycle_event(params: &Value) -> Result<ExecutionEvent, ()> {
-    let input: LifecycleEventInput = serde_json::from_value(params.get("event").cloned().ok_or(())?)
-        .map_err(|_| ())?;
+    let input: LifecycleEventInput =
+        serde_json::from_value(params.get("event").cloned().ok_or(())?).map_err(|_| ())?;
     let checked = |kind, value: String| {
         validate_execution_value(kind, &value).map_err(|_| ())?;
         Ok::<String, ()>(value)
@@ -438,10 +451,12 @@ fn lifecycle_event(params: &Value) -> Result<ExecutionEvent, ()> {
             step_id: checked("step", step_id)?,
             success,
         }),
-        LifecycleEventInput::TurnFinished { turn_id, success } => Ok(ExecutionEvent::TurnFinished {
-            turn_id: checked("turn", turn_id)?,
-            success,
-        }),
+        LifecycleEventInput::TurnFinished { turn_id, success } => {
+            Ok(ExecutionEvent::TurnFinished {
+                turn_id: checked("turn", turn_id)?,
+                success,
+            })
+        }
     }
 }
 
@@ -450,7 +465,9 @@ pub(crate) fn handle_lifecycle_event(
     params: &Value,
 ) -> Result<Value, (i64, String)> {
     if let Some(reason) = &server.poisoned {
-        eprintln!("ccos-enterprise-mcp: refusing lifecycle event after durability failure: {reason}");
+        eprintln!(
+            "ccos-enterprise-mcp: refusing lifecycle event after durability failure: {reason}"
+        );
         return Err((-32000, "Enterprise durable state unavailable".into()));
     }
     let meta = lifecycle_meta(params).map_err(|_| (-32602, "invalid params".into()))?;
@@ -476,18 +493,87 @@ pub(crate) fn handle_lifecycle_event(
         return Err((-32001, "not authenticated".into()));
     }
 
-    if let Err(error) = server
+    let recorded = match server
         .front_door
         .backend_mut()
         .execution
-        .append_event(&meta.tenant, event)
+        .append_lifecycle_event(&meta.tenant, event)
     {
-        let reason = error.to_string();
-        server.poisoned = Some(reason.clone());
-        eprintln!("ccos-enterprise-mcp: lifecycle journal append failed: {reason}");
-        return Err((-32000, "Enterprise execution state is not durable".into()));
+        Ok(recorded) => recorded,
+        Err(ExecutionBackendError::RecoveryMismatch(detail)) => {
+            eprintln!("ccos-enterprise-mcp: lifecycle conflict refused: {detail}");
+            return Err((-32002, "Enterprise lifecycle conflict".into()));
+        }
+        Err(error) => {
+            let reason = error.to_string();
+            server.poisoned = Some(reason.clone());
+            eprintln!("ccos-enterprise-mcp: lifecycle journal append failed: {reason}");
+            return Err((-32000, "Enterprise execution state is not durable".into()));
+        }
+    };
+    Ok(json!({ "recorded": recorded, "replayed": !recorded }))
+}
+
+fn lifecycle_identity_matches(left: &ExecutionEvent, right: &ExecutionEvent) -> bool {
+    match (left, right) {
+        (
+            ExecutionEvent::TurnStarted { turn_id: left },
+            ExecutionEvent::TurnStarted { turn_id: right },
+        ) => left == right,
+        (
+            ExecutionEvent::StepStarted {
+                turn_id: lt,
+                step_id: ls,
+            },
+            ExecutionEvent::StepStarted {
+                turn_id: rt,
+                step_id: rs,
+            },
+        ) => lt == rt && ls == rs,
+        (
+            ExecutionEvent::UserMessage {
+                turn_id: lt,
+                message_id: lm,
+                ..
+            },
+            ExecutionEvent::UserMessage {
+                turn_id: rt,
+                message_id: rm,
+                ..
+            },
+        ) => lt == rt && lm == rm,
+        (
+            ExecutionEvent::AssistantMessage {
+                turn_id: lt,
+                step_id: ls,
+                message_id: lm,
+                ..
+            },
+            ExecutionEvent::AssistantMessage {
+                turn_id: rt,
+                step_id: rs,
+                message_id: rm,
+                ..
+            },
+        ) => lt == rt && ls == rs && lm == rm,
+        (
+            ExecutionEvent::StepFinished {
+                turn_id: lt,
+                step_id: ls,
+                ..
+            },
+            ExecutionEvent::StepFinished {
+                turn_id: rt,
+                step_id: rs,
+                ..
+            },
+        ) => lt == rt && ls == rs,
+        (
+            ExecutionEvent::TurnFinished { turn_id: left, .. },
+            ExecutionEvent::TurnFinished { turn_id: right, .. },
+        ) => left == right,
+        _ => false,
     }
-    Ok(json!({ "recorded": true }))
 }
 
 pub fn successful_output_sha256(value: &Value) -> Result<String, serde_json::Error> {
@@ -547,12 +633,7 @@ mod tests {
 
     struct BackendOk;
     impl Backend for BackendOk {
-        fn dispatch(
-            &mut self,
-            _tenant: &str,
-            _tool: &str,
-            _args: &Value,
-        ) -> Result<Value, String> {
+        fn dispatch(&mut self, _tenant: &str, _tool: &str, _args: &Value) -> Result<Value, String> {
             Ok(json!({"ok": true}))
         }
     }
@@ -577,20 +658,17 @@ mod tests {
 
     #[test]
     fn explicit_lifecycle_event_uses_the_same_tenant_journal() {
-        let root = std::env::temp_dir().join(format!(
-            "ccos-mcp-exec-lifecycle-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ccos-mcp-exec-lifecycle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut backend = ExecutionBackend::new(BackendOk, &root);
-        backend
-            .append_event(
-                "acme",
-                ExecutionEvent::TurnStarted {
-                    turn_id: "dsh-session-1:turn:1".into(),
-                },
-            )
-            .unwrap();
+        let event = ExecutionEvent::TurnStarted {
+            turn_id: "dsh-session-1:turn:1".into(),
+        };
+        assert!(backend
+            .append_lifecycle_event("acme", event.clone())
+            .unwrap());
+        assert!(!backend.append_lifecycle_event("acme", event).unwrap());
         let path = backend.journal_path_for("acme").unwrap();
         let reopened = ExecutionJournal::open(path, "tenant/acme/mcp").unwrap();
         assert_eq!(reopened.journal.len(), 1);
@@ -598,6 +676,39 @@ mod tests {
             &reopened.journal.records()[0].event,
             ExecutionEvent::TurnStarted { turn_id } if turn_id == "dsh-session-1:turn:1"
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn conflicting_lifecycle_retry_is_refused_without_append() {
+        let root = std::env::temp_dir().join(format!(
+            "ccos-mcp-exec-lifecycle-conflict-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut backend = ExecutionBackend::new(BackendOk, &root);
+        assert!(backend
+            .append_lifecycle_event(
+                "acme",
+                ExecutionEvent::TurnFinished {
+                    turn_id: "dsh-session-1:turn:1".into(),
+                    success: true,
+                },
+            )
+            .unwrap());
+        let error = backend
+            .append_lifecycle_event(
+                "acme",
+                ExecutionEvent::TurnFinished {
+                    turn_id: "dsh-session-1:turn:1".into(),
+                    success: false,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, ExecutionBackendError::RecoveryMismatch(_)));
+        let path = backend.journal_path_for("acme").unwrap();
+        let reopened = ExecutionJournal::open(path, "tenant/acme/mcp").unwrap();
+        assert_eq!(reopened.journal.len(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
 }

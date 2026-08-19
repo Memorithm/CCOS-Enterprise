@@ -10,7 +10,7 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "check": "node --check index.js && node --check bridge.js && node --check mcp-stdio.js && node --check outbox.js && node --check tools.js && node --check test/adapter.test.js",
+    "check": "node --check index.js && node --check bridge.js && node --check mcp-stdio.js && node --check outbox.js && node --check tools.js",
     "test": "node --test test/*.test.js"
   },
   "dsh": {

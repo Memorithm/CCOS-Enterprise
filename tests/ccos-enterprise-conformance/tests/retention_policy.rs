@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use ccos_enterprise_retention::{
     EnforcementAction, EnforcementRecord, RetainedItem, RetentionClass, RetentionEngine,
-    RetentionPolicy, RetentionStore, RunOutcome, RETENTION_SCHEMA,
+    RetentionPolicy, RetentionStore, RETENTION_SCHEMA,
 };
 use ccos_enterprise_tenancy::TenantId;
 

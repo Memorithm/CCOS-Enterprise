@@ -34,21 +34,22 @@ pub fn parse_skill_exposures(source: &str) -> Vec<String> {
     let mut current_output: Option<&str> = None;
     let mut failed = false;
 
-    let finish = |tool: Option<&str>, output: Option<&str>, failed: bool, out: &mut BTreeSet<String>| {
-        if failed || !matches!(tool, Some(DSH_SKILL_TOOL | ENTERPRISE_SKILL_TOOL)) {
-            return;
-        }
-        let Some(output) = output else {
-            return;
+    let finish =
+        |tool: Option<&str>, output: Option<&str>, failed: bool, out: &mut BTreeSet<String>| {
+            if failed || !matches!(tool, Some(DSH_SKILL_TOOL | ENTERPRISE_SKILL_TOOL)) {
+                return;
+            }
+            let Some(output) = output else {
+                return;
+            };
+            let Some(ids) = skill_ids_from_rendered_output(output) else {
+                return;
+            };
+            if out.len().saturating_add(ids.len()) > MAX_EXPOSED_SKILLS {
+                return;
+            }
+            out.extend(ids);
         };
-        let Some(ids) = skill_ids_from_rendered_output(output) else {
-            return;
-        };
-        if out.len().saturating_add(ids.len()) > MAX_EXPOSED_SKILLS {
-            return;
-        }
-        out.extend(ids);
-    };
 
     for line in tools_text.lines() {
         if let Some(rest) = line.strip_prefix("- ") {

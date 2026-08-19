@@ -49,6 +49,8 @@ use ccos_enterprise_skills::{
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 use serde::{Deserialize, Serialize};
 
+pub mod export;
+
 /// Schema tag written into every serialized audit report.
 pub const SKILL_AUDIT_SCHEMA: &str = "ccos.enterprise.skill-audit/v1";
 

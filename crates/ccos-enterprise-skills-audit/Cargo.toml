@@ -12,6 +12,8 @@ ccos-enterprise-rbac = { path = "../ccos-enterprise-rbac" }
 ccos-enterprise-skills = { path = "../ccos-enterprise-skills" }
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime", features = ["test-fixtures"] }

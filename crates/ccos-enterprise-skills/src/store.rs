@@ -35,7 +35,7 @@ impl SkillStore {
             .map_err(io(&lock_path))?;
         lock.try_lock().map_err(|source| SkillError::Io {
             path: lock_path,
-            source,
+            source: source.into(),
         })?;
         Ok(Self {
             snapshot_path: root.join(SKILLS_FILE),

@@ -1,702 +1,93 @@
 name: CI (fast)
 
 on:
+  push:
+    branches: [main]
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
-  apply-observational-trial-wiring:
-    if: github.event.pull_request.head.ref == 'feat/skills-observational-trial-wiring'
+  fast:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
+      # The workspace depends on ccos-core by PATH during development.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply transaction wiring and tests
-        shell: bash
+      - name: Author policy (single human contributor)
         run: |
-          python3 <<'PY'
-          from pathlib import Path
-
-          def replace_once(path, old, new):
-              p = Path(path)
-              text = p.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'{path}: expected one anchor, found {count}: {old[:120]!r}')
-              p.write_text(text.replace(old, new, 1))
-
-          server = 'crates/ccos-enterprise-mcp/src/bin/ccos-enterprise-mcp-server.rs'
-
-          replace_once(
-              server,
-              'use std::collections::BTreeMap;\n',
-              'use std::collections::{BTreeMap, BTreeSet};\n',
-          )
-          replace_once(
-              server,
-              '    skill_tool_spec, to_enterprise, Backend, GovernedMcp, McpOutcome, SKILL_READ_TOOL,\n',
-              '    skill_tool_spec, to_enterprise, Backend, GovernedMcp, McpOutcome,\n    MAX_SKILL_READ_LIMIT, SKILL_READ_TOOL,\n',
-          )
-          replace_once(
-              server,
-              'use ccos_enterprise_skills::{parse_capture, SkillConfig, SkillStore};\n',
-              'use ccos_enterprise_skills::{\n    parse_capture, trial_turn_key, SkillConfig, SkillStore, SkillTrialConfig, SkillTrialStore,\n};\n',
-          )
-
-          replace_once(
-              server,
-              '#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\nstruct EffectRecord {\n',
-              '''#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct SkillTrialExposureRecord {
-    turn_key: String,
-    skill_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct EffectRecord {
-''',
-          )
-          replace_once(
-              server,
-              '''    #[serde(default, skip_serializing_if = "Option::is_none")]
-    skill_source_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    output_sha256: Option<String>,
-''',
-              '''    #[serde(default, skip_serializing_if = "Option::is_none")]
-    skill_source_sha256: Option<String>,
-    /// New tracked skill reads set this before crossing the durable read
-    /// boundary. Legacy pre-trial markers deserialize as false.
-    #[serde(default)]
-    skill_trial_tracking: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    skill_trial_exposure: Option<SkillTrialExposureRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    output_sha256: Option<String>,
-''',
-          )
-          replace_once(
-              server,
-              '''            } else {
-                None
-            },
-            output_sha256: None,
-''',
-              '''            } else {
-                None
-            },
-            skill_trial_tracking: request.tool == SKILL_READ_TOOL,
-            skill_trial_exposure: None,
-            output_sha256: None,
-''',
-          )
-
-          helper_anchor = '''fn effect_path(root: &Path) -> PathBuf {
-'''
-          helpers = r'''fn canonical_dsh_turn(value: &str) -> Result<u64, String> {
-    let turn = value
-        .parse::<u64>()
-        .map_err(|_| "DSH turn_id for skill tracking must be a decimal integer".to_string())?;
-    if turn.to_string() != value {
-        return Err("DSH turn_id for skill tracking is not canonical".into());
-    }
-    Ok(turn)
-}
-
-fn canonical_skill_id(value: &str) -> bool {
-    let Some(fingerprint) = value.strip_prefix("skill-v1-") else {
-        return false;
-    };
-    fingerprint.len() == 64
-        && fingerprint
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-fn skill_trial_exposure_from_result(
-    meta: &Meta,
-    value: &Value,
-) -> Result<SkillTrialExposureRecord, String> {
-    let structured = value
-        .get("structuredContent")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "skill read returned no structuredContent".to_string())?;
-    let skills = structured
-        .get("skills")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "skill read returned no skills array".to_string())?;
-    if skills.len() > MAX_SKILL_READ_LIMIT {
-        return Err("skill read exceeded the bounded result limit".into());
-    }
-    let returned = structured
-        .get("returned")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "skill read returned no bounded result count".to_string())?;
-    if returned != skills.len() as u64 {
-        return Err("skill read result count does not match skills array".into());
-    }
-    let mut seen = BTreeSet::new();
-    let mut skill_ids = Vec::with_capacity(skills.len());
-    for skill in skills {
-        let id = skill
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "skill read returned an entry without id".to_string())?;
-        if !canonical_skill_id(id) || !seen.insert(id.to_string()) {
-            return Err("skill read returned a non-canonical or duplicate skill id".into());
-        }
-        skill_ids.push(id.to_string());
-    }
-    let turn = canonical_dsh_turn(&meta.turn_id)?;
-    Ok(SkillTrialExposureRecord {
-        turn_key: trial_turn_key(&meta.host_session_id, turn),
-        skill_ids,
-    })
-}
-
-fn recovered_skill_trial_exposure(
-    effect: &EffectRecord,
-) -> Result<Option<SkillTrialExposureRecord>, String> {
-    if effect.skill_trial_tracking && effect.tool != SKILL_READ_TOOL {
-        return Err("durable effect marker tracks a trial for a non-skill-read tool".into());
-    }
-    if effect.skill_trial_exposure.is_some()
-        && (!effect.skill_trial_tracking
-            || effect.tool != SKILL_READ_TOOL
-            || effect.state != EffectState::Succeeded)
-    {
-        return Err("durable skill-trial exposure metadata is inconsistent".into());
-    }
-    if effect.skill_trial_tracking && effect.state == EffectState::Succeeded {
-        return effect
-            .skill_trial_exposure
-            .clone()
-            .map(Some)
-            .ok_or_else(|| "tracked successful skill read is missing exposure metadata".into());
-    }
-    Ok(None)
-}
-
-'''
-          replace_once(server, helper_anchor, helpers + helper_anchor)
-
-          replace_once(
-              server,
-              '''    skill_store: SkillStore,
-    skill_projection: ProjectionState,
-''',
-              '''    skill_store: SkillStore,
-    skill_trial_store: SkillTrialStore,
-    skill_projection: ProjectionState,
-''',
-          )
-          replace_once(
-              server,
-              '''        let skill_store = SkillStore::open(&skills_root)
-            .map_err(|error| format!("cannot open Enterprise skill store: {error}"))?;
-        let mut skill_projection = ProjectionState::open(&skills_root, &config.tenant)?;
-''',
-              '''        let skill_store = SkillStore::open(&skills_root)
-            .map_err(|error| format!("cannot open Enterprise skill store: {error}"))?;
-        let skill_trial_store = SkillTrialStore::open(&skills_root)
-            .map_err(|error| format!("cannot open Enterprise skill trial store: {error}"))?;
-        let mut skill_projection = ProjectionState::open(&skills_root, &config.tenant)?;
-''',
-          )
-          replace_once(
-              server,
-              '''            }
-            match effect.state {
-''',
-              '''            }
-            let recovered_skill_trial = recovered_skill_trial_exposure(&effect)?;
-            match effect.state {
-''',
-          )
-          replace_once(
-              server,
-              '''                    if effect.execution_attempt_id.is_some() {
-                        front_door.backend_mut().reconcile_effect(&effect)?;
-                    }
-                    Self::settle_recovered_success(
-''',
-              '''                    if effect.execution_attempt_id.is_some() {
-                        front_door.backend_mut().reconcile_effect(&effect)?;
-                    }
-                    if let Some(exposure) = recovered_skill_trial.as_ref() {
-                        let registry = skill_store
-                            .load_registry(SkillConfig::default())
-                            .map_err(|error| {
-                                format!("cannot load skill registry for trial recovery: {error}")
-                            })?;
-                        skill_trial_store
-                            .replay_exposure_turn_key(
-                                SkillTrialConfig::default(),
-                                &exposure.turn_key,
-                                &registry,
-                                &exposure.skill_ids,
-                            )
-                            .map_err(|error| {
-                                format!("cannot recover durable skill-trial exposure: {error}")
-                            })?;
-                    }
-                    Self::settle_recovered_success(
-''',
-          )
-          replace_once(
-              server,
-              '''            store,
-            skill_store,
-            skill_projection,
-''',
-              '''            store,
-            skill_store,
-            skill_trial_store,
-            skill_projection,
-''',
-          )
-
-          old_projection = '''        if let Err(error) = parse_capture(source) {
-            eprintln!(
-                "ccos-enterprise-mcp: quarantining malformed DSH L1 evidence for request {request_id:?}: {error}"
-            );
-            self.skill_projection.clear(request_id, &source_hash)?;
-            return Ok(true);
-        }
-
-        self.skill_store
-            .observe_capture(SkillConfig::default(), source)
-            .map_err(|error| format!("cannot project DSH L1 skill evidence: {error}"))?;
-        self.skill_projection.clear(request_id, &source_hash)?;
-'''
-          new_projection = '''        let episode = match parse_capture(source) {
-            Ok(episode) => episode,
-            Err(error) => {
-                eprintln!(
-                    "ccos-enterprise-mcp: quarantining malformed DSH L1 evidence for request {request_id:?}: {error}"
-                );
-                self.skill_projection.clear(request_id, &source_hash)?;
-                return Ok(true);
-            }
-        };
-
-        self.skill_store
-            .observe_capture(SkillConfig::default(), source)
-            .map_err(|error| format!("cannot project DSH L1 skill evidence: {error}"))?;
-        if let Some(episode) = episode.as_ref() {
-            let registry = self
-                .skill_store
-                .load_registry(SkillConfig::default())
-                .map_err(|error| format!("cannot reload skill registry for trial resolution: {error}"))?;
-            self.skill_trial_store
-                .resolve_episode(SkillTrialConfig::default(), episode, &registry)
-                .map_err(|error| format!("cannot resolve observational skill trial: {error}"))?;
-        }
-        self.skill_projection.clear(request_id, &source_hash)?;
-'''
-          replace_once(server, old_projection, new_projection)
-
-          old_result = '''                let result = self
-                    .skill_store
-                    .load_registry(SkillConfig::default())
-                    .map_err(|error| format!("cannot load Enterprise skill registry: {error}"))
-                    .and_then(|registry| active_skill_tool_result(&registry, arguments));
-                let (success, output_sha256) = match &result {
-                    Ok(value) => (
-                        true,
-                        successful_output_sha256(value).map_err(|error| {
-                            let reason = format!("cannot hash skill-read output: {error}");
-                            self.poisoned = Some(reason);
-                            (
-                                -32000,
-                                "Enterprise skill-read output is not durable".to_string(),
-                            )
-                        })?,
-                    ),
-                    Err(error) => (false, failed_output_sha256(error)),
-                };
-                effect.state = if success {
-'''
-          new_result = '''                let result = self
-                    .skill_store
-                    .load_registry(SkillConfig::default())
-                    .map_err(|error| format!("cannot load Enterprise skill registry: {error}"))
-                    .and_then(|registry| {
-                        let value = active_skill_tool_result(&registry, arguments)?;
-                        let exposure = skill_trial_exposure_from_result(meta, &value)?;
-                        Ok((value, exposure, registry))
-                    });
-                let (success, output_sha256) = match &result {
-                    Ok((value, _, _)) => (
-                        true,
-                        successful_output_sha256(value).map_err(|error| {
-                            let reason = format!("cannot hash skill-read output: {error}");
-                            self.poisoned = Some(reason);
-                            (
-                                -32000,
-                                "Enterprise skill-read output is not durable".to_string(),
-                            )
-                        })?,
-                    ),
-                    Err(error) => (false, failed_output_sha256(error)),
-                };
-                if let Ok((_, exposure, _)) = &result {
-                    effect.skill_trial_exposure = Some(exposure.clone());
-                }
-                effect.state = if success {
-'''
-          replace_once(server, old_result, new_result)
-
-          replace_once(
-              server,
-              '''                match result {
-                    Ok(value) => value,
-                    Err(error) => {
-''',
-              '''                match result {
-                    Ok((value, exposure, registry)) => {
-                        let turn = canonical_dsh_turn(&meta.turn_id).map_err(|error| {
-                            self.poisoned = Some(error.clone());
-                            (-32000, "Enterprise skill-trial turn is invalid".to_string())
-                        })?;
-                        if let Err(error) = self.skill_trial_store.expose(
-                            SkillTrialConfig::default(),
-                            &meta.host_session_id,
-                            turn,
-                            &registry,
-                            &exposure.skill_ids,
-                        ) {
-                            let reason = format!("cannot persist observational skill exposure: {error}");
-                            self.poisoned = Some(reason.clone());
-                            eprintln!("ccos-enterprise-mcp: {reason}");
-                            return Err((
-                                -32000,
-                                "Enterprise skill-trial exposure is not durable".to_string(),
-                            ));
-                        }
-                        value
-                    }
-                    Err(error) => {
-''',
-          )
-
-          # Existing hand-written effect markers are legacy witnesses and must
-          # remain deserializable/recoverable without trial metadata.
-          p = Path(server)
-          text = p.read_text()
-          literal_anchor = '''                skill_source_sha256: None,
-                output_sha256: Some('''
-          count = text.count(literal_anchor)
-          if count != 2:
-              raise SystemExit(f'expected two legacy EffectRecord literals, found {count}')
-          text = text.replace(
-              literal_anchor,
-              '''                skill_source_sha256: None,
-                skill_trial_tracking: false,
-                skill_trial_exposure: None,
-                output_sha256: Some(''',
-          )
-          text = text.replace(
-              '"turn_id": format!("turn-{id}"),',
-              '"turn_id": id.to_string(),',
-          )
-          p.write_text(text)
-
-          # Add test helpers and two transaction-level regressions.
-          replace_once(
-              server,
-              '''    use ccos_enterprise_auth::{issue_identity_token, IdentityClaims, IDENTITY_TOKEN_VERSION};
-    use ed25519_dalek::SigningKey;
-''',
-              '''    use ccos_enterprise_auth::{issue_identity_token, IdentityClaims, IDENTITY_TOKEN_VERSION};
-    use ccos_enterprise_skills::{
-        EpisodeObservation, SkillRegistry, SkillStatus, ToolObservation, ToolOutcome,
-    };
-    use ed25519_dalek::SigningKey;
-''',
-          )
-          replace_once(
-              server,
-              '''    fn cleanup(root: &Path) {
-        let _ = fs::remove_dir_all(root);
-    }
-
-''',
-              '''    fn cleanup(root: &Path) {
-        let _ = fs::remove_dir_all(root);
-    }
-
-    fn install_active_recall_skill(server: &Server) -> String {
-        let mut registry = SkillRegistry::new(SkillConfig::default()).unwrap();
-        for turn in 1..=3 {
-            registry
-                .observe(&EpisodeObservation {
-                    evidence_id: format!("{turn:064x}"),
-                    session_id: "fixture-skill-source".into(),
-                    turn,
-                    reason_kind: "completed".into(),
-                    tools: vec![ToolObservation {
-                        name: "memory.recall".into(),
-                        call_id: format!("fixture-call-{turn}"),
-                        outcome: ToolOutcome::Succeeded,
-                    }],
-                })
-                .unwrap();
-        }
-        let id = registry.active().next().unwrap().id.clone();
-        server.skill_store.save(registry.snapshot()).unwrap();
-        id
-    }
-
-    fn matching_l1_capture(turn: u64) -> String {
-        format!(
-            "# DeepSeek Harness turn {turn}\nsession: test-session\n\n## User\ntrial outcome\n\n## Tools\n- memory.recall (trial-call)\n  input: {{}}\n  output: ok\nturn_end_reason: {{\"kind\":\"completed\"}}\n\n## CCOS Episode (evidence-only)\n```json\n{{\"schema\":\"ccos.dsh.episode.v1\",\"evidence_only\":true,\"host\":\"deepseek-harness\",\"session_id\":\"test-session\",\"turn\":{turn},\"observed_outcome\":{{\"reason_kind\":\"completed\"}},\"evidence\":{{\"tool_calls\":1,\"tool_failures\":0,\"unresolved_tool_calls\":0}}}}\n```\n"
-        )
-    }
-
-''',
-          )
-
-          marker = '''    #[test]
-    fn completed_skill_read_recovers_missing_governance_without_rerun() {
-'''
-          tests = '''    #[test]
-    fn governed_skill_read_creates_and_matching_l1_resolves_trial() {
-        let config = test_config("skill-trial-live");
-        let root = config.state_dir.clone();
-        cleanup(&root);
-        let mut server = Server::new(config).unwrap();
-        let skill_id = install_active_recall_skill(&server);
-
-        let read = server
-            .handle(&call(
-                7,
-                "alice",
-                "skill-trial-read",
-                SKILL_READ_TOOL,
-                json!({"limit": 4}),
-            ))
-            .unwrap();
-        assert_eq!(read["result"]["structuredContent"]["returned"], 1);
-        assert_eq!(read["result"]["structuredContent"]["skills"][0]["id"], skill_id);
-        let pending = server.skill_trial_store.load().unwrap().unwrap();
-        assert_eq!(pending.trials.len(), 1);
-        let trial = pending.trials.values().next().unwrap();
-        assert_eq!(trial.status, ccos_enterprise_skills::SkillTrialStatus::Pending);
-        assert_eq!(trial.turn_key, trial_turn_key("test-session", 7));
-
-        let ingest = server
-            .handle(&call(
-                8,
-                "alice",
-                "skill-trial-outcome",
-                "memory.ingest",
-                json!({
-                    "uri": "dsh/skill-trial-outcome.md",
-                    "source": matching_l1_capture(7)
-                }),
-            ))
-            .unwrap();
-        assert!(ingest.get("result").is_some(), "{ingest}");
-        let resolved = server.skill_trial_store.load().unwrap().unwrap();
-        assert_eq!(resolved.trials.len(), 1);
-        let trial = resolved.trials.values().next().unwrap();
-        assert_eq!(trial.status, ccos_enterprise_skills::SkillTrialStatus::Passed);
-        assert!(trial.evidence_id.is_some());
-        cleanup(&root);
-    }
-
-    #[test]
-    fn tracked_completed_skill_read_recovers_missing_trial_before_governance() {
-        let config = test_config("skill-trial-crash-recovery");
-        let root = config.state_dir.clone();
-        cleanup(&root);
-        let skill_id;
-        {
-            let server = Server::new(config.clone()).unwrap();
-            skill_id = install_active_recall_skill(&server);
-            drop(server);
-            let path = execution_root(&root).join("acme").join("execution.jsonl");
-            let mut journal = execution::ExecutionJournal::open(&path, "tenant/acme/mcp")
-                .unwrap()
-                .journal;
-            journal
-                .append(execution::ExecutionEvent::ToolRequested {
-                    turn_id: "44".into(),
-                    step_id: "skill-step".into(),
-                    call_id: "tracked-skill-crash".into(),
-                    tool: SKILL_READ_TOOL.into(),
-                    input_sha256: "tracked-input".into(),
-                })
-                .unwrap();
-            journal
-                .append(execution::ExecutionEvent::ToolStarted {
-                    call_id: "tracked-skill-crash".into(),
-                })
-                .unwrap();
-            journal
-                .append(execution::ExecutionEvent::ToolFinished {
-                    call_id: "tracked-skill-crash".into(),
-                    success: true,
-                    output_sha256: "tracked-output".into(),
-                })
-                .unwrap();
-            let effect = EffectRecord {
-                request_id: "tracked-skill-request".into(),
-                tenant: "acme".into(),
-                actor: "alice".into(),
-                tool: SKILL_READ_TOOL.into(),
-                model: "deepseek-harness".into(),
-                cost_tokens: 1,
-                state: EffectState::Succeeded,
-                turn_id: Some("44".into()),
-                step_id: Some("skill-step".into()),
-                execution_attempt_id: Some("tracked-skill-crash".into()),
-                skill_source_sha256: None,
-                skill_trial_tracking: true,
-                skill_trial_exposure: Some(SkillTrialExposureRecord {
-                    turn_key: trial_turn_key("test-session", 44),
-                    skill_ids: vec![skill_id.clone()],
-                }),
-                output_sha256: Some("tracked-output".into()),
-            };
-            write_effect(&effect_path(&root), &effect).unwrap();
-        }
-        {
-            let restarted = Server::new(config).unwrap();
-            assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
-            let snapshot = restarted.skill_trial_store.load().unwrap().unwrap();
-            assert_eq!(snapshot.trials.len(), 1);
-            let trial = snapshot.trials.values().next().unwrap();
-            assert_eq!(trial.skill_id, skill_id);
-            assert_eq!(trial.status, ccos_enterprise_skills::SkillTrialStatus::Pending);
-            assert_eq!(trial.turn_key, trial_turn_key("test-session", 44));
-            assert_eq!(
-                read_effect(&effect_path(&root)).unwrap().unwrap().state,
-                EffectState::Settled
-            );
-        }
-        cleanup(&root);
-    }
-
-'''
-          replace_once(server, marker, tests + marker)
-
-          # Real-process proof: activate a skill, expose it through memory.skills,
-          # resolve it with the matching L1 turn, and prove replays do not fork trials.
-          e2e = Path('adapters/deepseek-harness/test/real-rust-server-e2e.test.js')
-          text = e2e.read_text()
-          appended = r'''
-
-test(
-  'active skill read creates one private observational trial resolved by matching L1',
-  { skip: !serverPath },
-  async () => {
-    const root = await mkdtemp(join(tmpdir(), 'ccos-dsh-skill-trial-e2e-'))
-    const identity = identityFixture()
-    try {
-      const client = clientFor(root, identity)
-      try {
-        await client.start()
-        for (const turn of [10, 11, 12]) {
-          const source = l1Capture({ secret: `activation-${turn}`, turn })
-          const ingested = await client.callTool(
-            'memory.ingest',
-            { uri: `dsh/activation-${turn}.md`, source },
-            ccosMeta(`activation-${turn}`, 'alice', String(turn)),
-          )
-          assert.notEqual(ingested?.isError, true)
-        }
-
-        const skillRead = await client.callTool(
-          'memory.skills',
-          { limit: 4 },
-          ccosMeta('trial-skill-read', 'alice', '20'),
-        )
-        assert.equal(skillRead.structuredContent?.returned, 1)
-        assert.equal(skillRead.structuredContent?.skills?.[0]?.status, 'active')
-
-        const trialsPath = join(root, '.skills', 'acme', 'skill-trials.json')
-        const pendingText = await readFile(trialsPath, 'utf8')
-        assert.equal(pendingText.includes('real-rust-e2e-session'), false)
-        const pending = JSON.parse(pendingText)
-        assert.equal(Object.keys(pending.trials).length, 1)
-        assert.equal(Object.values(pending.trials)[0].status, 'pending')
-
-        const outcome = await client.callTool(
-          'memory.ingest',
-          { uri: 'dsh/trial-outcome.md', source: l1Capture({ secret: 'trial-outcome-secret', turn: 20 }) },
-          ccosMeta('trial-outcome-ingest', 'alice', '21'),
-        )
-        assert.notEqual(outcome?.isError, true)
-
-        const resolvedText = await readFile(trialsPath, 'utf8')
-        assert.equal(resolvedText.includes('trial-outcome-secret'), false)
-        const resolved = JSON.parse(resolvedText)
-        const trial = Object.values(resolved.trials)[0]
-        assert.equal(trial.status, 'passed')
-        assert.match(trial.evidence_id, /^[0-9a-f]{64}$/)
-
-        const readReplay = await client.callTool(
-          'memory.skills',
-          { limit: 1 },
-          ccosMeta('trial-skill-read', 'alice', '99'),
-        )
-        assert.equal(readReplay.structuredContent?.replayed, true)
-        const ingestReplay = await client.callTool(
-          'memory.ingest',
-          { uri: 'dsh/trial-outcome.md', source: l1Capture({ secret: 'attacker-replay', tool: 'memory.timeline', turn: 99 }) },
-          ccosMeta('trial-outcome-ingest', 'alice', '99'),
-        )
-        assert.equal(ingestReplay.structuredContent?.replayed, true)
-
-        const replayed = JSON.parse(await readFile(trialsPath, 'utf8'))
-        assert.equal(Object.keys(replayed.trials).length, 1)
-        assert.equal(Object.values(replayed.trials)[0].status, 'passed')
-      } finally {
-        await client.close()
-      }
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  },
-)
-'''
-          if "active skill read creates one private observational trial" in text:
-              raise SystemExit('trial E2E already present')
-          e2e.write_text(text.rstrip() + appended + '\n')
-          PY
-
-          cargo fmt --all
-          cargo fmt --all -- --check
-          cargo check -p ccos-enterprise-skills -p ccos-enterprise-mcp
-          cargo clippy -p ccos-enterprise-skills -p ccos-enterprise-mcp --all-targets -- -D warnings
-          cargo test -p ccos-enterprise-skills
-          cargo test -p ccos-enterprise-mcp
-          npm --prefix adapters/deepseek-harness test
-          cargo build -p ccos-enterprise-mcp --bin ccos-enterprise-mcp-server
-          CCOS_REAL_MCP_SERVER="$PWD/target/debug/ccos-enterprise-mcp-server" \
-            node --test adapters/deepseek-harness/test/real-rust-server-e2e.test.js
-
-      - name: Commit validated product tree and restore official Fast CI
-        shell: bash
+          # On pull_request events HEAD is GitHub's synthetic merge ref,
+          # whose fabricated merge commit (author = triggering account,
+          # committer = web-flow) can never satisfy the policy — check the
+          # range up to the PR's real head instead.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            scripts/check-author-policy.sh "origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}"
+          else
+            scripts/check-author-policy.sh HEAD
+          fi
+      - name: "Enterprise boundary: no RSI/Forge/Research-Lab dependency"
         run: |
-          git fetch origin main
-          git checkout origin/main -- .github/workflows/ci-fast.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git diff --cached --check
-          git commit -m "feat(skills): wire crash-safe observational trials"
-          git push origin HEAD:feat/skills-observational-trial-wiring
+          ! grep -RniE 'ccos-rsi|forge-core|ccos-forge|ccos-research-lab|self_improvement|self_modify' \
+            --include='Cargo.toml' crates tools Cargo.toml
+          ! cargo tree --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features 2>/dev/null | grep -iE 'ccos-rsi|forge|research-lab|octacore'
+          # OctaSoma and its targeted SciRust dependencies are now an explicit
+          # Enterprise capability, but direct declaration is confined to the
+          # workspace pin plus the governed adapter crate.
+          mapfile -t OCTA_MANIFESTS < <(grep -Rli 'octasoma' --include='Cargo.toml' crates tools Cargo.toml | sort)
+          printf '%s\n' "${OCTA_MANIFESTS[@]}" | grep -qx 'Cargo.toml'
+          printf '%s\n' "${OCTA_MANIFESTS[@]}" | grep -qx 'crates/ccos-enterprise-octasoma/Cargo.toml'
+          test "${#OCTA_MANIFESTS[@]}" -eq 2
+      - name: Workspace lockfile is current
+        run: cargo metadata --locked --format-version 1 >/dev/null
+      - run: cargo fmt --all -- --check
+      # NOT `--all-features` across the whole workspace. Core is a member now
+      # and carries opt-in features of its own. Enterprise enables semantic
+      # memory through `ccos-enterprise-octasoma`, not by sweeping Core's
+      # unrelated optional feature matrix. Core packages are excluded from
+      # *selection*, so they still build as dependencies with precisely the
+      # features Enterprise asks for (`default-features = false`); only
+      # Enterprise's own feature matrix is swept here.
+      - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
+      - run: cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
+      - run: cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
+      # Excluding Core from the feature sweep must not mean Core stops being
+      # tested — that would trade a boundary risk for a coverage hole. Its own
+      # suite runs at default features, which is what Enterprise ships. This
+      # covers Core and Enterprise in one command, the thing two repositories
+      # could never do.
+      - run: cargo test --workspace
+      # The identity verifier and the fixtures that drive the gates live behind
+      # non-default features, so `--workspace` compiles neither. Without this
+      # step the 18 adversarial tests in `ccos-enterprise-auth` would be exactly
+      # the failure that crate was written to remove: a security mechanism no
+      # build compiles and no run exercises, passing CI by being absent.
+      - name: identity verifier (non-default features)
+        run: |
+          FEATS=token-auth,mtls-auth,oidc-auth,test-identities
+          cargo test -p ccos-enterprise-auth --features "$FEATS"
+          cargo clippy -p ccos-enterprise-auth --features "$FEATS" \
+            --all-targets -- -D warnings
+          # Every combination, including the empty one. The features gate a
+          # verifier, its issuer map and the constructor the mechanisms share,
+          # so a symbol can be live in one combination and dead in another —
+          # and `-D warnings` is right to say so. This loop exists because a
+          # push once went red on exactly the combination nobody had run: no
+          # features at all, which is what a deployment that has configured no
+          # authenticator compiles.
+          for f in "" token-auth mtls-auth oidc-auth test-identities \
+                   token-auth,mtls-auth token-auth,oidc-auth mtls-auth,oidc-auth \
+                   token-auth,test-identities token-auth,mtls-auth,oidc-auth; do
+            echo "::group::clippy features=[$f]"
+            cargo clippy -p ccos-enterprise-auth ${f:+--features "$f"} \
+              --all-targets -- -D warnings
+            echo "::endgroup::"
+          done

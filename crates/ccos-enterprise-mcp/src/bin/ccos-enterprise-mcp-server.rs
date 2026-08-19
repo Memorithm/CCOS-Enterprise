@@ -36,7 +36,7 @@ use ccos_enterprise_runtime::{
     is_canonical_identifier, AuditRecord, Call, Deployment, DeploymentSnapshot, GovernanceRecord,
     Outcome, TenantState,
 };
-use ccos_enterprise_skills::{SkillConfig, SkillStore};
+use ccos_enterprise_skills::{parse_capture, SkillConfig, SkillStore};
 use ccos_enterprise_store::Store;
 use ed25519_dalek::VerifyingKey;
 #[cfg(test)]
@@ -852,14 +852,26 @@ impl Server {
         })
     }
 
-    fn finish_skill_projection(&mut self, request_id: &str, source: &str) -> Result<(), String> {
+    /// Returns true when the current source was permanently rejected as malformed
+    /// L1 evidence. Durable store/snapshot failures remain pending and retryable.
+    fn finish_skill_projection(&mut self, request_id: &str, source: &str) -> Result<bool, String> {
         let source_hash = source_sha256(source);
         self.skill_projection
             .require_match(request_id, &source_hash)?;
+
+        if let Err(error) = parse_capture(source) {
+            eprintln!(
+                "ccos-enterprise-mcp: quarantining malformed DSH L1 evidence for request {request_id:?}: {error}"
+            );
+            self.skill_projection.clear(request_id, &source_hash)?;
+            return Ok(true);
+        }
+
         self.skill_store
             .observe_capture(SkillConfig::default(), source)
             .map_err(|error| format!("cannot project DSH L1 skill evidence: {error}"))?;
-        self.skill_projection.clear(request_id, &source_hash)
+        self.skill_projection.clear(request_id, &source_hash)?;
+        Ok(false)
     }
 
     fn recover_pending_projection(
@@ -882,7 +894,8 @@ impl Server {
                 eprintln!("ccos-enterprise-mcp: skill projection retry refused: {error}");
                 (-32000, "Enterprise skill projection mismatch".to_string())
             })?;
-        self.finish_skill_projection(request_id, source)
+        let quarantined = self
+            .finish_skill_projection(request_id, source)
             .map_err(|error| {
                 eprintln!("ccos-enterprise-mcp: skill projection remains pending: {error}");
                 (
@@ -903,7 +916,11 @@ impl Server {
         }
         Ok(Some(json!({
             "content": [{ "type": "text", "text": "CCOS Enterprise replay suppressed after skill projection recovery" }],
-            "structuredContent": { "replayed": true, "skill_projection_recovered": true }
+            "structuredContent": {
+                "replayed": true,
+                "skill_projection_recovered": true,
+                "skill_projection_quarantined": quarantined
+            }
         })))
     }
 

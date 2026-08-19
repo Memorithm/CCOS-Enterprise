@@ -506,6 +506,7 @@ dependencies = [
  "ccos-enterprise-tenancy",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

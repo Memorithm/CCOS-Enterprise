@@ -477,11 +477,7 @@ mod tests {
     fn failed_unresolved_call_counts_as_one_negative_trial() {
         let mut registry = SkillRegistry::new(SkillConfig::default()).unwrap();
         let out = registry
-            .observe(&episode(
-                "fu",
-                &[ToolOutcome::FailedUnresolved],
-                "error",
-            ))
+            .observe(&episode("fu", &[ToolOutcome::FailedUnresolved], "error"))
             .unwrap();
         assert_eq!(out.disposition, ObserveDisposition::Created);
         let skill = registry.snapshot().skills.values().next().unwrap();
@@ -523,10 +519,7 @@ mod tests {
             vec!["e3".to_string(), "e4".to_string(), "e5".to_string()]
         );
         let skill = registry.snapshot().skills.values().next().unwrap();
-        assert_eq!(
-            skill.evidence_ids,
-            vec!["e4".to_string(), "e5".to_string()]
-        );
+        assert_eq!(skill.evidence_ids, vec!["e4".to_string(), "e5".to_string()]);
     }
 
     #[test]
@@ -557,10 +550,7 @@ mod tests {
             vec!["e3".to_string(), "e4".to_string(), "e5".to_string()]
         );
         let skill = restored.snapshot().skills.values().next().unwrap();
-        assert_eq!(
-            skill.evidence_ids,
-            vec!["e4".to_string(), "e5".to_string()]
-        );
+        assert_eq!(skill.evidence_ids, vec!["e4".to_string(), "e5".to_string()]);
     }
 
     #[test]

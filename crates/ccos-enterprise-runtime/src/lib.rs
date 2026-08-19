@@ -2678,7 +2678,7 @@ mod tests {
 
     #[test]
     fn corrupt_approval_ledger_is_refused_on_restore() {
-        let mut d = two_tenant_deployment();
+        let d = two_tenant_deployment();
         let mut snapshot = d.snapshot();
         let mut approvals = ccos_enterprise_approval::ApprovalSnapshot::default();
         approvals.approvals.insert(

@@ -38,6 +38,19 @@ pub enum ExecutionEvent {
         message_id: String,
         content_sha256: String,
     },
+    HostCallCorrelated {
+        call_id: String,
+        request_id: String,
+        host: String,
+        host_session_id: String,
+        trace_id: String,
+        agent_id: String,
+        profile: String,
+        turn_id: String,
+        step_id: String,
+        tool_call_id: Option<String>,
+        tool: String,
+    },
     ToolRequested {
         turn_id: String,
         step_id: String,
@@ -279,6 +292,11 @@ impl ExecutionJournal {
             .unwrap_or(GENESIS_HASH)
     }
     pub fn recover_tools(&self) -> Result<Vec<ToolRecovery>, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Poisoned(
+                "recovery refused after a previous durable write error; reopen the journal to repair the tail".into(),
+            ));
+        }
         recover_tools(&self.records)
     }
 }
@@ -618,6 +636,10 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, JournalError::Io(_)));
         assert!(journal.is_poisoned());
+        assert!(matches!(
+            journal.recover_tools(),
+            Err(JournalError::Poisoned(_))
+        ));
         assert!(matches!(
             journal.append(ExecutionEvent::TurnStarted {
                 turn_id: "must-not-append".into()

@@ -5,7 +5,7 @@ import {
   randomUUID,
   sign,
 } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -45,18 +45,20 @@ function identityFixture() {
 }
 
 function ccosMeta(requestId, actor = 'alice') {
-  return {
-    tenant_id: 'acme',
-    actor_id: actor,
-    host: 'deepseek-harness',
-    request_id: requestId,
-    model: 'deepseek-harness',
-    dsh_session_id: 'real-rust-e2e-session',
-    turn_id: '1',
-    step_id: '1',
-    trace_id: '0123456789abcdef0123456789abcdef',
+    return {
+      tenant_id: 'acme',
+      actor_id: actor,
+      agent_id: 'deepseek-harness-agent',
+      host: 'deepseek-harness',
+      dsh_profile: 'e2e',
+      request_id: requestId,
+      model: 'deepseek-harness',
+      dsh_session_id: 'real-rust-e2e-session',
+      turn_id: '1',
+      step_id: '1',
+      trace_id: '0123456789abcdef0123456789abcdef',
+    }
   }
-}
 
 function clientFor(stateDir, identity) {
   return new StdioMcpClient({
@@ -125,6 +127,30 @@ test(
       } finally {
         await restarted.close()
       }
+    const correlationText = await readFile(
+      join(root, '.execution', 'acme', 'correlation.jsonl'),
+      'utf8',
+    )
+    const correlation = correlationText
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line).event)
+      .filter((event) => event.type === 'host_call_correlated')
+    assert.equal(
+      correlation.length,
+      2,
+      'forged actor must not create an accepted host-correlation row',
+    )
+    assert.equal(correlation[0].request_id, requestId)
+    assert.equal(correlation[1].request_id, requestId)
+    assert.notEqual(correlation[0].call_id, correlation[1].call_id)
+    assert.equal(correlation[0].host, 'deepseek-harness')
+    assert.equal(correlation[0].host_session_id, 'real-rust-e2e-session')
+    assert.equal(correlation[0].agent_id, 'deepseek-harness-agent')
+    assert.equal(correlation[0].profile, 'e2e')
+    assert.equal(correlation[0].trace_id, '0123456789abcdef0123456789abcdef')
+
     } finally {
       await rm(root, { recursive: true, force: true })
     }

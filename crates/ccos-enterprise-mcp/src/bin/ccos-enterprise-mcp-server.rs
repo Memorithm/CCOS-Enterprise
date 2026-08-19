@@ -1918,7 +1918,7 @@ mod tests {
         // through the governed admin handle, then call again under a fresh
         // request id.
         {
-            let mut d = server.front_door.deployment_mut();
+            let d = server.front_door.deployment_mut();
             let mut admin = d.as_admin("root", "grant operator audit");
             admin.add_role("auditor", &["audit.provenance"]);
             admin.assign("alice", "auditor");
@@ -1953,7 +1953,7 @@ mod tests {
         {
             let mut server = Server::new(config.clone()).unwrap();
             {
-                let mut d = server.front_door.deployment_mut();
+                let d = server.front_door.deployment_mut();
                 let mut admin = d.as_admin("root", "grant operator audit");
                 admin.add_role("auditor", &["audit.provenance"]);
                 admin.assign("alice", "auditor");

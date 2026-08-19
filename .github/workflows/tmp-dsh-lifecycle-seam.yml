@@ -1,8 +1,8 @@
 name: Temporary DSH lifecycle seam validator
 
 on:
-  push:
-    branches: [feat/dsh-explicit-execution-lifecycle]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
@@ -13,7 +13,7 @@ env:
 
 jobs:
   validate:
-    if: github.event.head_commit.message == 'ci: validate DSH lifecycle seam'
+    if: github.head_ref == 'feat/dsh-explicit-execution-lifecycle'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

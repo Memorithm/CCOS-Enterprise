@@ -31,7 +31,7 @@ pub fn skill_permission_for(tool: &str) -> Option<&'static str> {
 pub fn skill_tool_spec() -> Value {
     json!({
         "name": SKILL_READ_TOOL,
-        "description": "List validated active evidence-backed skills for the authenticated tenant. Metadata only; this capability never executes a skill or returns raw captured content.",
+        "description": "List validated active evidence-backed skills for the authenticated tenant, including read-only post-exposure observational trial counters. Metadata only; this capability never executes a skill or returns raw captured content.",
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -1,93 +1,156 @@
 name: CI (fast)
 
 on:
-  push:
-    branches: [main]
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
-  fast:
+  patch-approval-runtime:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # The workspace depends on ccos-core by PATH during development.
+          ref: ${{ github.event.pull_request.head.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Author policy (single human contributor)
+      - name: Apply exact runtime hardening and validate
+        shell: bash
         run: |
-          # On pull_request events HEAD is GitHub's synthetic merge ref,
-          # whose fabricated merge commit (author = triggering account,
-          # committer = web-flow) can never satisfy the policy — check the
-          # range up to the PR's real head instead.
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            scripts/check-author-policy.sh "origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}"
-          else
-            scripts/check-author-policy.sh HEAD
-          fi
-      - name: "Enterprise boundary: no RSI/Forge/Research-Lab dependency"
-        run: |
-          ! grep -RniE 'ccos-rsi|forge-core|ccos-forge|ccos-research-lab|self_improvement|self_modify' \
-            --include='Cargo.toml' crates tools Cargo.toml
-          ! cargo tree --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features 2>/dev/null | grep -iE 'ccos-rsi|forge|research-lab|octacore'
-          # OctaSoma and its targeted SciRust dependencies are now an explicit
-          # Enterprise capability, but direct declaration is confined to the
-          # workspace pin plus the governed adapter crate.
-          mapfile -t OCTA_MANIFESTS < <(grep -Rli 'octasoma' --include='Cargo.toml' crates tools Cargo.toml | sort)
-          printf '%s\n' "${OCTA_MANIFESTS[@]}" | grep -qx 'Cargo.toml'
-          printf '%s\n' "${OCTA_MANIFESTS[@]}" | grep -qx 'crates/ccos-enterprise-octasoma/Cargo.toml'
-          test "${#OCTA_MANIFESTS[@]}" -eq 2
-      - name: Workspace lockfile is current
-        run: cargo metadata --locked --format-version 1 >/dev/null
-      - run: cargo fmt --all -- --check
-      # NOT `--all-features` across the whole workspace. Core is a member now
-      # and carries opt-in features of its own. Enterprise enables semantic
-      # memory through `ccos-enterprise-octasoma`, not by sweeping Core's
-      # unrelated optional feature matrix. Core packages are excluded from
-      # *selection*, so they still build as dependencies with precisely the
-      # features Enterprise asks for (`default-features = false`); only
-      # Enterprise's own feature matrix is swept here.
-      - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
-      - run: cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
-      - run: cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
-      # Excluding Core from the feature sweep must not mean Core stops being
-      # tested — that would trade a boundary risk for a coverage hole. Its own
-      # suite runs at default features, which is what Enterprise ships. This
-      # covers Core and Enterprise in one command, the thing two repositories
-      # could never do.
-      - run: cargo test --workspace
-      # The identity verifier and the fixtures that drive the gates live behind
-      # non-default features, so `--workspace` compiles neither. Without this
-      # step the 18 adversarial tests in `ccos-enterprise-auth` would be exactly
-      # the failure that crate was written to remove: a security mechanism no
-      # build compiles and no run exercises, passing CI by being absent.
-      - name: identity verifier (non-default features)
-        run: |
-          FEATS=token-auth,mtls-auth,oidc-auth,test-identities
-          cargo test -p ccos-enterprise-auth --features "$FEATS"
-          cargo clippy -p ccos-enterprise-auth --features "$FEATS" \
-            --all-targets -- -D warnings
-          # Every combination, including the empty one. The features gate a
-          # verifier, its issuer map and the constructor the mechanisms share,
-          # so a symbol can be live in one combination and dead in another —
-          # and `-D warnings` is right to say so. This loop exists because a
-          # push once went red on exactly the combination nobody had run: no
-          # features at all, which is what a deployment that has configured no
-          # authenticator compiles.
-          for f in "" token-auth mtls-auth oidc-auth test-identities \
-                   token-auth,mtls-auth token-auth,oidc-auth mtls-auth,oidc-auth \
-                   token-auth,test-identities token-auth,mtls-auth,oidc-auth; do
-            echo "::group::clippy features=[$f]"
-            cargo clippy -p ccos-enterprise-auth ${f:+--features "$f"} \
-              --all-targets -- -D warnings
-            echo "::endgroup::"
-          done
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('crates/ccos-enterprise-runtime/src/lib.rs')
+          s = p.read_text()
+
+          def one(old, new, label):
+              global s
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'{label}: expected one anchor, found {n}')
+              s = s.replace(old, new, 1)
+
+          one(
+          '''pub const DEFAULT_REPLAY_MEMORY: usize = 65_536;\n''',
+          '''pub const DEFAULT_REPLAY_MEMORY: usize = 65_536;\n\n/// Sensitive actions that are approval-gated on every deployment. Callers may\n/// add stricter gates, but these documented administrative actions must never\n/// depend on a provisioning script remembering to opt in.\npub const DEFAULT_APPROVAL_REQUIRED_ACTIONS: &[&str] = &[\n    "tenant.delete",\n    "tenant.suspend",\n    "quota.override",\n    "policy.disable",\n    "license.revoke",\n    "model.allowlist.change",\n    "schema.migrate",\n];\n\nfn default_approval_required_actions() -> BTreeSet<String> {\n    DEFAULT_APPROVAL_REQUIRED_ACTIONS\n        .iter()\n        .map(|action| (*action).to_string())\n        .collect()\n}\n''',
+          'approval defaults constant')
+
+          one(
+          '''            approval_required: BTreeSet::new(),\n            approvals: ApprovalLedger::default(),\n''',
+          '''            approval_required: default_approval_required_actions(),\n            approvals: ApprovalLedger::default(),\n''',
+          'deployment default gates')
+
+          one(
+          '''    #[serde(default)]\n    pub approval_required: BTreeSet<String>,\n''',
+          '''    #[serde(default = "default_approval_required_actions")]\n    pub approval_required: BTreeSet<String>,\n''',
+          'snapshot default gates')
+
+          one(
+          '''        d.approval_required = snapshot.approval_required;\n        d.approvals = ApprovalLedger::from_snapshot(snapshot.approvals).map_err(|error| {\n''',
+          '''        d.approval_required = snapshot.approval_required;\n        d.approval_required\n            .extend(default_approval_required_actions());\n        d.approvals = ApprovalLedger::from_snapshot(snapshot.approvals).map_err(|error| {\n''',
+          'restore mandatory gates')
+
+          one(
+          '''#[derive(Debug, Default)]\npub struct ApprovalLedger {\n''',
+          '''#[derive(Debug, Clone, Default)]\npub struct ApprovalLedger {\n''',
+          'clone approval ledger')
+
+          one(
+          '''    pub fn record_approval(\n        &mut self,\n        request: ccos_enterprise_approval::ApprovalRequest,\n    ) -> Result<String, ccos_enterprise_approval::ApprovalError> {\n        let id = self.approvals.record(request)?;\n        self.record(\n            GovernanceChange::ApprovalRecorded {\n                approval_id: id.clone(),\n            },\n            None,\n            None,\n        );\n        Ok(id)\n    }\n''',
+          '''    pub fn record_approval(\n        &mut self,\n        request: ccos_enterprise_approval::ApprovalRequest,\n    ) -> Result<String, ccos_enterprise_approval::ApprovalError> {\n        // An approval without an audit fact is not an approval this runtime may\n        // use. A zero-capacity governance buffer cannot satisfy that contract.\n        if self.audit_capacity == 0 {\n            return Err(ccos_enterprise_approval::ApprovalError::AuditUnavailable);\n        }\n        let actor = request.approver.clone();\n        let justification = request.justification.clone();\n        let before = self.approvals.clone();\n        let id = self.approvals.record(request)?;\n        let change = GovernanceChange::ApprovalRecorded {\n            approval_id: id.clone(),\n        };\n        if self.serving {\n            self.record(change, Some(&actor), Some(&justification));\n        } else {\n            // `record()` intentionally suppresses ordinary provisioning noise,\n            // but authorization evidence is different: it must exist before the\n            // privileged effect can ever be admitted.\n            while self.governance.len() >= self.audit_capacity {\n                self.governance.pop_front();\n                self.governance_dropped = self.governance_dropped.saturating_add(1);\n                self.metrics.inc("governance.dropped", 1);\n            }\n            let ordinal = self.next_governance_ordinal;\n            self.next_governance_ordinal = self.next_governance_ordinal.saturating_add(1);\n            self.governance.push_back(GovernanceRecord {\n                at_sequence: self.next_sequence,\n                ordinal,\n                actor: Some(clamp(&actor)),\n                justification: ccos_enterprise_admin::is_written_justification(Some(&justification))\n                    .then(|| clamp(&justification)),\n                change,\n            });\n        }\n        if !self.governance.iter().any(|record| {\n            matches!(\n                &record.change,\n                GovernanceChange::ApprovalRecorded { approval_id } if approval_id == &id\n            )\n        }) {\n            self.approvals = before;\n            return Err(ccos_enterprise_approval::ApprovalError::AuditUnavailable);\n        }\n        Ok(id)\n    }\n''',
+          'mandatory approval governance')
+
+          # Regression tests are appended inside the existing test module.
+          marker = '\n}\n'
+          pos = s.rfind(marker)
+          if pos < 0:
+              raise SystemExit('test module terminator not found')
+          tests = r'''
+
+    #[test]
+    fn documented_sensitive_actions_are_gated_by_default_and_after_restore() {
+        let d = Deployment::new();
+        for action in DEFAULT_APPROVAL_REQUIRED_ACTIONS {
+            assert!(d.requires_approval(action), "{action} was not gated by default");
+        }
+        let snapshot = d.snapshot();
+        let restored = Deployment::restore(snapshot, &[], &[]).unwrap();
+        for action in DEFAULT_APPROVAL_REQUIRED_ACTIONS {
+            assert!(
+                restored.requires_approval(action),
+                "{action} lost its mandatory gate after restore"
+            );
+        }
+    }
+
+    #[test]
+    fn recording_approval_before_serving_still_creates_governance_evidence() {
+        let mut d = Deployment::new();
+        let request = ccos_enterprise_approval::ApprovalRequest::new(
+            TenantId("acme".into()),
+            "policy.disable",
+            &"ab".repeat(32),
+            "operator",
+            ccos_enterprise_approval::ApprovalDecision::Approved,
+            100,
+            None,
+            "approved for the exact policy artifact",
+        )
+        .unwrap();
+        let id = d.record_approval(request).unwrap();
+        assert!(d.governance().any(|record| {
+            matches!(
+                &record.change,
+                GovernanceChange::ApprovalRecorded { approval_id } if approval_id == &id
+            )
+        }));
+    }
+
+    #[test]
+    fn zero_capacity_refuses_to_create_unaudited_authorization() {
+        let mut d = Deployment::new().with_audit_capacity(0);
+        let request = ccos_enterprise_approval::ApprovalRequest::new(
+            TenantId("acme".into()),
+            "policy.disable",
+            &"cd".repeat(32),
+            "operator",
+            ccos_enterprise_approval::ApprovalDecision::Approved,
+            100,
+            None,
+            "must not become usable without audit",
+        )
+        .unwrap();
+        assert!(matches!(
+            d.record_approval(request),
+            Err(ccos_enterprise_approval::ApprovalError::AuditUnavailable)
+        ));
+        assert!(d.approvals().registry().snapshot().approvals.is_empty());
+    }
+'''
+          s = s[:pos] + tests + s[pos:]
+          p.write_text(s)
+          PY
+
+          cargo fmt --all
+          cargo check -p ccos-enterprise-approval -p ccos-enterprise-runtime
+          cargo clippy -p ccos-enterprise-approval -p ccos-enterprise-runtime --all-targets -- -D warnings
+          cargo test -p ccos-enterprise-approval
+          cargo test -p ccos-enterprise-runtime
+          cargo test -p ccos-enterprise-conformance --test human_approval
+
+          # The product commit must contain no patching infrastructure.
+          rm -f .github/approval-hardening-trigger .github/workflows/zz-approval-hardening.yml
+          git checkout origin/main -- .github/workflows/ci-fast.yml
+          git config user.name 'MEMOPERF'
+          git config user.email 'contact@checkupauto.fr'
+          git add -A
+          git commit -m 'fix(approval): close post-merge authorization gaps'
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}

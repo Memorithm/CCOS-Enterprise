@@ -30,7 +30,7 @@ pub fn skill_permission_for(tool: &str) -> Option<&'static str> {
 pub fn skill_tool_spec() -> Value {
     json!({
         "name": SKILL_READ_TOOL,
-        "description": "List validated active evidence-backed skills for the authenticated tenant, including read-only observational trial counters. Metadata only; this capability never executes a skill or returns raw captured content.",
+        "description": "List validated active evidence-backed skills for the authenticated tenant. Metadata only; this capability never executes a skill or returns raw captured content.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -46,9 +46,35 @@ pub fn skill_tool_spec() -> Value {
     })
 }
 
+/// Current production projection used by the stdio server.
+///
+/// Keep this shape stable until the server explicitly loads the validated
+/// post-exposure trial ledger. Returning synthetic zero counters here would be
+/// misleading for tenants that already have observational trials.
 pub fn active_skill_tool_result(
     registry: &SkillRegistry,
+    arguments: &Value,
+) -> Result<Value, String> {
+    active_skill_tool_result_inner(registry, None, arguments)
+}
+
+/// Read-only projection that augments each Active skill with the validated
+/// observational counters introduced by the post-exposure trial ledger.
+///
+/// The caller must derive `observational` from a validated `SkillTrialRegistry`
+/// (normally through `summarize_observational_trials`). This function never
+/// scores those counters and never mutates lifecycle state.
+pub fn active_skill_tool_result_with_observational(
+    registry: &SkillRegistry,
     observational: &BTreeMap<String, SkillObservationalSummary>,
+    arguments: &Value,
+) -> Result<Value, String> {
+    active_skill_tool_result_inner(registry, Some(observational), arguments)
+}
+
+fn active_skill_tool_result_inner(
+    registry: &SkillRegistry,
+    observational: Option<&BTreeMap<String, SkillObservationalSummary>>,
     arguments: &Value,
 ) -> Result<Value, String> {
     let limit = skill_read_limit(arguments)?;
@@ -88,7 +114,7 @@ fn skill_read_limit(arguments: &Value) -> Result<usize, String> {
 
 fn project_active_skills<'a>(
     records: impl Iterator<Item = &'a SkillRecord>,
-    observational: &BTreeMap<String, SkillObservationalSummary>,
+    observational: Option<&BTreeMap<String, SkillObservationalSummary>>,
     limit: usize,
 ) -> Value {
     let mut total_active = 0usize;
@@ -99,24 +125,27 @@ fn project_active_skills<'a>(
         }
         total_active = total_active.saturating_add(1);
         if skills.len() < limit {
-            let observed = observational.get(&record.id).copied().unwrap_or_default();
-            skills.push(json!({
+            let mut projected = json!({
                 "id": record.id,
                 "tool_sequence": record.tool_sequence,
                 "status": "active",
                 "support": record.support,
                 "trials_attempted": record.trials_attempted,
                 "trials_passed": record.trials_passed,
-                "eta": record.eta,
-                "observational": {
+                "eta": record.eta
+            });
+            if let Some(observational) = observational {
+                let observed = observational.get(&record.id).copied().unwrap_or_default();
+                projected["observational"] = json!({
                     "total": observed.total,
                     "pending": observed.pending,
                     "passed": observed.passed,
                     "failed": observed.failed,
                     "inconclusive": observed.inconclusive,
                     "not_observed": observed.not_observed
-                }
-            }));
+                });
+            }
+            skills.push(projected);
         }
     }
     let returned = skills.len();
@@ -147,10 +176,25 @@ mod tests {
     }
 
     #[test]
-    fn wire_projection_exposes_active_metadata_and_observational_counts_only() {
+    fn current_wire_projection_stays_unchanged_until_server_wiring() {
         let active = record("skill-active", SkillStatus::Active);
         let candidate = record("skill-candidate", SkillStatus::Candidate);
         let records = [&active, &candidate];
+        let value = project_active_skills(records.into_iter(), None, 32);
+        assert_eq!(value["returned"], 1);
+        assert_eq!(value["total_active"], 1);
+        assert_eq!(value["skills"][0]["id"], "skill-active");
+        assert!(value["skills"][0].get("observational").is_none());
+        let text = value.to_string();
+        assert!(!text.contains("skill-candidate"));
+        assert!(!text.contains("FINGERPRINT-MUST-NOT-BE-EXPOSED"));
+        assert!(!text.contains("EVIDENCE-ID-MUST-NOT-BE-EXPOSED"));
+    }
+
+    #[test]
+    fn observational_projection_exposes_exact_counts_without_private_ids() {
+        let active = record("skill-active", SkillStatus::Active);
+        let records = [&active];
         let observational = BTreeMap::from([(
             "skill-active".to_string(),
             SkillObservationalSummary {
@@ -162,10 +206,7 @@ mod tests {
                 not_observed: 1,
             },
         )]);
-        let value = project_active_skills(records.into_iter(), &observational, 32);
-        assert_eq!(value["returned"], 1);
-        assert_eq!(value["total_active"], 1);
-        assert_eq!(value["skills"][0]["id"], "skill-active");
+        let value = project_active_skills(records.into_iter(), Some(&observational), 32);
         assert_eq!(value["skills"][0]["observational"]["total"], 6);
         assert_eq!(value["skills"][0]["observational"]["pending"], 1);
         assert_eq!(value["skills"][0]["observational"]["passed"], 2);
@@ -173,19 +214,17 @@ mod tests {
         assert_eq!(value["skills"][0]["observational"]["inconclusive"], 1);
         assert_eq!(value["skills"][0]["observational"]["not_observed"], 1);
         let text = value.to_string();
-        assert!(!text.contains("skill-candidate"));
-        assert!(!text.contains("FINGERPRINT-MUST-NOT-BE-EXPOSED"));
-        assert!(!text.contains("EVIDENCE-ID-MUST-NOT-BE-EXPOSED"));
         assert!(!text.contains("trial-v1-"));
         assert!(!text.contains("turn_key"));
         assert!(!text.contains("evidence_id"));
     }
 
     #[test]
-    fn skills_without_post_exposure_trials_get_explicit_zero_counts() {
+    fn observational_projection_uses_explicit_zero_counts_when_absent() {
         let active = record("skill-active", SkillStatus::Active);
         let records = [&active];
-        let value = project_active_skills(records.into_iter(), &BTreeMap::new(), 32);
+        let observational = BTreeMap::new();
+        let value = project_active_skills(records.into_iter(), Some(&observational), 32);
         assert_eq!(
             value["skills"][0]["observational"],
             json!({

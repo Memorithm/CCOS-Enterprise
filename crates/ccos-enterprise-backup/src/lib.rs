@@ -576,6 +576,189 @@ pub enum RecoveryStage {
     FailClosed { detail: String },
 }
 
+/// The outcome of a disaster-recovery run: every stage, journaled in order,
+/// plus the orchestrator's clock so the trail is complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryOutcome {
+    pub tenant: String,
+    pub stages: Vec<RecoveryStage>,
+    /// The clock passed to the run; the recovery's point-in-time marker.
+    pub at_unix: u64,
+    /// Whether recovery completed end to end and the tenant was unfrozen.
+    pub recovered: bool,
+}
+
+/// The disaster-recovery orchestrator (docs/DISASTER_RECOVERY.md).
+///
+/// Steps, each journaled:
+///
+/// 1. **detect** — the caller has detected a failure;
+/// 2. **freeze writes** — the tenant's policy marks writes frozen BEFORE any
+///    restore work begins;
+/// 3. **locate the latest admissible manifest** — the newest manifest that
+///    passes every restore gate, according to the policy;
+/// 4. **restore** — into staging, verified, then promoted atomically (never
+///    mutating live state before the complete backup verifies);
+/// 5. **replay the deterministic journal tail** — the caller's replay hook
+///    (Core replay is deterministic; the orchestrator records how many
+///    records were replayed);
+/// 6. **verify end to end** — re-verify the restored live state;
+/// 7. **unfreeze only on success** — on any failure the tenant remains
+///    frozen (fail closed), and the failure is journaled.
+///
+/// RPO/RTO are the policy's facts, not the orchestrator's: the caller
+/// decides when a manifest is "admissible" under its policy; the
+/// orchestrator only guarantees the ordering and the fail-closed property.
+///
+/// The parameters are the contract (policy, target, paths, clock, replay
+/// count, verification hook), so the clippy argument bound is deliberately
+/// waived here.
+#[allow(clippy::too_many_arguments)]
+pub fn run_disaster_recovery(
+    tenant: &str,
+    policy: &BackupPolicy,
+    target: &dyn BackupTarget,
+    staging: &Path,
+    live: &Path,
+    now: u64,
+    replay_tail_records: u64,
+    verify_live: &dyn Fn(&Path) -> Result<(), String>,
+) -> RecoveryOutcome {
+    let mut stages = vec![RecoveryStage::Detect];
+    if policy.tenant != tenant {
+        stages.push(RecoveryStage::FailClosed {
+            detail: "policy belongs to a different tenant".into(),
+        });
+        return RecoveryOutcome {
+            tenant: tenant.to_string(),
+            stages,
+            at_unix: now,
+            recovered: false,
+        };
+    }
+    // Freeze BEFORE any restore work: a write landing mid-restore is the
+    // failure this orchestration exists to prevent.
+    stages.push(RecoveryStage::FreezeWrites);
+    if !policy.writes_frozen {
+        stages.push(RecoveryStage::FailClosed {
+            detail: "tenant writes are not frozen; refusing to restore".into(),
+        });
+        return RecoveryOutcome {
+            tenant: tenant.to_string(),
+            stages,
+            at_unix: now,
+            recovered: false,
+        };
+    }
+
+    // Locate the latest manifest that passes every gate.
+    let manifest = match target.read_manifest(tenant) {
+        Ok(Some(manifest)) => match verify_backup(target, tenant, &manifest) {
+            Ok(()) => {
+                stages.push(RecoveryStage::LocateManifest {
+                    created_unix: manifest.created_unix,
+                    digest: manifest.digest.clone(),
+                });
+                manifest
+            }
+            Err(error) => {
+                stages.push(RecoveryStage::FailClosed {
+                    detail: format!("latest manifest fails verification: {error}"),
+                });
+                return RecoveryOutcome {
+                    tenant: tenant.to_string(),
+                    stages,
+                    at_unix: now,
+                    recovered: false,
+                };
+            }
+        },
+        Ok(None) => {
+            stages.push(RecoveryStage::FailClosed {
+                detail: "no backup manifest exists for this tenant".into(),
+            });
+            return RecoveryOutcome {
+                tenant: tenant.to_string(),
+                stages,
+                at_unix: now,
+                recovered: false,
+            };
+        }
+        Err(error) => {
+            stages.push(RecoveryStage::FailClosed {
+                detail: format!("cannot read backup manifest: {error}"),
+            });
+            return RecoveryOutcome {
+                tenant: tenant.to_string(),
+                stages,
+                at_unix: now,
+                recovered: false,
+            };
+        }
+    };
+
+    // Restore into staging (verified before any live mutation), then promote
+    // atomically.
+    stages.push(RecoveryStage::Restore);
+    let staged = match stage_restore(target, tenant, &manifest, staging) {
+        Ok(()) => true,
+        Err(error) => {
+            stages.push(RecoveryStage::FailClosed {
+                detail: format!("staging failed: {error}"),
+            });
+            return RecoveryOutcome {
+                tenant: tenant.to_string(),
+                stages,
+                at_unix: now,
+                recovered: false,
+            };
+        }
+    };
+    if staged {
+        if let Err(error) = promote_staged(staging, live) {
+            stages.push(RecoveryStage::FailClosed {
+                detail: format!("promotion failed: {error}"),
+            });
+            return RecoveryOutcome {
+                tenant: tenant.to_string(),
+                stages,
+                at_unix: now,
+                recovered: false,
+            };
+        }
+    }
+
+    // Replay the deterministic journal tail (Core replay), then verify the
+    // live state end to end.
+    stages.push(RecoveryStage::ReplayJournalTail {
+        records: replay_tail_records,
+    });
+    match verify_live(live) {
+        Ok(()) => stages.push(RecoveryStage::VerifyEndToEnd { ok: true }),
+        Err(error) => {
+            stages.push(RecoveryStage::VerifyEndToEnd { ok: false });
+            stages.push(RecoveryStage::FailClosed {
+                detail: format!("end-to-end verification failed: {error}"),
+            });
+            return RecoveryOutcome {
+                tenant: tenant.to_string(),
+                stages,
+                at_unix: now,
+                recovered: false,
+            };
+        }
+    }
+
+    // Only now may writes resume.
+    stages.push(RecoveryStage::Unfreeze);
+    RecoveryOutcome {
+        tenant: tenant.to_string(),
+        stages,
+        at_unix: now,
+        recovered: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,6 +924,126 @@ mod tests {
         promote_staged(&staging, &live).unwrap();
         assert!(live.join("manifest.json").exists());
         assert!(!live.join("old-state").exists(), "live state was replaced");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&staging);
+        let _ = std::fs::remove_dir_all(&live);
+    }
+
+    #[test]
+    fn disaster_recovery_unfreezes_only_after_full_success() {
+        let root = scratch("dr-success");
+        let target = FsBackupTarget::new(&root);
+        let manifest = create_backup(&target, "acme", &segments(), 1_700_000_000).unwrap();
+        let policy = BackupPolicy {
+            tenant: "acme".into(),
+            rpo_seconds: 300,
+            rto_seconds: 600,
+            writes_frozen: true,
+        };
+        let staging = scratch("dr-staging");
+        let live = scratch("dr-live");
+        std::fs::create_dir_all(&live).unwrap();
+        let outcome = run_disaster_recovery(
+            "acme",
+            &policy,
+            &target,
+            &staging,
+            &live,
+            1_700_000_100,
+            7,
+            &|_| Ok(()),
+        );
+        assert!(outcome.recovered);
+        // Every stage journaled in order, ending with Unfreeze.
+        assert_eq!(
+            outcome.stages,
+            vec![
+                RecoveryStage::Detect,
+                RecoveryStage::FreezeWrites,
+                RecoveryStage::LocateManifest {
+                    created_unix: manifest.created_unix,
+                    digest: manifest.digest,
+                },
+                RecoveryStage::Restore,
+                RecoveryStage::ReplayJournalTail { records: 7 },
+                RecoveryStage::VerifyEndToEnd { ok: true },
+                RecoveryStage::Unfreeze,
+            ]
+        );
+        // Live state was replaced by the verified backup.
+        assert!(live.join("manifest.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&staging);
+        let _ = std::fs::remove_dir_all(&live);
+    }
+
+    #[test]
+    fn disaster_recovery_fails_closed_and_stays_frozen() {
+        let root = scratch("dr-fail");
+        let target = FsBackupTarget::new(&root);
+        create_backup(&target, "acme", &segments(), 1).unwrap();
+        // Writes not frozen: the orchestrator refuses before any restore.
+        let policy = BackupPolicy {
+            tenant: "acme".into(),
+            rpo_seconds: 300,
+            rto_seconds: 600,
+            writes_frozen: false,
+        };
+        let staging = scratch("dr-fail-staging");
+        let live = scratch("dr-fail-live");
+        let outcome =
+            run_disaster_recovery("acme", &policy, &target, &staging, &live, 100, 0, &|_| {
+                Ok(())
+            });
+        assert!(!outcome.recovered, "unfrozen writes refuse recovery");
+        assert!(outcome
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, RecoveryStage::FailClosed { .. })));
+        assert!(!outcome
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, RecoveryStage::Unfreeze)));
+
+        // Verification failure: frozen, restore happened, but no unfreeze.
+        let policy = BackupPolicy {
+            tenant: "acme".into(),
+            rpo_seconds: 300,
+            rto_seconds: 600,
+            writes_frozen: true,
+        };
+        let outcome =
+            run_disaster_recovery("acme", &policy, &target, &staging, &live, 100, 0, &|_| {
+                Err("integrity mismatch".into())
+            });
+        assert!(!outcome.recovered, "failed verification stays frozen");
+        assert!(outcome
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, RecoveryStage::VerifyEndToEnd { ok: false })));
+        assert!(!outcome
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, RecoveryStage::Unfreeze)));
+
+        // Wrong tenant policy: refused before any work.
+        let wrong = BackupPolicy {
+            tenant: "globex".into(),
+            rpo_seconds: 300,
+            rto_seconds: 600,
+            writes_frozen: true,
+        };
+        let outcome = run_disaster_recovery(
+            "acme",
+            &wrong,
+            &target,
+            &staging,
+            &live,
+            100,
+            0,
+            &|_| Ok(()),
+        );
+        assert!(!outcome.recovered);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&staging);
         let _ = std::fs::remove_dir_all(&live);

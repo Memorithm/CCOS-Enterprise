@@ -1,0 +1,40 @@
+name: TEMP skill crystallization preflight
+
+on:
+  push:
+    branches:
+      - feat/enterprise-skill-crystallization
+
+permissions:
+  contents: write
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/enterprise-skill-crystallization
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Format and validate skill crate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          cargo check -p ccos-enterprise-skills
+          cargo clippy -p ccos-enterprise-skills -- -D warnings
+          cargo test -p ccos-enterprise-skills
+          cargo metadata --locked --format-version 1 >/dev/null
+      - name: Commit generated lockfile and formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Cargo.lock Cargo.toml crates/ccos-enterprise-skills; then
+            exit 0
+          fi
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add Cargo.lock Cargo.toml crates/ccos-enterprise-skills
+          git commit -m 'chore(skills): apply cargo lock and formatting'
+          git push origin HEAD:feat/enterprise-skill-crystallization

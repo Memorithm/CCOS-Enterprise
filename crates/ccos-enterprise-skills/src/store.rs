@@ -3,8 +3,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::{
-    io, parse_capture, parse_skill_exposures, trial_turn_key, ObserveDisposition, ObserveResult,
-    SkillConfig, SkillError, SkillRegistry, SkillSnapshot, SkillTrialConfig, SkillTrialStore,
+    io, parse_capture, parse_skill_exposures, ObserveDisposition, ObserveResult, SkillConfig,
+    SkillError, SkillRegistry, SkillSnapshot, SkillTrialConfig, SkillTrialStore,
     SKILL_SNAPSHOT_SCHEMA,
 };
 
@@ -112,11 +112,13 @@ impl SkillStore {
     /// Observe one complete DSH capture and atomically persist any resulting
     /// lifecycle update. A document without L1 evidence is a no-op.
     ///
-    /// If the adapter-owned transcript also contains a successful governed
-    /// `ccos_skills` result, the strictly validated visible skill ids are
-    /// projected into the observational trial ledger from the same durable L1
-    /// source. Trial exposure is replay-safe: a crash after skill persistence
-    /// but before trial settlement is completed by the next projection retry.
+    /// A successful governed `ccos_skills` result in the adapter-owned
+    /// transcript is auxiliary evidence that those Active skills were visible
+    /// during this turn. Exposures are therefore inserted against the registry
+    /// state *before* the current L1 trial is applied, then resolved after the
+    /// skill lifecycle update. This ordering also makes crash retries safe:
+    /// #58 guarantees an exact duplicate exposure remains idempotent even if
+    /// the current L1 already moved an Active skill to Retired before a retry.
     pub fn observe_capture(
         &self,
         config: SkillConfig,
@@ -131,6 +133,34 @@ impl SkillStore {
         };
         let exposed = parse_skill_exposures(source);
         let mut registry = self.load_registry(config)?;
+
+        let known: Vec<String> = exposed
+            .into_iter()
+            .filter(|skill_id| registry.get(skill_id).is_some())
+            .collect();
+        let trials = if known.is_empty() {
+            None
+        } else {
+            let trials = SkillTrialStore::open(&self.root)?;
+            for skill_id in &known {
+                match trials.expose(
+                    SkillTrialConfig::default(),
+                    &episode.session_id,
+                    episode.turn,
+                    &registry,
+                    std::slice::from_ref(skill_id),
+                ) {
+                    Ok(_) => {}
+                    // A stale or tampered transcript can claim that a known but
+                    // non-Active skill was exposed. Such auxiliary evidence is
+                    // ignored; durable trial-store faults still fail closed.
+                    Err(SkillError::InvalidTrial(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Some(trials)
+        };
+
         let result = registry.observe(&episode)?;
         if matches!(
             result.disposition,
@@ -139,25 +169,8 @@ impl SkillStore {
             self.save(registry.snapshot())?;
         }
 
-        if !exposed.is_empty() {
-            // Exposure evidence is auxiliary and must never wedge an already
-            // admitted memory ingest. Unknown ids can only arise from a stale,
-            // truncated or tampered transcript, so they contribute no trial.
-            let known: Vec<String> = exposed
-                .into_iter()
-                .filter(|skill_id| registry.get(skill_id).is_some())
-                .collect();
-            if !known.is_empty() {
-                let trials = SkillTrialStore::open(&self.root)?;
-                let turn_key = trial_turn_key(&episode.session_id, episode.turn);
-                trials.replay_exposure_turn_key(
-                    SkillTrialConfig::default(),
-                    &turn_key,
-                    &registry,
-                    &known,
-                )?;
-                trials.resolve_episode(SkillTrialConfig::default(), &episode, &registry)?;
-            }
+        if let Some(trials) = trials {
+            trials.resolve_episode(SkillTrialConfig::default(), &episode, &registry)?;
         }
         Ok(result)
     }
@@ -168,7 +181,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::{EpisodeObservation, SkillTrialStatus, ToolObservation, ToolOutcome};
+    use crate::{
+        trial_turn_key, EpisodeObservation, SkillTrialStatus, ToolObservation, ToolOutcome,
+    };
 
     fn temp_dir(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -320,6 +335,34 @@ mod tests {
         let store = SkillStore::open(&root).unwrap();
         let missing = format!("skill-v1-{}", "a".repeat(64));
         let result = store.observe_capture(SkillConfig::default(), &exposed_capture(&missing));
+        assert!(result.is_ok());
+        assert!(!root.join(crate::SKILL_TRIALS_FILE).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_non_active_exposure_never_wedges_memory_projection() {
+        let root = temp_dir("stale-exposure");
+        let store = SkillStore::open(&root).unwrap();
+        let skill_id = install_active_recall_skill(&store);
+        let mut registry = store.load_registry(SkillConfig::default()).unwrap();
+        for turn in 4..=10 {
+            registry
+                .observe(&EpisodeObservation {
+                    evidence_id: format!("{turn:064x}"),
+                    session_id: "retire-before-turn".into(),
+                    turn,
+                    reason_kind: "error".into(),
+                    tools: vec![ToolObservation {
+                        name: "memory.recall".into(),
+                        call_id: format!("fail-{turn}"),
+                        outcome: ToolOutcome::Failed,
+                    }],
+                })
+                .unwrap();
+        }
+        store.save(registry.snapshot()).unwrap();
+        let result = store.observe_capture(SkillConfig::default(), &exposed_capture(&skill_id));
         assert!(result.is_ok());
         assert!(!root.join(crate::SKILL_TRIALS_FILE).exists());
         let _ = std::fs::remove_dir_all(root);

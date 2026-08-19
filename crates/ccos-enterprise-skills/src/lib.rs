@@ -13,12 +13,14 @@
 //! bounded evidence identifiers. The observational trial ledger likewise keeps
 //! only skill ids plus domain-separated correlation/evidence hashes.
 
+mod exposure;
 mod parser;
 mod registry;
 mod store;
 mod trial_store;
 mod trials;
 
+pub use exposure::parse_skill_exposures;
 pub use parser::{
     parse_capture, skill_fingerprint, EpisodeObservation, ToolObservation, ToolOutcome,
     EPISODE_SCHEMA,

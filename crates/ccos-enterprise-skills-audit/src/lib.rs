@@ -107,8 +107,6 @@ pub enum AuditError {
     LimitOutOfRange { found: usize },
     /// The source ledger is corrupt; refusing rather than guessing.
     CorruptLedger { detail: String },
-    /// A tenant that must not be empty produced an empty projection.
-    EmptyReport,
 }
 
 impl std::fmt::Display for AuditError {
@@ -123,7 +121,6 @@ impl std::fmt::Display for AuditError {
             Self::CorruptLedger { detail } => {
                 write!(f, "source ledger is corrupt and was refused: {detail}")
             }
-            Self::EmptyReport => write!(f, "refusing an empty report"),
         }
     }
 }
@@ -332,15 +329,13 @@ pub fn audit_provenance(
         });
     }
 
-    if skills.is_empty() {
-        return Err(AuditError::EmptyReport);
-    }
-
+    // A tenant with no skills at all is a *fact* an operator needs to read,
+    // not a fabrication: the report says `empty: true` and carries no rows.
     Ok(ProvenanceReport {
         schema: SKILL_AUDIT_SCHEMA.to_string(),
         tenant: query.scope.tenant.0.clone(),
         skills,
-        empty: false,
+        empty: query.sources.skills.snapshot().skills.is_empty(),
     })
 }
 
@@ -408,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_registry_is_a_refusal_not_a_synthetic_report() {
+    fn empty_registry_is_an_explicit_empty_report_not_a_fabrication() {
         let skills = SkillRegistry::new(SkillConfig::default()).unwrap();
         let trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
         let scope = TenantScope::new(TenantId("acme".into()), ());
@@ -425,8 +420,11 @@ mod tests {
                 roles: &roles,
             },
             &tenants(&scope),
-        );
-        assert_eq!(report, Err(AuditError::EmptyReport));
+        )
+        .expect("an empty tenant is a reportable fact");
+        assert!(report.empty);
+        assert!(report.skills.is_empty());
+        assert_eq!(report.tenant, "acme");
     }
 
     #[test]

@@ -5,6 +5,16 @@ import { textFromMcpToolResult } from './mcp-stdio.js'
 
 export const PLUGIN_NAME = 'ccos-enterprise-memory'
 export const MAX_RECALL_FOREGROUND_MS = 3000
+export const EPISODE_SCHEMA = 'ccos.dsh.episode.v1'
+
+const DSH_TURN_END_KINDS = new Set([
+  'completed',
+  'aborted',
+  'blocked',
+  'error',
+  'max-tokens',
+  'interrupted',
+])
 
 function record(value) {
   return value && typeof value === 'object' ? value : undefined
@@ -65,6 +75,94 @@ function dshToolResult(data) {
   }
 }
 
+function observedTurnEndKind(reason) {
+  const kind = readString(reason, 'kind')
+  return kind && DSH_TURN_END_KINDS.has(kind) ? kind : 'unknown'
+}
+
+function rewardProxy(reasonKind) {
+  if (reasonKind === 'completed') return 1
+  if (reasonKind === 'error' || reasonKind === 'blocked' || reasonKind === 'interrupted') return -1
+  return 0
+}
+
+function finiteTimestamp(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+export function buildEpisode(state) {
+  const tools = Array.isArray(state?.toolCalls) ? state.toolCalls : []
+  const assistants = Array.isArray(state?.assistantText) ? state.assistantText : []
+  const failed = tools.filter((tool) => tool?.failed === true)
+  const unresolved = tools.filter((tool) => tool?.result === undefined)
+  const failedByName = new Map()
+  for (const tool of failed) {
+    const name = typeof tool?.name === 'string' && tool.name ? tool.name : 'unknown'
+    const bucket = failedByName.get(name) || []
+    bucket.push(typeof tool?.callId === 'string' ? tool.callId : '')
+    failedByName.set(name, bucket)
+  }
+  const repeated = [...failedByName.entries()]
+    .filter(([, callIds]) => callIds.length >= 2)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, callIds]) => ({
+      name,
+      count: callIds.length,
+      call_ids: callIds.filter(Boolean),
+    }))
+
+  const reasonKind = observedTurnEndKind(state?.endReason)
+  const startedAt = finiteTimestamp(state?.startedAt)
+  const endedAt = finiteTimestamp(state?.endedAt)
+  const durationMs = startedAt !== null && endedAt !== null && endedAt >= startedAt
+    ? endedAt - startedAt
+    : null
+  const signals = []
+  if (failed.length) signals.push('tool_failure_observed')
+  if (repeated.length) signals.push('repeated_tool_failure')
+  if (unresolved.length) signals.push('unresolved_tool_call')
+  if (reasonKind === 'completed' && failed.length) signals.push('completed_after_tool_failure')
+  if (reasonKind === 'aborted') signals.push('turn_aborted')
+  if (reasonKind === 'blocked') signals.push('turn_blocked')
+  if (reasonKind === 'error') signals.push('turn_error')
+  if (reasonKind === 'max-tokens') signals.push('turn_max_tokens')
+  if (reasonKind === 'interrupted') signals.push('turn_interrupted')
+
+  return {
+    schema: EPISODE_SCHEMA,
+    evidence_only: true,
+    host: 'deepseek-harness',
+    session_id: typeof state?.sessionId === 'string' ? state.sessionId : '',
+    turn: Number.isFinite(state?.turn) ? state.turn : null,
+    timing: {
+      started_at_ms: startedAt,
+      ended_at_ms: endedAt,
+      duration_ms: durationMs,
+    },
+    observed_outcome: {
+      reason_kind: reasonKind,
+    },
+    reward_proxy: {
+      value: rewardProxy(reasonKind),
+      range: [-1, 1],
+      heuristic: 'dsh_turn_end_reason_v1',
+    },
+    evidence: {
+      assistant_messages: assistants.length,
+      tool_calls: tools.length,
+      tool_results: tools.filter((tool) => tool?.result !== undefined).length,
+      tool_failures: failed.length,
+      unresolved_tool_calls: unresolved.length,
+      failed_tools: failed.map((tool) => ({
+        name: typeof tool?.name === 'string' ? tool.name : 'unknown',
+        call_id: typeof tool?.callId === 'string' ? tool.callId : '',
+      })),
+      repeated_tool_failures: repeated,
+    },
+    reflection_signals: signals,
+  }
+}
+
 export function memoryGuidance() {
   return [
     'CCOS Enterprise may append one automatic long-term-memory recall to an accepted direct-user turn.',
@@ -114,6 +212,13 @@ function renderTurn(state) {
   if (state.endReason !== undefined) {
     lines.push('', `turn_end_reason: ${JSON.stringify(state.endReason)}`)
   }
+  lines.push(
+    '',
+    '## CCOS Episode (evidence-only)',
+    '```json',
+    JSON.stringify(buildEpisode(state), null, 2),
+    '```',
+  )
   return lines.filter(Boolean).join('\n')
 }
 

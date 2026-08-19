@@ -1,44 +1,73 @@
 //! Prometheus text exposition (v0.0.4) for the bounded counter registry.
 //!
-//! The registry's guarantees carry through to the wire format:
+//! The registry deliberately uses dotted internal names such as
+//! `gateway.requests`. Prometheus text exposition does **not** admit `.` in an
+//! unquoted metric name, so the exporter performs a deterministic, injective
+//! translation instead of assuming the two grammars are identical.
 //!
-//! - **validated metric names**: [`CounterRegistry::is_valid_name`] is
-//!   exactly the Prometheus name grammar (dot-separated `[a-z0-9_]`
-//!   segments), so every series is exposition-safe by construction — no
-//!   escaping, no injection;
-//! - **bounded cardinality**: the registry caps series and name bytes;
-//!   the exposition is exactly as bounded as the registry;
-//! - **no attacker-controlled labels**: the exposition carries no labels at
-//!   all; tenant identifiers appear only in the metric *name* the product
-//!   itself registers (e.g. `gateway.refused.tenant_not_owned`), never as a
-//!   caller-supplied label value;
-//! - **deterministic output**: same history, same bytes — the export is
-//!   sorted, gapless and newline-terminated.
+//! - every exported metric is prefixed with `ccos_`;
+//! - `_` is escaped as `__`;
+//! - `.` is escaped as `_d_`;
+//! - ASCII lowercase letters and digits are copied unchanged.
 //!
-//! The exposition format: one `# TYPE <name> counter` line followed by
-//! `<name> <value>` lines in registry order. Values are u64 (Prometheus
-//! counters), so there is no float formatting drift.
+//! Because every underscore in the source is doubled before the dot escape is
+//! introduced, the mapping is reversible and collision-free (`a.b` and
+//! `a_b` can never collapse onto one Prometheus series). The input registry
+//! already bounds both cardinality and name bytes, so the expansion remains
+//! bounded too.
+//!
+//! No labels are emitted: caller-controlled strings can never become an
+//! unbounded label dimension. Output order remains the registry's deterministic
+//! order and every exposition is newline-terminated.
 
 use crate::CounterRegistry;
 
-/// The Prometheus metric name for a registry name. Identical by
-/// construction; kept as a function so the grammar contract is stated once.
-pub fn prometheus_name(registry_name: &str) -> &str {
-    registry_name
+/// Maximum exported name bytes after escaping every source byte in the most
+/// expansive form plus the `ccos_` prefix. The registry's source bound is the
+/// authority; this constant documents the resulting exporter bound.
+pub const MAX_PROMETHEUS_NAME_BYTES: usize =
+    "ccos_".len() + CounterRegistry::MAX_NAME_BYTES * 3;
+
+/// Translate one validated registry name into a valid, injective Prometheus
+/// metric name.
+///
+/// The registry admits only lowercase ASCII letters, digits, `_` and `.` (with
+/// a leading letter for caller-created series; reserved internal gauges begin
+/// with `_`). The returned string therefore contains only `[a-z0-9_]` and
+/// begins with `ccos_`, which is valid under the Prometheus metric-name grammar.
+pub fn prometheus_name(registry_name: &str) -> String {
+    let mut out = String::with_capacity("ccos_".len() + registry_name.len() * 2);
+    out.push_str("ccos_");
+    for byte in registry_name.bytes() {
+        match byte {
+            b'_' => out.push_str("__"),
+            b'.' => out.push_str("_d_"),
+            b'a'..=b'z' | b'0'..=b'9' => out.push(byte as char),
+            // `CounterRegistry::export()` cannot produce another byte. Keep a
+            // visible, injective fallback anyway so this helper is safe when
+            // called directly in tests or future adapters.
+            other => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "_x{other:02x}_");
+            }
+        }
+    }
+    debug_assert!(out.len() <= MAX_PROMETHEUS_NAME_BYTES);
+    out
 }
 
 /// Render the registry as Prometheus text exposition v0.0.4.
 ///
-/// The out-of-band gauges (`_dropped`, `_dropped_events`, `_refused`) are
-/// part of the registry's contract and are rendered as counters with their
-/// reserved names, prefixed to keep the `_`-prefix semantics visible.
+/// Every internal series name is normalized exactly once and the same value is
+/// used in both its `TYPE` declaration and sample line.
 pub fn render_prometheus(registry: &CounterRegistry) -> String {
     let mut out = String::new();
     for (name, value) in registry.export() {
+        let metric = prometheus_name(name);
         out.push_str("# TYPE ");
-        out.push_str(prometheus_name(name));
+        out.push_str(&metric);
         out.push_str(" counter\n");
-        out.push_str(prometheus_name(name));
+        out.push_str(&metric);
         out.push(' ');
         out.push_str(&value.to_string());
         out.push('\n');
@@ -46,11 +75,13 @@ pub fn render_prometheus(registry: &CounterRegistry) -> String {
     out
 }
 
-/// A health/readiness verdict derived from real durable subsystem state.
+/// A first-stage health/readiness verdict derived from the bounded telemetry
+/// registry itself.
 ///
-/// The registry's drop and refusal counters are the fail-closed signals:
-/// a registry that is dropping telemetry or refusing names is not healthy,
-/// whatever the request counters say.
+/// This is intentionally **not** the aggregate Enterprise readiness contract:
+/// durable stores, execution journals, approval state, backup state and other
+/// subsystems have their own health signals. This type answers one narrower
+/// question: is the telemetry registry itself accepting all events and names?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Health {
     /// Whether the registry reports no dropped increments and no refused
@@ -62,7 +93,7 @@ pub struct Health {
 }
 
 impl Health {
-    /// Evaluate readiness from the registry's out-of-band gauges.
+    /// Evaluate registry-local readiness from the out-of-band gauges.
     pub fn from_registry(registry: &CounterRegistry) -> Self {
         let dropped = registry.dropped();
         let dropped_events = registry.dropped_events();
@@ -75,9 +106,8 @@ impl Health {
         }
     }
 
-    /// Render as Prometheus text: `ccos_health_ready 1|0` plus the three
-    /// gauges. `ready` is a boolean gauge — a poisoned registry must never
-    /// report healthy.
+    /// Render the registry-local readiness gauge and its three supporting
+    /// counters. These fixed names already satisfy the Prometheus grammar.
     pub fn render_prometheus(&self) -> String {
         format!(
             "# TYPE ccos_health_ready gauge\nccos_health_ready {}\n\
@@ -96,6 +126,35 @@ impl Health {
 mod tests {
     use super::*;
 
+    fn valid_prometheus_name(name: &str) -> bool {
+        let mut bytes = name.bytes();
+        let Some(first) = bytes.next() else {
+            return false;
+        };
+        (first.is_ascii_alphabetic() || first == b'_' || first == b':')
+            && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':'))
+    }
+
+    #[test]
+    fn name_translation_is_valid_and_injective_for_dot_and_underscore() {
+        assert_eq!(prometheus_name("gateway.requests"), "ccos_gateway_d_requests");
+        assert_eq!(prometheus_name("gateway_requests"), "ccos_gateway__requests");
+        assert_ne!(
+            prometheus_name("gateway.requests"),
+            prometheus_name("gateway_requests")
+        );
+        for source in [
+            "gateway.requests",
+            "gateway.refused.tenant_not_owned",
+            "a_b.c_d",
+            "_dropped",
+        ] {
+            let exported = prometheus_name(source);
+            assert!(valid_prometheus_name(&exported), "{exported:?}");
+            assert!(exported.len() <= MAX_PROMETHEUS_NAME_BYTES);
+        }
+    }
+
     #[test]
     fn exposition_is_deterministic_and_well_formed() {
         let mut r = CounterRegistry::default();
@@ -105,21 +164,20 @@ mod tests {
         let first = render_prometheus(&r);
         let second = render_prometheus(&r);
         assert_eq!(first, second, "deterministic bytes");
-        // Every line is either a TYPE line or a name value line; no blank
-        // lines, no labels, no attacker-controlled strings.
         for line in first.lines() {
-            if line.starts_with("# TYPE ") {
-                assert!(line.ends_with(" counter"));
+            if let Some(rest) = line.strip_prefix("# TYPE ") {
+                let name = rest.strip_suffix(" counter").expect("counter type");
+                assert!(valid_prometheus_name(name), "invalid TYPE name: {name:?}");
             } else {
                 let mut parts = line.splitn(2, ' ');
                 let name = parts.next().unwrap();
                 let value = parts.next().expect("value");
-                assert!(CounterRegistry::is_valid_name(name) || name.starts_with('_'));
+                assert!(valid_prometheus_name(name), "invalid sample name: {name:?}");
                 value.parse::<u64>().expect("u64 value");
             }
         }
-        assert!(first.contains("gateway.requests 3"));
-        assert!(first.contains("# TYPE _dropped counter"));
+        assert!(first.contains("ccos_gateway_d_requests 3"));
+        assert!(first.contains("# TYPE ccos___dropped counter"));
     }
 
     #[test]
@@ -133,23 +191,22 @@ mod tests {
     }
 
     #[test]
-    fn health_reflects_real_durable_state() {
+    fn health_reflects_registry_state() {
         let mut r = CounterRegistry::default();
-        assert_eq!(Health::from_registry(&r).ready, true);
-        // A full registry that starts dropping telemetry is not ready.
+        assert!(Health::from_registry(&r).ready);
         for i in 0..CounterRegistry::MAX_SERIES {
             r.inc(&format!("series.{i}"), 1);
         }
         r.inc("overflow", 1);
         let health = Health::from_registry(&r);
-        assert_eq!(health.ready, false);
+        assert!(!health.ready);
         assert_eq!(health.dropped, 1);
         let text = health.render_prometheus();
         assert!(text.contains("ccos_health_ready 0"));
         assert!(text.contains("ccos_health_dropped 1"));
-        // A registry refusing names is also not ready.
+
         let mut r = CounterRegistry::default();
         r.inc("bad\nname", 1);
-        assert_eq!(Health::from_registry(&r).ready, false);
+        assert!(!Health::from_registry(&r).ready);
     }
 }

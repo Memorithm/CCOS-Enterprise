@@ -135,6 +135,22 @@ function l1Capture({ secret, tool = 'memory.recall', turn = 2 }) {
   ].join('\n')
 }
 
+function malformedL1Capture() {
+  return [
+    '# DeepSeek Harness turn 1',
+    '',
+    'session: real-rust-e2e-session',
+    '',
+    '## User',
+    'malformed evidence must not wedge later ingestion',
+    '',
+    '## CCOS Episode (evidence-only)',
+    '```json',
+    '{ definitely-not-valid-json',
+    '```',
+  ].join('\n')
+}
+
 test(
   'DSH stdio client reaches the real governed Rust server and durable Core state',
   { skip: !serverPath },
@@ -163,9 +179,6 @@ test(
         await first.close()
       }
 
-      // A fresh child process reloads the durable Enterprise ledger. Reusing
-      // the stable request_id must suppress the effect even though the stdio
-      // client creates a fresh physical execution_attempt_id.
       const restarted = clientFor(root, identity)
       try {
         await restarted.start()
@@ -227,6 +240,20 @@ test(
       const first = clientFor(root, identity)
       try {
         await first.start()
+
+        // Core already accepted this memory document, so a permanently
+        // malformed L1 projection must be quarantined/cleared rather than
+        // wedging the tenant's future automatic capture queue.
+        const malformed = await first.callTool(
+          'memory.ingest',
+          { uri: 'dsh/malformed-l1.md', source: malformedL1Capture() },
+          ccosMeta('malformed-l1-ingest', 'alice', '1'),
+        )
+        assert.notEqual(malformed?.isError, true)
+
+        // This second ingest proves the malformed receipt was durably cleared.
+        // If it remained pending, the server would reject this different
+        // request_id before Core execution.
         const ingested = await first.callTool(
           'memory.ingest',
           { uri: 'dsh/skill-e2e.md', source },
@@ -240,6 +267,7 @@ test(
       const skillsPath = join(root, '.skills', 'acme', 'skills.json')
       const firstDisk = await readFile(skillsPath, 'utf8')
       assert.equal(firstDisk.includes(secret), false)
+      assert.equal(firstDisk.includes('malformed evidence must not wedge later ingestion'), false)
       const firstSnapshot = JSON.parse(firstDisk)
       const firstSkills = Object.values(firstSnapshot.skills)
       assert.equal(firstSkills.length, 1)
@@ -249,8 +277,6 @@ test(
       assert.equal(firstSkills[0].trials_attempted, 1)
       assert.equal(firstSkills[0].trials_passed, 1)
 
-      // A replay with the same idempotency key but attacker-controlled changed
-      // arguments must not create another skill or modify counters.
       const restarted = clientFor(root, identity)
       try {
         await restarted.start()

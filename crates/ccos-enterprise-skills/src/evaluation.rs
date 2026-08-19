@@ -9,7 +9,9 @@
 //! Rules honored here:
 //!
 //! - **never classify NotObserved as Failed**: `not_observed` is its own
-//!   class with its own flag;
+//!   terminal class with its own flag;
+//! - **never count Pending as evidence**: unresolved exposures affect
+//!   completion, not the evidence sample used for drift;
 //! - **never hide uncertainty**: the report carries explicit
 //!   `insufficient_evidence` and `drift` flags derived from the data, plus
 //!   the raw counts that justify them;
@@ -23,13 +25,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{SkillObservationalSummary, SkillTrialRegistry, SkillTrialStatus};
 
-/// Minimum observational sample size before a report claims any confidence
-/// at all. Below this, `insufficient_evidence` is set regardless of the
-/// counts.
+/// Minimum number of outcome-bearing observations before a report may raise
+/// a drift signal. `Pending` is unresolved and `NotObserved` says that the
+/// skill sequence was not seen, so neither provides performance evidence.
 pub const MIN_EVIDENCE_SAMPLE: u64 = 3;
 
 /// The threshold (inclusive) of contradictory evidence — failed trials —
-/// that raises the `drift` flag when the sample is large enough to matter.
+/// that raises the `drift` flag when the evidence sample is large enough.
 pub const DRIFT_FAILURE_THRESHOLD: u64 = 2;
 
 /// The evaluation of one skill's observational trials. Deterministic,
@@ -39,22 +41,23 @@ pub struct SkillEvaluation {
     pub skill_id: String,
     /// The raw counts, exactly as the validated ledger reports them.
     pub summary: SkillObservationalSummary,
-    /// Whether the sample is too small to support any signal.
+    /// Whether there are too few outcome-bearing observations to support a
+    /// drift signal. Pending and NotObserved trials never satisfy this floor.
     pub insufficient_evidence: bool,
     /// Whether the observed failure count meets or exceeds
-    /// [`DRIFT_FAILURE_THRESHOLD`] on a sufficient sample. This is a *drift
-    /// signal*, not a causal claim and not a lifecycle verdict.
+    /// [`DRIFT_FAILURE_THRESHOLD`] on a sufficient evidence sample. This is a
+    /// *drift signal*, not a causal claim and not a lifecycle verdict.
     pub drift: bool,
     /// `NotObserved` is never `Failed`: this flag reports the distinction
     /// explicitly so an operator cannot conflate the two.
     pub has_not_observed: bool,
-    /// Terminal trials as a fraction of the total (rounded to two decimal
-    /// places, saturating at 1.00). Pending trials are not failures.
+    /// Every resolved terminal trial (including NotObserved) as a fraction of
+    /// all exposures, as an integer percentage. Pending trials are unresolved.
     pub completion_rate: u8,
-    /// Passed trials as a fraction of terminal trials. 0 when there are no
-    /// terminal trials. This is an *observation*, not a posterior: no
-    /// Bayesian or confidence machinery is attached unless separately
-    /// documented.
+    /// Passed trials as a fraction of outcome-bearing terminal trials
+    /// (`Passed + Failed + Inconclusive`). `NotObserved` is terminal for
+    /// completion but deliberately excluded here because no skill execution
+    /// was observed. This is an observation, not a causal posterior.
     pub pass_rate_of_terminal: u8,
 }
 
@@ -70,27 +73,29 @@ impl SkillEvaluation {
 /// The pure evaluation function: a deterministic mapping from the validated
 /// counts to the report. No ledger access, no clock, no randomness.
 pub fn evaluate_summary(skill_id: &str, summary: SkillObservationalSummary) -> SkillEvaluation {
-    let sample = summary.total;
-    let terminal = summary
+    let total = summary.total;
+    // Outcome-bearing evidence: the skill sequence was observed and the
+    // episode resolved to a pass/fail/inconclusive outcome. NotObserved is a
+    // valid resolved terminal state, but it contains no performance evidence.
+    let evidence_sample = summary
         .passed
         .saturating_add(summary.failed)
         .saturating_add(summary.inconclusive);
-    let insufficient_evidence = sample < MIN_EVIDENCE_SAMPLE;
+    // Completion is about resolution, not performance evidence, so every
+    // terminal state — including NotObserved — counts as completed.
+    let resolved_terminal = evidence_sample.saturating_add(summary.not_observed);
+    let insufficient_evidence = evidence_sample < MIN_EVIDENCE_SAMPLE;
     let drift = !insufficient_evidence && summary.failed >= DRIFT_FAILURE_THRESHOLD;
     let has_not_observed = summary.not_observed > 0;
-    // Completion rate: terminal / total, as a percentage 0..=100. Never
-    // exceeds 100 by construction (terminal <= total).
-    let completion_rate = if sample == 0 {
+    let completion_rate = if total == 0 {
         0
     } else {
-        ((terminal * 100) / sample).min(100) as u8
+        ((resolved_terminal.saturating_mul(100)) / total).min(100) as u8
     };
-    // Pass rate among terminal trials only. NotObserved and Pending are
-    // deliberately excluded — not observing is not failing.
-    let pass_rate_of_terminal = if terminal == 0 {
+    let pass_rate_of_terminal = if evidence_sample == 0 {
         0
     } else {
-        ((summary.passed * 100) / terminal).min(100) as u8
+        ((summary.passed.saturating_mul(100)) / evidence_sample).min(100) as u8
     };
     SkillEvaluation {
         skill_id: skill_id.to_string(),
@@ -167,7 +172,6 @@ mod tests {
     fn insufficient_evidence_is_explicit_never_a_verdict() {
         let (skills, skill_id) = active_skill();
         let mut trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        // One passed trial: too little to say anything.
         trials
             .expose("s", 1, &skills, std::slice::from_ref(&skill_id))
             .unwrap();
@@ -181,10 +185,9 @@ mod tests {
     }
 
     #[test]
-    fn not_observed_is_never_failed() {
+    fn not_observed_is_completed_but_never_failed_or_pass_rate_evidence() {
         let (skills, skill_id) = active_skill();
         let mut trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        // Expose five trials; four observe the tool, one does not.
         for turn in 1..=5 {
             trials
                 .expose("s", turn, &skills, std::slice::from_ref(&skill_id))
@@ -215,64 +218,49 @@ mod tests {
         assert!(evaluation.has_not_observed);
         assert_eq!(evaluation.summary.failed, 0);
         assert_eq!(evaluation.summary.not_observed, 1);
-        assert!(
-            !evaluation.drift,
-            "NotObserved must never count toward drift"
-        );
+        assert!(!evaluation.drift, "NotObserved must never count toward drift");
         assert_eq!(evaluation.summary.passed, 4);
+        assert_eq!(evaluation.completion_rate, 100, "NotObserved is resolved");
         assert_eq!(evaluation.pass_rate_of_terminal, 100);
     }
 
     #[test]
-    fn drift_requires_both_sample_and_failures() {
+    fn drift_requires_resolved_outcome_evidence_not_pending_exposures() {
         let (skills, skill_id) = active_skill();
         let mut trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        // Three trials, two failed: sufficient sample, threshold met.
         for turn in 1..=3 {
             trials
                 .expose("s", turn, &skills, std::slice::from_ref(&skill_id))
                 .unwrap();
         }
-        trials
-            .resolve_episode(
-                &EpisodeObservation {
-                    evidence_id: "c".repeat(64),
-                    session_id: "s".into(),
-                    turn: 1,
-                    reason_kind: "error".into(),
-                    tools: vec![ToolObservation {
-                        name: "memory.recall".into(),
-                        call_id: "c1".into(),
-                        outcome: ToolOutcome::Failed,
-                    }],
-                },
-                &skills,
-            )
-            .unwrap();
-        trials
-            .resolve_episode(
-                &EpisodeObservation {
-                    evidence_id: "d".repeat(64),
-                    session_id: "s".into(),
-                    turn: 2,
-                    reason_kind: "error".into(),
-                    tools: vec![ToolObservation {
-                        name: "memory.recall".into(),
-                        call_id: "c2".into(),
-                        outcome: ToolOutcome::Failed,
-                    }],
-                },
-                &skills,
-            )
-            .unwrap();
+        for turn in 1..=2 {
+            trials
+                .resolve_episode(
+                    &EpisodeObservation {
+                        evidence_id: if turn == 1 { "c".repeat(64) } else { "d".repeat(64) },
+                        session_id: "s".into(),
+                        turn,
+                        reason_kind: "error".into(),
+                        tools: vec![ToolObservation {
+                            name: "memory.recall".into(),
+                            call_id: format!("c{turn}"),
+                            outcome: ToolOutcome::Failed,
+                        }],
+                    },
+                    &skills,
+                )
+                .unwrap();
+        }
+        let evaluation = SkillEvaluation::from_ledger(&trials, &skill_id).unwrap();
+        assert!(evaluation.insufficient_evidence, "the pending third exposure is not evidence");
+        assert!(!evaluation.drift, "two failures plus one pending must not raise drift");
+
         trials
             .resolve_episode(&episode("s", 3, 'e'), &skills)
             .unwrap();
         let evaluation = SkillEvaluation::from_ledger(&trials, &skill_id).unwrap();
-        assert!(evaluation.drift, "two failures on a sufficient sample");
         assert!(!evaluation.insufficient_evidence);
-        assert_eq!(evaluation.summary.failed, 2);
-        assert_eq!(evaluation.summary.passed, 1);
+        assert!(evaluation.drift, "two failures among three observed outcomes");
         assert_eq!(evaluation.pass_rate_of_terminal, 33);
     }
 
@@ -280,7 +268,6 @@ mod tests {
     fn pending_never_lowers_pass_rate_and_evaluation_is_read_only() {
         let (skills, skill_id) = active_skill();
         let mut trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        // Three exposures, none resolved: all pending.
         for turn in 1..=3 {
             trials
                 .expose("s", turn, &skills, std::slice::from_ref(&skill_id))
@@ -289,11 +276,10 @@ mod tests {
         let before = trials.snapshot().clone();
         let evaluation = SkillEvaluation::from_ledger(&trials, &skill_id).unwrap();
         assert_eq!(evaluation.summary.pending, 3);
+        assert!(evaluation.insufficient_evidence);
         assert_eq!(evaluation.completion_rate, 0);
         assert_eq!(evaluation.pass_rate_of_terminal, 0);
-        // The ledger is untouched: evaluation is read-only.
         assert_eq!(trials.snapshot(), &before);
-        // And `evaluate_all` covers every skill deterministically.
         let all = evaluate_all(&trials);
         assert_eq!(all.len(), 1);
         assert_eq!(all[0], evaluation);

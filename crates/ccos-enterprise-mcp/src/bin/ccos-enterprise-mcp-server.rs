@@ -50,6 +50,8 @@ const ROLE_NAME: &str = "dsh-memory";
 const GOVERNANCE_DIR: &str = ".enterprise";
 const EFFECT_FILE: &str = "effect.json";
 const EXECUTION_DIR: &str = ".execution";
+const CORRELATION_FILE: &str = "correlation.jsonl";
+const MAX_HOST_META_BYTES: usize = 256;
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -207,6 +209,10 @@ fn effect_path(root: &Path) -> PathBuf {
 
 fn execution_root(root: &Path) -> PathBuf {
     root.join(EXECUTION_DIR)
+}
+
+fn correlation_path(root: &Path, tenant: &str) -> PathBuf {
+    execution_root(root).join(tenant).join(CORRELATION_FILE)
 }
 
 fn write_effect(path: &Path, record: &EffectRecord) -> Result<(), String> {
@@ -535,12 +541,28 @@ impl Backend for JournaledBackend {
 struct Meta {
     tenant: String,
     actor: String,
+    agent_id: String,
     host: String,
+    profile: String,
+    host_session_id: String,
     request_id: String,
+    trace_id: String,
     model: String,
     turn_id: String,
     step_id: String,
+    tool_call_id: Option<String>,
     execution_attempt_id: String,
+}
+
+fn valid_host_meta_value(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_HOST_META_BYTES && !value.chars().any(char::is_control)
+}
+
+fn valid_trace_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn parse_meta(params: &Value) -> Result<Meta, ()> {
@@ -550,21 +572,42 @@ fn parse_meta(params: &Value) -> Result<Meta, ()> {
         .and_then(Value::as_object)
         .ok_or(())?;
     let field = |name: &str| {
-        meta.get(name)
+        let value = meta
+            .get(name)
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
+            .ok_or(())?;
+        valid_host_meta_value(value)
+            .then(|| value.to_string())
             .ok_or(())
     };
+    let optional_field = |name: &str| match meta.get(name) {
+        None => Ok(None),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            valid_host_meta_value(value)
+                .then(|| Some(value.to_string()))
+                .ok_or(())
+        }
+        Some(_) => Err(()),
+    };
+    let trace_id = field("trace_id")?;
+    if !valid_trace_id(&trace_id) {
+        return Err(());
+    }
     Ok(Meta {
         tenant: field("tenant_id")?,
         actor: field("actor_id")?,
+        agent_id: field("agent_id")?,
         host: field("host")?,
+        profile: field("dsh_profile")?,
+        host_session_id: field("dsh_session_id")?,
         request_id: field("request_id")?,
+        trace_id,
         model: field("model")?,
         turn_id: field("turn_id")?,
         step_id: field("step_id")?,
+        tool_call_id: optional_field("tool_call_id")?,
         execution_attempt_id: field("execution_attempt_id")?,
     })
 }
@@ -575,6 +618,7 @@ struct Server {
     org: String,
     actor: String,
     store: Store,
+    correlation: execution::ExecutionJournal,
     front_door: GovernedMcp<JournaledBackend>,
     poisoned: Option<String>,
 }
@@ -755,15 +799,42 @@ impl Server {
             .backend_mut()
             .ensure_no_unknown_outcomes(&config.tenant)?;
 
+        let correlation = execution::ExecutionJournal::open(
+            correlation_path(&config.state_dir, &config.tenant),
+            format!("tenant/{}/host-correlation", config.tenant),
+        )
+        .map_err(|error| format!("cannot open Enterprise host-correlation journal: {error}"))?
+        .journal;
+
         Ok(Self {
             config,
             authenticator,
             org,
             actor,
             store,
+            correlation,
             front_door,
             poisoned: None,
         })
+    }
+
+    fn append_host_correlation(&mut self, tool: &str, meta: &Meta) -> Result<(), String> {
+        self.correlation
+            .append(execution::ExecutionEvent::HostCallCorrelated {
+                call_id: meta.execution_attempt_id.clone(),
+                request_id: meta.request_id.clone(),
+                host: meta.host.clone(),
+                host_session_id: meta.host_session_id.clone(),
+                trace_id: meta.trace_id.clone(),
+                agent_id: meta.agent_id.clone(),
+                profile: meta.profile.clone(),
+                turn_id: meta.turn_id.clone(),
+                step_id: meta.step_id.clone(),
+                tool_call_id: meta.tool_call_id.clone(),
+                tool: tool.to_string(),
+            })
+            .map(|_| ())
+            .map_err(|error| format!("cannot persist Enterprise host correlation: {error}"))
     }
 
     fn handle(&mut self, message: &Value) -> Option<Value> {
@@ -799,6 +870,9 @@ impl Server {
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| (-32602, "invalid params".to_string()))?;
+        if !valid_host_meta_value(tool) {
+            return Err((-32602, "invalid params".to_string()));
+        }
         let arguments = params
             .get("arguments")
             .cloned()
@@ -823,6 +897,15 @@ impl Server {
         {
             eprintln!("ccos-enterprise-mcp: host claims did not match configured identity");
             return Err((-32001, "not authenticated".to_string()));
+        }
+
+        if let Err(error) = self.append_host_correlation(tool, &meta) {
+            self.poisoned = Some(error.clone());
+            eprintln!("ccos-enterprise-mcp: host correlation durability failed: {error}");
+            return Err((
+                -32000,
+                "Enterprise host correlation is not durable".to_string(),
+            ));
         }
 
         let request = GatewayRequest {
@@ -1097,8 +1180,12 @@ mod tests {
                 "_meta": { "ccos": {
                     "tenant_id": "acme",
                     "actor_id": actor,
+                    "agent_id": "deepseek-harness-agent",
                     "host": HOST_KIND,
+                    "dsh_profile": "test",
+                    "dsh_session_id": "test-session",
                     "request_id": request_id,
+                    "trace_id": "0123456789abcdef0123456789abcdef",
                     "model": "deepseek-harness",
                     "turn_id": format!("turn-{id}"),
                     "step_id": "step-1",
@@ -1133,6 +1220,7 @@ mod tests {
             .handle(&call(1, "mallory", "r-1", "memory.recall", json!({})))
             .unwrap();
         assert_eq!(response["error"]["code"], -32001);
+        assert!(server.correlation.records().is_empty());
         drop(server);
         cleanup(&root);
     }
@@ -1182,6 +1270,19 @@ mod tests {
             recovered[0].disposition,
             ToolRecoveryDisposition::Completed { success: true, .. }
         ));
+        assert_eq!(server.correlation.records().len(), 2);
+        let first_correlation =
+            serde_json::to_value(&server.correlation.records()[0].event).unwrap();
+        let replay_correlation =
+            serde_json::to_value(&server.correlation.records()[1].event).unwrap();
+        assert_eq!(first_correlation["type"], "host_call_correlated");
+        assert_eq!(first_correlation["request_id"], "same-request");
+        assert_eq!(replay_correlation["request_id"], "same-request");
+        assert_eq!(first_correlation["call_id"], "attempt-1");
+        assert_eq!(replay_correlation["call_id"], "attempt-2");
+        assert_eq!(first_correlation["host_session_id"], "test-session");
+        assert_eq!(first_correlation["agent_id"], "deepseek-harness-agent");
+        assert_eq!(first_correlation["profile"], "test");
         drop(server);
         cleanup(&root);
     }

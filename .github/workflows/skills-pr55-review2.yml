@@ -1,0 +1,89 @@
+name: TEMP skills PR55 second review hardening
+
+on:
+  push:
+    branches: [ci/skills-pr55-review2]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/skills-pr55-review2
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - name: Apply bounded unordered dedup migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/ccos-enterprise-skills/src/registry.rs')
+          s = p.read_text()
+          def once(old, new):
+              global s
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'expected one occurrence, got {n}: {old[:100]!r}')
+              s = s.replace(old, new)
+
+          once(
+              '''    /// Bounded FIFO of recently observed evidence IDs.\n    ///\n    /// In schema v1 this field was a `BTreeSet<String>`. Both representations\n    /// serialize to a JSON array, so existing snapshots remain readable while\n    /// the runtime can now enforce a finite retention window.\n    pub observed_evidence_ids: Vec<String>,\n''',
+              '''    /// Bounded exact deduplication set.\n    ///\n    /// Schema v1 already persisted this field as a `BTreeSet<String>`, whose\n    /// JSON array order is lexical rather than chronological. Keep that exact\n    /// unordered representation so populated v1 snapshots are migrated without\n    /// inventing a FIFO chronology they never recorded.\n    pub observed_evidence_ids: BTreeSet<String>,\n''',
+          )
+          once('            observed_evidence_ids: Vec::new(),\n', '            observed_evidence_ids: BTreeSet::new(),\n')
+          once(
+              '        trim_to_cap(&mut snapshot.observed_evidence_ids, config.dedup_cap);\n',
+              '        trim_dedup_set(&mut snapshot.observed_evidence_ids, config.dedup_cap);\n',
+          )
+          once(
+              '''        if self\n            .snapshot\n            .observed_evidence_ids\n            .iter()\n            .any(|id| id == &episode.evidence_id)\n        {\n            return Ok(ObserveResult::ignored(ObserveDisposition::Duplicate));\n        }\n''',
+              '''        if self\n            .snapshot\n            .observed_evidence_ids\n            .contains(&episode.evidence_id)\n        {\n            return Ok(ObserveResult::ignored(ObserveDisposition::Duplicate));\n        }\n''',
+          )
+          once(
+              '''        let skill_id = format!("skill-v1-{fingerprint}");\n        let was_present = self.snapshot.skills.contains_key(&skill_id);\n        let tool_sequence: Vec<String> =\n''',
+              '''        let skill_id = format!("skill-v1-{fingerprint}");\n        let was_present = self.snapshot.skills.contains_key(&skill_id);\n        if let Some(existing) = self.snapshot.skills.get(&skill_id) {\n            if existing.evidence_ids.iter().any(|id| id == &episode.evidence_id) {\n                push_bounded_dedup(\n                    &mut self.snapshot.observed_evidence_ids,\n                    &episode.evidence_id,\n                    self.config.dedup_cap,\n                );\n                return Ok(ObserveResult::ignored(ObserveDisposition::Duplicate));\n            }\n        }\n        let tool_sequence: Vec<String> =\n''',
+          )
+          once(
+              '''        push_bounded_evidence(\n            &mut self.snapshot.observed_evidence_ids,\n            &episode.evidence_id,\n            self.config.dedup_cap,\n        );\n''',
+              '''        push_bounded_dedup(\n            &mut self.snapshot.observed_evidence_ids,\n            &episode.evidence_id,\n            self.config.dedup_cap,\n        );\n''',
+          )
+          once(
+              '''fn push_bounded_evidence(ids: &mut Vec<String>, id: &str, cap: usize) {\n    while ids.len() >= cap {\n        ids.remove(0);\n    }\n    ids.push(id.to_string());\n}\n\nfn trim_to_cap(ids: &mut Vec<String>, cap: usize) {\n    if ids.len() > cap {\n        ids.drain(..ids.len() - cap);\n    }\n}\n\nfn validate_snapshot(snapshot: &SkillSnapshot) -> Result<(), SkillError> {\n    let mut observed = BTreeSet::new();\n    for evidence_id in &snapshot.observed_evidence_ids {\n        if !observed.insert(evidence_id) {\n            return Err(SkillError::InvalidCapture(\n                "global evidence deduplication index contains duplicates".into(),\n            ));\n        }\n    }\n\n''',
+              '''fn push_bounded_evidence(ids: &mut Vec<String>, id: &str, cap: usize) {\n    ids.retain(|existing| existing != id);\n    while ids.len() >= cap {\n        ids.remove(0);\n    }\n    ids.push(id.to_string());\n}\n\nfn trim_to_cap(ids: &mut Vec<String>, cap: usize) {\n    if ids.len() > cap {\n        ids.drain(..ids.len() - cap);\n    }\n}\n\nfn push_bounded_dedup(ids: &mut BTreeSet<String>, id: &str, cap: usize) {\n    ids.insert(id.to_string());\n    while ids.len() > cap {\n        let Some(evicted) = ids.iter().next_back().cloned() else {\n            break;\n        };\n        ids.remove(&evicted);\n    }\n}\n\nfn trim_dedup_set(ids: &mut BTreeSet<String>, cap: usize) {\n    while ids.len() > cap {\n        let Some(evicted) = ids.iter().next_back().cloned() else {\n            break;\n        };\n        ids.remove(&evicted);\n    }\n}\n\nfn validate_snapshot(snapshot: &SkillSnapshot) -> Result<(), SkillError> {\n''',
+          )
+          once(
+              '''        assert_eq!(\n            registry.snapshot().observed_evidence_ids,\n            vec!["e3".to_string(), "e4".to_string(), "e5".to_string()]\n        );\n''',
+              '''        assert_eq!(registry.snapshot().observed_evidence_ids.len(), 3);\n''',
+          )
+          once(
+              '''        assert_eq!(\n            restored.snapshot().observed_evidence_ids,\n            vec!["e3".to_string(), "e4".to_string(), "e5".to_string()]\n        );\n''',
+              '''        assert_eq!(restored.snapshot().observed_evidence_ids.len(), 3);\n''',
+          )
+          marker = '''    #[test]\n    fn neutral_non_tool_turn_is_ignored() {\n'''
+          if s.count(marker) != 1:
+              raise SystemExit('neutral test marker missing')
+          extra = '''    #[test]\n    fn per_skill_evidence_prevents_recount_after_global_eviction() {\n        let config = SkillConfig {\n            evidence_cap: 4,\n            dedup_cap: 1,\n            ..SkillConfig::default()\n        };\n        let mut registry = SkillRegistry::new(config.clone()).unwrap();\n        let first = episode("e1", &[ToolOutcome::Succeeded], "completed");\n        registry.observe(&first).unwrap();\n        registry\n            .observe(&episode("e2", &[ToolOutcome::Succeeded], "completed"))\n            .unwrap();\n        registry.snapshot.observed_evidence_ids.remove("e1");\n        let before = registry.snapshot.clone();\n        assert_eq!(\n            registry.observe(&first).unwrap().disposition,\n            ObserveDisposition::Duplicate\n        );\n        let skill = registry.snapshot().skills.values().next().unwrap();\n        let previous = before.skills.values().next().unwrap();\n        assert_eq!(skill.trials_attempted, previous.trials_attempted);\n        assert_eq!(skill.trials_passed, previous.trials_passed);\n        assert_eq!(skill.evidence_ids, previous.evidence_ids);\n    }\n\n    #[test]\n    fn schema_v1_unordered_dedup_set_stays_compatible_when_capped() {\n        let mut registry = SkillRegistry::new(SkillConfig {\n            dedup_cap: 8,\n            ..SkillConfig::default()\n        })\n        .unwrap();\n        for id in ["z", "a", "m"] {\n            registry\n                .observe(&episode(id, &[ToolOutcome::Succeeded], "completed"))\n                .unwrap();\n        }\n        let encoded = serde_json::to_vec(registry.snapshot()).unwrap();\n        let snapshot: SkillSnapshot = serde_json::from_slice(&encoded).unwrap();\n        let restored = SkillRegistry::from_snapshot(\n            SkillConfig {\n                dedup_cap: 2,\n                ..SkillConfig::default()\n            },\n            snapshot,\n        )\n        .unwrap();\n        assert_eq!(restored.snapshot().observed_evidence_ids.len(), 2);\n    }\n\n'''
+          s = s.replace(marker, extra + marker)
+          p.write_text(s)
+          PY
+          rm .github/workflows/skills-pr55-review2.yml
+          cargo fmt --all
+          cargo check -p ccos-enterprise-skills
+          cargo clippy -p ccos-enterprise-skills -- -D warnings
+          cargo test -p ccos-enterprise-skills
+      - name: Commit clean hardening tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add -A
+          git commit -m 'fix(skills): preserve v1 dedup semantics'
+          git push origin HEAD:ci/skills-pr55-review2

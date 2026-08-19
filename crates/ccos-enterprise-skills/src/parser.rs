@@ -203,10 +203,10 @@ fn parse_tools(text: &str) -> Result<Vec<ToolObservation>, SkillError> {
         ToolObservation {
             name: pending.name,
             call_id: pending.call_id,
-            outcome: if !pending.has_result {
-                ToolOutcome::Unresolved
-            } else if pending.failed {
+            outcome: if pending.failed {
                 ToolOutcome::Failed
+            } else if !pending.has_result {
+                ToolOutcome::Unresolved
             } else {
                 ToolOutcome::Succeeded
             },
@@ -319,6 +319,14 @@ mod tests {
         assert_eq!(episode.tools.len(), 2);
         assert_eq!(episode.tools[0].name, "tool.a");
         assert_eq!(episode.tools[1].name, "tool.b");
+        assert_eq!(episode.tools[1].outcome, ToolOutcome::Failed);
+    }
+
+    #[test]
+    fn explicit_failure_without_output_is_still_failure_evidence() {
+        let source = capture("error", 1).replace("  output: bad\n  failed: true", "  failed: true");
+        let source = source.replace("\"unresolved_tool_calls\": 0", "\"unresolved_tool_calls\": 0");
+        let episode = parse_capture(&source).unwrap().unwrap();
         assert_eq!(episode.tools[1].outcome, ToolOutcome::Failed);
     }
 

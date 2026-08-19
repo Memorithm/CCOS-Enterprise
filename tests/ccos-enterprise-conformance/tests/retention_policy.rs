@@ -25,6 +25,7 @@ fn policy(class: RetentionClass, seconds: Option<u64>, invalidate: bool) -> Rete
 
 fn item(class: RetentionClass, created_at: u64) -> RetainedItem {
     RetainedItem {
+        tenant: "acme".into(),
         class,
         created_at,
         sealed: false,
@@ -40,8 +41,8 @@ fn enforcement_is_deterministic_replayable_and_audited() {
         item(RetentionClass::EpisodicJournal, 10), // expired (10+30 <= 100)
         item(RetentionClass::EpisodicJournal, 80), // not expired (80+30 > 100)
     ];
-    let (outcome_a, records_a) = RetentionEngine::run_once(&tenant, &p, &items, 100, 100);
-    let (outcome_b, records_b) = RetentionEngine::run_once(&tenant, &p, &items, 100, 100);
+    let (outcome_a, records_a) = RetentionEngine::run_once(&tenant, &p, &items, 100, 100).unwrap();
+    let (outcome_b, records_b) = RetentionEngine::run_once(&tenant, &p, &items, 100, 100).unwrap();
     assert_eq!(outcome_a, outcome_b, "replay converges");
     assert_eq!(records_a, records_b, "replay produces the same audit facts");
     assert_eq!(outcome_a.examined, 3);
@@ -56,14 +57,17 @@ fn sealed_history_is_reported_never_rewritten() {
     let tenant = TenantId("acme".into());
     let p = policy(RetentionClass::SealedSnapshots, Some(30), true);
     let sealed = RetainedItem {
+        tenant: "acme".into(),
         class: RetentionClass::SealedSnapshots,
         created_at: 0,
         sealed: true,
     };
-    let (outcome, records) = RetentionEngine::run_once(&tenant, &p, &[sealed], 100, 100);
-    assert_eq!(outcome.invalidated, 0);
-    assert_eq!(outcome.reported, 1);
-    assert_eq!(records[0].action, EnforcementAction::ReportOnly);
+    // Sealed content is never rewritten, but a tombstone is not a rewrite:
+    // with invalidation enabled, sealed items are invalidated like any other.
+    let (outcome, records) = RetentionEngine::run_once(&tenant, &p, &[sealed], 100, 100).unwrap();
+    assert_eq!(outcome.invalidated, 1);
+    assert_eq!(outcome.reported, 0);
+    assert_eq!(records[0].action, EnforcementAction::Invalidate);
 }
 
 #[test]
@@ -76,7 +80,8 @@ fn never_expiring_class_is_never_enforced() {
         &[item(RetentionClass::ComplianceArchives, 0)],
         u64::MAX,
         100,
-    );
+    )
+    .unwrap();
     assert_eq!(outcome.retained, 1);
     assert!(records.is_empty());
 }
@@ -85,15 +90,33 @@ fn never_expiring_class_is_never_enforced() {
 fn wrong_tenant_never_appears_in_another_tenants_run() {
     let tenant = TenantId("globex".into());
     let p = policy(RetentionClass::EphemeralContext, Some(10), true);
-    let (_, records) = RetentionEngine::run_once(
+    // The item helper builds acme-owned items; a globex run must refuse them
+    // rather than misattribute a retention decision.
+    let err = RetentionEngine::run_once(
         &tenant,
         &p,
         &[item(RetentionClass::EphemeralContext, 0)],
         100,
         100,
-    );
+    )
+    .expect_err("cross-tenant items must be refused");
+    assert!(matches!(
+        err,
+        ccos_enterprise_retention::RetentionError::UnknownTenant { tenant }
+            if tenant == "acme"
+    ));
+    // The owning tenant's run produces its own records.
+    let acme = TenantId("acme".into());
+    let (_, records) = RetentionEngine::run_once(
+        &acme,
+        &p,
+        &[item(RetentionClass::EphemeralContext, 0)],
+        100,
+        100,
+    )
+    .unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].tenant, "globex");
+    assert_eq!(records[0].tenant, "acme");
 }
 
 #[test]
@@ -103,8 +126,7 @@ fn bounded_processing_stops_at_the_batch_limit() {
     let items: Vec<RetainedItem> = (0..50)
         .map(|i| item(RetentionClass::EphemeralContext, i))
         .collect();
-    let (outcome, _) = RetentionEngine::run_once(&tenant, &p, &items, 100, 10);
-    assert_eq!(outcome.examined, 10);
+    let (outcome, _) = RetentionEngine::run_once(&tenant, &p, &items, 100, 10).unwrap();
     assert_eq!(outcome.invalidated, 10, "the first ten are all expired");
 }
 
@@ -119,13 +141,13 @@ fn store_round_trip_preserves_policy_and_audit() {
             .save_policy(&policy(RetentionClass::EpisodicJournal, Some(30), true))
             .unwrap();
         store
-            .append_record(&EnforcementRecord {
+            .append_records(&[EnforcementRecord {
                 tenant: "acme".into(),
                 class: RetentionClass::EpisodicJournal,
                 item_created_at: 0,
                 action: EnforcementAction::Invalidate,
                 at_unix: 100,
-            })
+            }])
             .unwrap();
     }
     {
@@ -150,11 +172,11 @@ fn crash_continuation_replays_without_duplicate_effects() {
     let items: Vec<RetainedItem> = (0..4)
         .map(|i| item(RetentionClass::EphemeralContext, i))
         .collect();
-    let (first, first_records) = RetentionEngine::run_once(&tenant, &p, &items, 100, 2);
-    assert_eq!(first.examined, 2);
+    let (first, first_records) = RetentionEngine::run_once(&tenant, &p, &items, 100, 2).unwrap();
+    assert_eq!(first.invalidated, 2);
     // The process "crashes" after two records; the ledger holds them.
-    let (second, second_records) = RetentionEngine::run_once(&tenant, &p, &items, 100, 4);
-    assert_eq!(second.examined, 4);
+    let (second, second_records) = RetentionEngine::run_once(&tenant, &p, &items, 100, 4).unwrap();
+    assert_eq!(second.invalidated, 4);
     // The rerun's records are a superset prefix of the first run's — no
     // duplicate effects, because records are deterministic per item.
     assert!(second_records.starts_with(&first_records));

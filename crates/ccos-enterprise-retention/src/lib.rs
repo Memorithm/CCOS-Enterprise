@@ -110,10 +110,15 @@ impl RetentionPolicy {
 /// policy, not storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetainedItem {
+    /// The tenant that owns this item. `run_once` refuses items whose tenant
+    /// does not match the run's tenant, so cross-tenant material can never be
+    /// misattributed.
+    pub tenant: String,
     pub class: RetentionClass,
     pub created_at: u64,
-    /// A sealed item may only be *invalidated*, never rewritten — the Core
-    /// contract for auditable history.
+    /// A sealed item's *content* may never be rewritten — its history stays
+    /// auditable — but a sealed item can still be *invalidated* (tombstoned)
+    /// when the policy calls for it: invalidation does not rewrite content.
     pub sealed: bool,
 }
 
@@ -299,21 +304,67 @@ impl RetentionStore {
         Ok(())
     }
 
-    /// Append one enforcement fact durably (crash-tolerant tail, like the
-    /// governance journal).
-    pub fn append_record(&self, record: &EnforcementRecord) -> Result<(), RetentionError> {
-        let mut line = serde_json::to_vec(record).map_err(|error| RetentionError::Corrupt {
-            path: self.ledger_path.clone(),
-            detail: format!("cannot serialize enforcement record: {error}"),
-        })?;
-        line.push(b'\n');
+    /// Append enforcement facts durably, idempotently.
+    ///
+    /// A record already present in the ledger (byte-for-byte equal) is
+    /// skipped, so re-running a batch after a crash converges instead of
+    /// duplicating audit facts. A torn tail left by a crash is truncated
+    /// before appending — otherwise the next append would cement the partial
+    /// line into a committed malformed record.
+    pub fn append_records(&self, records: &[EnforcementRecord]) -> Result<(), RetentionError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        // Repair a torn tail: everything after the last newline is a partial
+        // line and must be removed before anything is appended.
+        let existing = match std::fs::read(&self.ledger_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(source) => {
+                return Err(RetentionError::Io {
+                    path: self.ledger_path.clone(),
+                    source,
+                })
+            }
+        };
+        let committed_len = match existing.iter().rposition(|b| *b == b'\n') {
+            Some(end) => end + 1,
+            None => 0,
+        };
+        if committed_len != existing.len() {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.ledger_path)
+                .map_err(io(&self.ledger_path))?;
+            file.set_len(committed_len as u64)
+                .map_err(io(&self.ledger_path))?;
+            file.sync_data().map_err(io(&self.ledger_path))?;
+        }
+
+        // Idempotency: skip records already committed (byte-for-byte).
+        let committed = self.load_ledger()?;
+        let mut buffer: Vec<u8> = Vec::new();
+        for record in records {
+            if committed.contains(record) {
+                continue;
+            }
+            let mut line = serde_json::to_vec(record).map_err(|error| RetentionError::Corrupt {
+                path: self.ledger_path.clone(),
+                detail: format!("cannot serialize enforcement record: {error}"),
+            })?;
+            line.push(b'\n');
+            buffer.extend_from_slice(&line);
+        }
+        if buffer.is_empty() {
+            return Ok(());
+        }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.ledger_path)
             .map_err(io(&self.ledger_path))?;
         use std::io::Write as _;
-        file.write_all(&line).map_err(io(&self.ledger_path))?;
+        file.write_all(&buffer).map_err(io(&self.ledger_path))?;
         file.sync_data().map_err(io(&self.ledger_path))?;
         Ok(())
     }
@@ -370,7 +421,14 @@ impl RetentionEngine {
     ///
     /// `now` is the caller's clock (an operator-driven run passes its own
     /// wall clock; tests pass a fixed one). Items are examined in a stable
-    /// order (class order, then creation time), bounded by `batch_limit`.
+    /// order (class order, then creation time). Only **expired** items count
+    /// against the `batch_limit`, so a long run of unexpired items can never
+    /// starve expired ones in later classes: the bound governs *work done*,
+    /// not *items seen*.
+    ///
+    /// Every item must carry the run's tenant; an item owned by another
+    /// tenant is a cross-tenant retention decision and is refused
+    /// ([`RetentionError::UnknownTenant`]) rather than misattributed.
     ///
     /// Returns the actions taken and, for each, the durable record the caller
     /// should append to the ledger. Replaying the same inputs produces the
@@ -382,7 +440,7 @@ impl RetentionEngine {
         items: &[RetainedItem],
         now: u64,
         batch_limit: usize,
-    ) -> (RunOutcome, Vec<EnforcementRecord>) {
+    ) -> Result<(RunOutcome, Vec<EnforcementRecord>), RetentionError> {
         let mut outcome = RunOutcome::default();
         let mut records = Vec::new();
         let mut sorted: Vec<&RetainedItem> = items.iter().collect();
@@ -391,7 +449,12 @@ impl RetentionEngine {
                 .cmp(&right.class)
                 .then_with(|| left.created_at.cmp(&right.created_at))
         });
-        for item in sorted.into_iter().take(batch_limit) {
+        for item in sorted {
+            if item.tenant != tenant.0 {
+                return Err(RetentionError::UnknownTenant {
+                    tenant: item.tenant.clone(),
+                });
+            }
             outcome.examined += 1;
             let Some(class_policy) = policy.class(item.class) else {
                 // No policy for this class: the item is retained by default —
@@ -403,10 +466,14 @@ impl RetentionEngine {
                 outcome.retained += 1;
                 continue;
             }
-            // Expired. Invalidation is the preferred action, but never for a
-            // sealed item (its history must remain auditable and unrewritten),
-            // and never when the policy forbids it.
-            let action = if !item.sealed && class_policy.invalidate {
+            // Expired: this is work, and it counts against the batch bound.
+            if outcome.invalidated + outcome.reported >= batch_limit {
+                continue;
+            }
+            // Invalidation is the preferred action; a sealed item's content
+            // is never rewritten, but a tombstone is not a rewrite, so sealed
+            // items are invalidated like any other when the policy allows.
+            let action = if class_policy.invalidate {
                 outcome.invalidated += 1;
                 EnforcementAction::Invalidate
             } else {
@@ -421,7 +488,7 @@ impl RetentionEngine {
                 at_unix: now,
             });
         }
-        (outcome, records)
+        Ok((outcome, records))
     }
 }
 
@@ -448,6 +515,7 @@ mod tests {
 
     fn item(class: RetentionClass, created_at: u64) -> RetainedItem {
         RetainedItem {
+            tenant: "acme".into(),
             class,
             created_at,
             sealed: false,
@@ -479,7 +547,8 @@ mod tests {
             &[item(RetentionClass::SealedSnapshots, 0)],
             100,
             100,
-        );
+        )
+        .unwrap();
         assert_eq!(outcome.examined, 1);
         assert_eq!(outcome.retained, 1);
         assert!(records.is_empty(), "no policy, no enforcement fact");
@@ -488,17 +557,19 @@ mod tests {
     #[test]
     fn invalidation_vs_sealed_history() {
         let p = policy(RetentionClass::SealedSnapshots, Some(10), true);
-        // Sealed items are never invalidated, only reported.
         let sealed = RetainedItem {
+            tenant: "acme".into(),
             class: RetentionClass::SealedSnapshots,
             created_at: 0,
             sealed: true,
         };
+        // A sealed item is never *rewritten*, but a tombstone is not a
+        // rewrite: with invalidation enabled it is invalidated like any other.
         let (outcome, records) =
-            RetentionEngine::run_once(&tenant("acme"), &p, &[sealed], 100, 100);
-        assert_eq!(outcome.reported, 1);
-        assert_eq!(outcome.invalidated, 0);
-        assert_eq!(records[0].action, EnforcementAction::ReportOnly);
+            RetentionEngine::run_once(&tenant("acme"), &p, &[sealed], 100, 100).unwrap();
+        assert_eq!(outcome.invalidated, 1);
+        assert_eq!(outcome.reported, 0);
+        assert_eq!(records[0].action, EnforcementAction::Invalidate);
         // Unsealed items with invalidation enabled are invalidated.
         let (outcome, records) = RetentionEngine::run_once(
             &tenant("acme"),
@@ -506,7 +577,8 @@ mod tests {
             &[item(RetentionClass::SealedSnapshots, 0)],
             100,
             100,
-        );
+        )
+        .unwrap();
         assert_eq!(outcome.invalidated, 1);
         assert_eq!(records[0].action, EnforcementAction::Invalidate);
     }
@@ -520,7 +592,8 @@ mod tests {
             &[item(RetentionClass::EphemeralContext, 0)],
             100,
             100,
-        );
+        )
+        .unwrap();
         assert_eq!(outcome.reported, 1);
         assert_eq!(outcome.invalidated, 0);
         assert_eq!(records[0].action, EnforcementAction::ReportOnly);
@@ -535,9 +608,9 @@ mod tests {
             item(RetentionClass::EpisodicJournal, 95), // not expired
         ];
         let (outcome_a, records_a) =
-            RetentionEngine::run_once(&tenant("acme"), &p, &items, 100, 100);
+            RetentionEngine::run_once(&tenant("acme"), &p, &items, 100, 100).unwrap();
         let (outcome_b, records_b) =
-            RetentionEngine::run_once(&tenant("acme"), &p, &items, 100, 100);
+            RetentionEngine::run_once(&tenant("acme"), &p, &items, 100, 100).unwrap();
         assert_eq!(outcome_a, outcome_b, "replay is deterministic");
         assert_eq!(records_a, records_b, "records are deterministic");
         assert_eq!(outcome_a.examined, 3);
@@ -548,32 +621,41 @@ mod tests {
         assert_eq!(records_a[1].item_created_at, 50);
 
         // Bounded: a batch limit stops mid-way without examining the rest.
-        let (bounded, _) = RetentionEngine::run_once(&tenant("acme"), &p, &items, 100, 2);
-        assert_eq!(bounded.examined, 2);
-        assert_eq!(bounded.retained, 0, "the youngest item was never examined");
+        let (bounded, _) = RetentionEngine::run_once(&tenant("acme"), &p, &items, 100, 2).unwrap();
+        assert_eq!(
+            bounded.invalidated, 2,
+            "the bound governs work, not items seen"
+        );
+        assert_eq!(
+            bounded.examined, 3,
+            "unexpired items do not consume the bound"
+        );
     }
 
     #[test]
     fn wrong_tenant_is_isolated_in_records() {
         let p = policy(RetentionClass::EphemeralContext, Some(10), true);
-        let (_, records) = RetentionEngine::run_once(
+        // The item helper builds acme items; a globex run must refuse them
+        // rather than misattribute the decision.
+        let err = RetentionEngine::run_once(
             &tenant("globex"),
             &p,
             &[item(RetentionClass::EphemeralContext, 0)],
             100,
             100,
-        );
-        assert_eq!(records[0].tenant, "globex");
-        // The same run for another tenant produces another tenant's records;
-        // there is no cross-tenant path in the engine at all.
-        let (_, other) = RetentionEngine::run_once(
+        )
+        .expect_err("cross-tenant items must be refused");
+        assert!(matches!(err, RetentionError::UnknownTenant { tenant } if tenant == "acme"));
+        // And the same run for the owning tenant produces its records.
+        let (_, records) = RetentionEngine::run_once(
             &tenant("acme"),
             &p,
             &[item(RetentionClass::EphemeralContext, 0)],
             100,
             100,
-        );
-        assert_eq!(other[0].tenant, "acme");
+        )
+        .unwrap();
+        assert_eq!(records[0].tenant, "acme");
     }
 
     #[test]
@@ -613,13 +695,13 @@ mod tests {
             let p = policy(RetentionClass::ComplianceArchives, None, false);
             store.save_policy(&p).unwrap();
             store
-                .append_record(&EnforcementRecord {
+                .append_records(&[EnforcementRecord {
                     tenant: "acme".into(),
                     class: RetentionClass::ComplianceArchives,
                     item_created_at: 1,
                     action: EnforcementAction::ReportOnly,
                     at_unix: 100,
-                })
+                }])
                 .unwrap();
         }
         {
@@ -631,5 +713,97 @@ mod tests {
             assert_eq!(ledger[0].tenant, "acme");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_records_is_idempotent_and_repairs_torn_tails() {
+        let dir =
+            std::env::temp_dir().join(format!("ccos-retention-append-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = RetentionStore::open(&dir).unwrap();
+        let record = EnforcementRecord {
+            tenant: "acme".into(),
+            class: RetentionClass::EphemeralContext,
+            item_created_at: 1,
+            action: EnforcementAction::Invalidate,
+            at_unix: 100,
+        };
+        store.append_records(&[record.clone()]).unwrap();
+        // Replaying the same batch must not duplicate the audit fact.
+        store.append_records(&[record.clone()]).unwrap();
+        assert_eq!(store.load_ledger().unwrap().len(), 1);
+
+        // A torn tail (partial line, no newline) is repaired before append.
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(LEDGER_FILE))
+            .unwrap();
+        use std::io::Write as _;
+        file.write_all(b"{\"partial").unwrap();
+        drop(file);
+        let other = EnforcementRecord {
+            tenant: "acme".into(),
+            class: RetentionClass::EphemeralContext,
+            item_created_at: 2,
+            action: EnforcementAction::Invalidate,
+            at_unix: 101,
+        };
+        store.append_records(&[other]).unwrap();
+        let ledger = store.load_ledger().unwrap();
+        assert_eq!(ledger.len(), 2, "the torn tail was truncated, not cemented");
+        assert!(ledger.iter().any(|r| r.item_created_at == 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bounded_run_never_starves_later_classes() {
+        let p = RetentionPolicy {
+            schema_version: RETENTION_SCHEMA,
+            classes: BTreeMap::from([
+                (
+                    RetentionClass::EphemeralContext,
+                    ClassPolicy {
+                        retention_seconds: Some(10),
+                        invalidate: true,
+                    },
+                ),
+                (
+                    RetentionClass::EpisodicJournal,
+                    ClassPolicy {
+                        retention_seconds: Some(10),
+                        invalidate: true,
+                    },
+                ),
+            ]),
+        };
+        // A thousand unexpired ephemeral items must not consume the batch
+        // budget that expired journal items need.
+        let mut items: Vec<RetainedItem> = (0..1_000)
+            .map(|i| RetainedItem {
+                tenant: "acme".into(),
+                class: RetentionClass::EphemeralContext,
+                created_at: 100 + i, // unexpired at now=100? no: created in future
+                sealed: false,
+            })
+            .collect();
+        // Fix: make them unexpired by creating them long ago with a long
+        // retention? Simplest: unexpired means created_at + retention > now.
+        for item in &mut items {
+            item.created_at = 95; // 95 + 10 > 100: unexpired
+        }
+        items.push(RetainedItem {
+            tenant: "acme".into(),
+            class: RetentionClass::EpisodicJournal,
+            created_at: 0, // expired
+            sealed: false,
+        });
+        let (outcome, records) =
+            RetentionEngine::run_once(&tenant("acme"), &p, &items, 100, 1).unwrap();
+        assert_eq!(
+            outcome.invalidated, 1,
+            "the expired journal item was enforced"
+        );
+        assert_eq!(records[0].class, RetentionClass::EpisodicJournal);
     }
 }

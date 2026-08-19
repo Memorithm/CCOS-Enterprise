@@ -30,7 +30,8 @@ use ccos_core::agent_session::AgentSession;
 use ccos_enterprise_auth::{AuthStrength, Authenticator, TokenAuthenticator};
 use ccos_enterprise_gateway::GatewayRequest;
 use ccos_enterprise_mcp::{
-    govern_catalogue, permission_for, to_enterprise, Backend, GovernedMcp, McpOutcome,
+    active_skill_tool_result, govern_catalogue, govern_skill_catalogue, permission_for,
+    skill_tool_spec, to_enterprise, Backend, GovernedMcp, McpOutcome, SKILL_READ_TOOL,
 };
 use ccos_enterprise_runtime::{
     is_canonical_identifier, AuditRecord, Call, Deployment, DeploymentSnapshot, GovernanceRecord,
@@ -650,6 +651,7 @@ impl Server {
         let mut deployment = Deployment::new();
         deployment.add_role(ROLE_NAME, &["memory.read", "memory.write"]);
         govern_catalogue(&mut deployment);
+        govern_skill_catalogue(&mut deployment);
         let mut tenant = TenantState::new(config.token_budget);
         tenant.allow_model(&config.model);
         if !deployment.add_tenant(org, &config.tenant, tenant) {
@@ -745,7 +747,7 @@ impl Server {
         let loaded = store
             .load()
             .map_err(|error| format!("cannot load Enterprise governance store: {error}"))?;
-        let deployment = match loaded {
+        let mut deployment = match loaded {
             Some(loaded) => {
                 if loaded.torn_tail != 0 {
                     return Err(format!(
@@ -768,6 +770,9 @@ impl Server {
                 deployment
             }
         };
+        // Restored deployments created before this capability do not carry its
+        // static tool mapping. Reapplying the same permission is idempotent.
+        govern_skill_catalogue(&mut deployment);
 
         let skills_root = config.state_dir.join(SKILLS_DIR).join(&config.tenant);
         let skill_store = SkillStore::open(&skills_root)
@@ -971,6 +976,215 @@ impl Server {
         })
     }
 
+    fn append_skill_execution_event(
+        &mut self,
+        tenant: &str,
+        event: execution::ExecutionEvent,
+    ) -> Result<(), (i64, String)> {
+        match self
+            .front_door
+            .backend_mut()
+            .execution
+            .append_lifecycle_event(tenant, event)
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let reason = error.to_string();
+                self.poisoned = Some(reason.clone());
+                eprintln!(
+                    "ccos-enterprise-mcp: skill-read execution journal is not durable: {reason}"
+                );
+                Err((
+                    -32000,
+                    "Enterprise skill-read execution state is not durable".to_string(),
+                ))
+            }
+        }
+    }
+
+    fn call_skill_tool(
+        &mut self,
+        identity: &ccos_enterprise_auth::AuthenticatedActor,
+        request: &GatewayRequest,
+        meta: &Meta,
+        arguments: &Value,
+    ) -> Result<Value, (i64, String)> {
+        if self.skill_projection.pending().is_some() {
+            return Err((
+                -32000,
+                "Enterprise skill projection remains pending".to_string(),
+            ));
+        }
+
+        let checkpoint = DeploymentCheckpoint::capture(self.front_door.deployment());
+        let execution = DispatchExecution::new(
+            meta.turn_id.clone(),
+            meta.step_id.clone(),
+            meta.execution_attempt_id.clone(),
+        );
+        let mut forwarded = false;
+
+        let response = match self.front_door.deployment_mut().admit(Call {
+            actor: identity,
+            request,
+            model: &meta.model,
+            cost_tokens: self.config.call_cost_tokens,
+            variant: None,
+            justification: None,
+        }) {
+            Outcome::Forwarded => {
+                forwarded = true;
+                let input_sha256 = successful_output_sha256(arguments).map_err(|error| {
+                    let reason = format!("cannot hash skill-read input: {error}");
+                    self.poisoned = Some(reason);
+                    (
+                        -32000,
+                        "Enterprise skill-read input is not durable".to_string(),
+                    )
+                })?;
+                self.append_skill_execution_event(
+                    &request.tenant,
+                    execution::ExecutionEvent::ToolRequested {
+                        turn_id: execution.turn_id.clone(),
+                        step_id: execution.step_id.clone(),
+                        call_id: execution.call_id.clone(),
+                        tool: SKILL_READ_TOOL.to_string(),
+                        input_sha256,
+                    },
+                )?;
+                self.append_skill_execution_event(
+                    &request.tenant,
+                    execution::ExecutionEvent::ToolStarted {
+                        call_id: execution.call_id.clone(),
+                    },
+                )?;
+
+                // `memory.skills` has no Core/external side effect, but this
+                // durable marker is still required as a settlement witness. It
+                // closes the crash window between a completed physical read and
+                // the governance ledger commit without re-executing the read.
+                let mut effect = EffectRecord::from_request(
+                    request,
+                    meta,
+                    self.config.call_cost_tokens,
+                    arguments,
+                );
+                if let Err(error) = write_effect(&effect_path(&self.config.state_dir), &effect) {
+                    self.poisoned = Some(error.clone());
+                    return Err((
+                        -32000,
+                        "Enterprise skill-read settlement state is not durable".to_string(),
+                    ));
+                }
+
+                let result = self
+                    .skill_store
+                    .load_registry(SkillConfig::default())
+                    .map_err(|error| format!("cannot load Enterprise skill registry: {error}"))
+                    .and_then(|registry| active_skill_tool_result(&registry, arguments));
+                let (success, output_sha256) = match &result {
+                    Ok(value) => (
+                        true,
+                        successful_output_sha256(value).map_err(|error| {
+                            let reason = format!("cannot hash skill-read output: {error}");
+                            self.poisoned = Some(reason);
+                            (
+                                -32000,
+                                "Enterprise skill-read output is not durable".to_string(),
+                            )
+                        })?,
+                    ),
+                    Err(error) => (false, failed_output_sha256(error)),
+                };
+                effect.state = if success {
+                    EffectState::Succeeded
+                } else {
+                    EffectState::Failed
+                };
+                effect.output_sha256 = Some(output_sha256.clone());
+                if let Err(error) = write_effect(&effect_path(&self.config.state_dir), &effect) {
+                    self.poisoned = Some(error.clone());
+                    return Err((
+                        -32000,
+                        "Enterprise skill-read outcome is not durable".to_string(),
+                    ));
+                }
+                self.append_skill_execution_event(
+                    &request.tenant,
+                    execution::ExecutionEvent::ToolFinished {
+                        call_id: execution.call_id.clone(),
+                        success,
+                        output_sha256,
+                    },
+                )?;
+
+                match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let restored = checkpoint.restore().map_err(|restore_error| {
+                            self.poisoned = Some(restore_error.clone());
+                            (-32000, "Enterprise admission rollback failed".to_string())
+                        })?;
+                        *self.front_door.deployment_mut() = restored;
+                        if let Err(settle_error) = self
+                            .front_door
+                            .backend_mut()
+                            .inner_mut()
+                            .settle_marker(&request.request_id)
+                        {
+                            self.poisoned = Some(settle_error.clone());
+                            return Err((
+                                -32000,
+                                "Enterprise failed skill-read outcome could not be settled"
+                                    .to_string(),
+                            ));
+                        }
+                        eprintln!(
+                            "ccos-enterprise-mcp: admitted skill read failed without side effect: {error}"
+                        );
+                        return Ok(tool_error("CCOS Enterprise skill retrieval failed"));
+                    }
+                }
+            }
+            Outcome::Replayed => json!({
+                "content": [{ "type": "text", "text": "CCOS Enterprise replay suppressed" }],
+                "structuredContent": { "replayed": true }
+            }),
+            Outcome::Refused(refusal) => {
+                eprintln!("ccos-enterprise-mcp: governed skill read refused: {refusal:?}");
+                tool_error("CCOS Enterprise request refused")
+            }
+        };
+
+        if let Err(error) = persist_deployment(&mut self.store, self.front_door.deployment()) {
+            self.poisoned = Some(error.clone());
+            eprintln!("ccos-enterprise-mcp: durable skill-read governance commit failed: {error}");
+            // A forwarded read deliberately leaves its Succeeded witness
+            // unsettled. Startup can then reconcile ToolFinished and commit the
+            // missing admission without running the read again.
+            return Err((
+                -32000,
+                "Enterprise governance state is not durable".to_string(),
+            ));
+        }
+        if forwarded {
+            if let Err(error) = self
+                .front_door
+                .backend_mut()
+                .inner_mut()
+                .settle_marker(&request.request_id)
+            {
+                self.poisoned = Some(error.clone());
+                eprintln!("ccos-enterprise-mcp: skill-read settlement marker failed: {error}");
+                return Err((
+                    -32000,
+                    "Enterprise skill-read settlement is not durable".to_string(),
+                ));
+            }
+        }
+        Ok(response)
+    }
+
     fn call_tool(&mut self, params: &Value) -> Result<Value, (i64, String)> {
         if let Some(reason) = &self.poisoned {
             eprintln!("ccos-enterprise-mcp: refusing call after durability failure: {reason}");
@@ -1030,6 +1244,10 @@ impl Server {
             tool: tool.to_string(),
             request_id: meta.request_id.clone(),
         };
+        if request.tool == SKILL_READ_TOOL {
+            return self.call_skill_tool(&identity, &request, &meta, &arguments);
+        }
+
         let checkpoint = DeploymentCheckpoint::capture(self.front_door.deployment());
         let execution = DispatchExecution::new(
             meta.turn_id.clone(),
@@ -1236,6 +1454,16 @@ fn enterprise_specs() -> Result<Vec<Value>, (i64, String)> {
         translated["name"] = Value::String(name.to_string());
         governed.push(translated);
     }
+    if governed
+        .iter()
+        .any(|tool| tool.get("name").and_then(Value::as_str) == Some(SKILL_READ_TOOL))
+    {
+        return Err((
+            -32000,
+            "Enterprise skill capability collides with Core catalogue".to_string(),
+        ));
+    }
+    governed.push(skill_tool_spec());
     governed.sort_by(|left, right| {
         left.get("name")
             .and_then(Value::as_str)
@@ -1373,10 +1601,148 @@ mod tests {
         let tools = enterprise_specs().unwrap();
         assert!(tools.iter().any(|tool| tool["name"] == "memory.recall"));
         assert!(tools.iter().any(|tool| tool["name"] == "memory.ingest"));
+        assert!(tools.iter().any(|tool| tool["name"] == SKILL_READ_TOOL));
         assert!(tools
             .iter()
             .all(|tool| tool["name"].as_str().unwrap().contains('.')));
         assert!(!tools.iter().any(|tool| tool["name"] == "octa_feedback"));
+    }
+
+    #[test]
+    fn governed_skill_read_is_journaled_and_replayed_across_restart() {
+        let config = test_config("skill-read-replay");
+        let root = config.state_dir.clone();
+        cleanup(&root);
+        {
+            let mut server = Server::new(config.clone()).unwrap();
+            let first = server
+                .handle(&call(
+                    1,
+                    "alice",
+                    "skill-read-request",
+                    SKILL_READ_TOOL,
+                    json!({"limit": 4}),
+                ))
+                .unwrap();
+            assert_eq!(first["result"]["structuredContent"]["skills"], json!([]));
+            assert_eq!(first["result"]["structuredContent"]["total_active"], 0);
+            assert_eq!(server.front_door.deployment().spent("acme"), Some(1));
+            assert_eq!(
+                read_effect(&effect_path(&root)).unwrap().unwrap().state,
+                EffectState::Settled
+            );
+        }
+        {
+            let mut restarted = Server::new(config).unwrap();
+            let replay = restarted
+                .handle(&call(
+                    2,
+                    "alice",
+                    "skill-read-request",
+                    SKILL_READ_TOOL,
+                    json!({"limit": 99}),
+                ))
+                .unwrap();
+            assert_eq!(replay["result"]["structuredContent"]["replayed"], true);
+            assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
+            let recovered = restarted
+                .front_door
+                .backend_mut()
+                .recover_tools("acme")
+                .unwrap();
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].call_id, "attempt-1");
+            assert!(matches!(
+                recovered[0].disposition,
+                ToolRecoveryDisposition::Completed { success: true, .. }
+            ));
+        }
+        cleanup(&root);
+    }
+
+    #[test]
+    fn completed_skill_read_recovers_missing_governance_without_rerun() {
+        let config = test_config("skill-read-crash-settlement");
+        let root = config.state_dir.clone();
+        cleanup(&root);
+        {
+            let server = Server::new(config.clone()).unwrap();
+            drop(server);
+            let path = execution_root(&root).join("acme").join("execution.jsonl");
+            let mut journal = execution::ExecutionJournal::open(&path, "tenant/acme/mcp")
+                .unwrap()
+                .journal;
+            journal
+                .append(execution::ExecutionEvent::ToolRequested {
+                    turn_id: "skill-turn".into(),
+                    step_id: "skill-step".into(),
+                    call_id: "skill-crash-attempt".into(),
+                    tool: SKILL_READ_TOOL.into(),
+                    input_sha256: "skill-input".into(),
+                })
+                .unwrap();
+            journal
+                .append(execution::ExecutionEvent::ToolStarted {
+                    call_id: "skill-crash-attempt".into(),
+                })
+                .unwrap();
+            journal
+                .append(execution::ExecutionEvent::ToolFinished {
+                    call_id: "skill-crash-attempt".into(),
+                    success: true,
+                    output_sha256: "skill-output".into(),
+                })
+                .unwrap();
+            let effect = EffectRecord {
+                request_id: "skill-crash-request".into(),
+                tenant: "acme".into(),
+                actor: "alice".into(),
+                tool: SKILL_READ_TOOL.into(),
+                model: "deepseek-harness".into(),
+                cost_tokens: 1,
+                state: EffectState::Succeeded,
+                turn_id: Some("skill-turn".into()),
+                step_id: Some("skill-step".into()),
+                execution_attempt_id: Some("skill-crash-attempt".into()),
+                skill_source_sha256: None,
+                output_sha256: Some("skill-output".into()),
+            };
+            write_effect(&effect_path(&root), &effect).unwrap();
+        }
+        {
+            let mut restarted = Server::new(config).unwrap();
+            assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
+            assert_eq!(
+                read_effect(&effect_path(&root)).unwrap().unwrap().state,
+                EffectState::Settled
+            );
+            let replay = restarted
+                .handle(&call(
+                    2,
+                    "alice",
+                    "skill-crash-request",
+                    SKILL_READ_TOOL,
+                    json!({"limit": 99}),
+                ))
+                .unwrap();
+            assert_eq!(replay["result"]["structuredContent"]["replayed"], true);
+            assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
+            let recovered = restarted
+                .front_door
+                .backend_mut()
+                .recover_tools("acme")
+                .unwrap();
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].call_id, "skill-crash-attempt");
+            assert!(matches!(
+                &recovered[0].disposition,
+                ToolRecoveryDisposition::Completed {
+                    success: true,
+                    output_sha256
+                } if output_sha256 == "skill-output"
+            ));
+        }
+        cleanup(&root);
     }
 
     #[test]

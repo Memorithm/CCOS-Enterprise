@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use ccos_enterprise_mcp::{clears_the_boundary, permission_for, to_core};
+use ccos_enterprise_mcp::{
+    clears_the_boundary, permission_for, skill_permission_for, to_core, SKILL_READ_TOOL,
+};
 use serde::Deserialize;
 
 const MANIFEST: &str = include_str!("../../../adapters/deepseek-harness/governed-read-tools.json");
@@ -25,7 +27,7 @@ fn deepseek_native_manifest_is_exactly_governed_read_only_surface() {
         serde_json::from_str(MANIFEST).expect("DSH read manifest is valid JSON");
     assert_eq!(
         rows.len(),
-        11,
+        12,
         "changing the model-visible DSH surface requires an explicit contract review"
     );
 
@@ -52,19 +54,23 @@ fn deepseek_native_manifest_is_exactly_governed_read_only_surface() {
             "DSH manifest exposed a capability the Enterprise gateway refuses: {}",
             row.enterprise
         );
-        let core = to_core(&row.enterprise).unwrap_or_else(|| {
-            panic!(
-                "DSH manifest names unknown Enterprise tool: {}",
-                row.enterprise
-            )
-        });
+        let permission = to_core(&row.enterprise)
+            .and_then(permission_for)
+            .or_else(|| skill_permission_for(&row.enterprise));
         assert_eq!(
-            permission_for(core),
+            permission,
             Some("memory.read"),
             "DSH model-visible tool {} drifted away from memory.read",
             row.enterprise
         );
     }
+
+    let enterprise_local: Vec<&str> = rows
+        .iter()
+        .filter(|row| to_core(&row.enterprise).is_none())
+        .map(|row| row.enterprise.as_str())
+        .collect();
+    assert_eq!(enterprise_local, vec![SKILL_READ_TOOL]);
 
     for forbidden in [
         "memory.ingest",

@@ -21,7 +21,8 @@ Target host: DeepSeek Harness `0.1.x` (initial validation target: `0.1.0-rc.7`).
 ## Enterprise stdio transport
 
 The adapter launches `ccos-enterprise-mcp-server`. The server binds one verified
-principal to one tenant and sends every call through `GovernedMcp`.
+principal to one tenant and sends every call through the Enterprise admission
+boundary.
 
 Admitted writes are acknowledged only after the tenant Core checkpoint and the
 Enterprise deployment ledger are durable. The ledger preserves budget, replay
@@ -29,6 +30,14 @@ and audit state across child-process restarts. A small durable effect marker
 closes the crash window between Core and the ledger: known successes are settled
 without re-running Core, known failures stay retryable, and an ambiguous started
 effect fails closed.
+
+Enterprise-local `memory.skills` is different by design: it has no Core or
+external write effect, but it still passes authenticated `Deployment::admit`
+and records the same `ToolRequested -> ToolStarted -> ToolFinished` execution
+lifecycle before its governance result is committed. It reuses the durable
+effect marker only as a settlement witness: a completed read can therefore
+finish a missing replay/budget/audit commit after restart without executing the
+read a second time. It is refused while a skill projection is pending.
 
 MCP `isError: true` is never an acknowledgement. The JavaScript client rejects
 it so a failed capture remains in the outbox; the Rust server also treats Core
@@ -74,6 +83,7 @@ When `toolsEnabled` is true, the adapter asks the Enterprise server for its live
 | `ccos_stats` | `memory.stats` |
 | `ccos_timeline` | `memory.timeline` |
 | `ccos_verify` | `memory.verify` |
+| `ccos_skills` | `memory.skills` |
 | `ccos_context_retrieve` | `context.retrieve` |
 | `ccos_causal_blame` | `ccos.causal_blame` |
 | `ccos_causal_flash` | `ccos.causal_flash` |
@@ -82,9 +92,16 @@ When `toolsEnabled` is true, the adapter asks the Enterprise server for its live
 
 `governed-read-tools.json` is the single allowlist source consumed by the JS
 adapter. A Rust conformance test reads the same manifest and proves that every
-listed Enterprise capability still maps to a Core tool requiring exactly
-`memory.read`. If a future catalogue change turns one of these names into a
-write, CI fails instead of silently widening the model-visible surface.
+listed capability is either a governed Core read or the exact Enterprise-local
+`memory.skills` read, and that every entry requires exactly `memory.read`. If a
+future catalogue change turns one of these names into a write, CI fails instead
+of silently widening the model-visible surface.
+
+`memory.skills` returns only validated `Active` skill metadata: skill id, ordered
+tool sequence, lifecycle state, support/trial counters and reliability estimate.
+The returned result is bounded and never exposes evidence ids, fingerprints,
+captured prompts/arguments/results, generated procedures or any skill-execution
+surface.
 
 Descriptions and input schemas still come from the live governed catalogue, so
 a Core schema change cannot drift from a copied adapter schema. Missing expected
@@ -118,7 +135,10 @@ native ccos_* call
   -> fresh execution_attempt_id
   -> ToolRequested / ToolStarted
   -> governed read capability
+  -> durable settlement witness
   -> ToolFinished
+  -> Enterprise ledger commit
+  -> settlement complete
 
 turn/end
   -> durable outbox

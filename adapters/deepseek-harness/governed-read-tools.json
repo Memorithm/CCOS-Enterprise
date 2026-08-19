@@ -5,6 +5,7 @@
   { "enterprise": "memory.stats", "dsh": "ccos_stats" },
   { "enterprise": "memory.timeline", "dsh": "ccos_timeline" },
   { "enterprise": "memory.verify", "dsh": "ccos_verify" },
+  { "enterprise": "memory.skills", "dsh": "ccos_skills" },
   { "enterprise": "context.retrieve", "dsh": "ccos_context_retrieve" },
   { "enterprise": "ccos.causal_blame", "dsh": "ccos_causal_blame" },
   { "enterprise": "ccos.causal_flash", "dsh": "ccos_causal_flash" },

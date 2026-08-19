@@ -57,6 +57,7 @@ test('native surface is the exact governed read-only allowlist', () => {
       ['memory.stats', 'ccos_stats'],
       ['memory.timeline', 'ccos_timeline'],
       ['memory.verify', 'ccos_verify'],
+      ['memory.skills', 'ccos_skills'],
       ['context.retrieve', 'ccos_context_retrieve'],
       ['ccos.causal_blame', 'ccos_causal_blame'],
       ['ccos.causal_flash', 'ccos_causal_flash'],

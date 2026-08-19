@@ -32,7 +32,12 @@ pub struct SkillRecord {
 pub struct SkillSnapshot {
     pub schema_version: u32,
     pub skills: BTreeMap<String, SkillRecord>,
-    pub observed_evidence_ids: BTreeSet<String>,
+    /// Bounded FIFO of recently observed evidence IDs.
+    ///
+    /// In schema v1 this field was a `BTreeSet<String>`. Both representations
+    /// serialize to a JSON array, so existing snapshots remain readable while
+    /// the runtime can now enforce a finite retention window.
+    pub observed_evidence_ids: Vec<String>,
 }
 
 impl Default for SkillSnapshot {
@@ -40,7 +45,7 @@ impl Default for SkillSnapshot {
         Self {
             schema_version: SKILL_SNAPSHOT_SCHEMA,
             skills: BTreeMap::new(),
-            observed_evidence_ids: BTreeSet::new(),
+            observed_evidence_ids: Vec::new(),
         }
     }
 }
@@ -52,6 +57,7 @@ pub struct SkillConfig {
     pub activation_eta: f64,
     pub retire_eta: f64,
     pub evidence_cap: usize,
+    pub dedup_cap: usize,
 }
 
 impl Default for SkillConfig {
@@ -62,6 +68,7 @@ impl Default for SkillConfig {
             activation_eta: 0.75,
             retire_eta: 0.40,
             evidence_cap: 32,
+            dedup_cap: 4096,
         }
     }
 }
@@ -96,6 +103,11 @@ impl SkillConfig {
         if self.evidence_cap == 0 {
             return Err(SkillError::InvalidConfig(
                 "evidence_cap must be greater than zero".into(),
+            ));
+        }
+        if self.dedup_cap == 0 {
+            return Err(SkillError::InvalidConfig(
+                "dedup_cap must be greater than zero".into(),
             ));
         }
         Ok(())
@@ -141,7 +153,10 @@ impl SkillRegistry {
         })
     }
 
-    pub fn from_snapshot(config: SkillConfig, snapshot: SkillSnapshot) -> Result<Self, SkillError> {
+    pub fn from_snapshot(
+        config: SkillConfig,
+        mut snapshot: SkillSnapshot,
+    ) -> Result<Self, SkillError> {
         config.validate()?;
         if snapshot.schema_version != SKILL_SNAPSHOT_SCHEMA {
             return Err(SkillError::UnsupportedSchema {
@@ -149,6 +164,15 @@ impl SkillRegistry {
             });
         }
         validate_snapshot(&snapshot)?;
+
+        // Configuration caps are runtime policy. When an operator lowers a
+        // cap, restored state must converge immediately rather than waiting for
+        // a future append that may never happen.
+        for record in snapshot.skills.values_mut() {
+            trim_to_cap(&mut record.evidence_ids, config.evidence_cap);
+        }
+        trim_to_cap(&mut snapshot.observed_evidence_ids, config.dedup_cap);
+
         Ok(Self { config, snapshot })
     }
 
@@ -177,11 +201,7 @@ impl SkillRegistry {
         }
 
         let positive = episode.is_positive_anchor();
-        let negative = episode.is_negative_trial()
-            || episode
-                .tools
-                .iter()
-                .any(|tool| tool.outcome == ToolOutcome::Unresolved);
+        let negative = episode.is_negative_trial();
         if !positive && !negative {
             return Ok(ObserveResult::ignored(ObserveDisposition::Ignored));
         }
@@ -189,7 +209,8 @@ impl SkillRegistry {
         if self
             .snapshot
             .observed_evidence_ids
-            .contains(&episode.evidence_id)
+            .iter()
+            .any(|id| id == &episode.evidence_id)
         {
             return Ok(ObserveResult::ignored(ObserveDisposition::Duplicate));
         }
@@ -235,9 +256,11 @@ impl SkillRegistry {
         );
         advance_status(record, &self.config);
 
-        self.snapshot
-            .observed_evidence_ids
-            .insert(episode.evidence_id.clone());
+        push_bounded_evidence(
+            &mut self.snapshot.observed_evidence_ids,
+            &episode.evidence_id,
+            self.config.dedup_cap,
+        );
 
         Ok(ObserveResult {
             disposition: if was_present {
@@ -279,13 +302,28 @@ fn advance_status(record: &mut SkillRecord, config: &SkillConfig) {
 }
 
 fn push_bounded_evidence(ids: &mut Vec<String>, id: &str, cap: usize) {
-    if ids.len() == cap {
+    while ids.len() >= cap {
         ids.remove(0);
     }
     ids.push(id.to_string());
 }
 
+fn trim_to_cap(ids: &mut Vec<String>, cap: usize) {
+    if ids.len() > cap {
+        ids.drain(..ids.len() - cap);
+    }
+}
+
 fn validate_snapshot(snapshot: &SkillSnapshot) -> Result<(), SkillError> {
+    let mut observed = BTreeSet::new();
+    for evidence_id in &snapshot.observed_evidence_ids {
+        if !observed.insert(evidence_id) {
+            return Err(SkillError::InvalidCapture(
+                "global evidence deduplication index contains duplicates".into(),
+            ));
+        }
+    }
+
     for (key, record) in &snapshot.skills {
         if key != &record.id {
             return Err(SkillError::InvalidCapture(
@@ -317,6 +355,14 @@ fn validate_snapshot(snapshot: &SkillSnapshot) -> Result<(), SkillError> {
             return Err(SkillError::InvalidCapture(
                 "persisted skill eta does not match counters".into(),
             ));
+        }
+        let mut record_evidence = BTreeSet::new();
+        for evidence_id in &record.evidence_ids {
+            if !record_evidence.insert(evidence_id) {
+                return Err(SkillError::InvalidCapture(
+                    "skill evidence list contains duplicates".into(),
+                ));
+            }
         }
     }
     Ok(())
@@ -384,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_evidence_is_exactly_idempotent() {
+    fn duplicate_evidence_is_idempotent_inside_bounded_window() {
         let mut registry = SkillRegistry::new(SkillConfig::default()).unwrap();
         let observation = episode("same", &[ToolOutcome::Succeeded], "completed");
         assert_eq!(
@@ -407,6 +453,7 @@ mod tests {
             activation_eta: 0.75,
             retire_eta: 0.55,
             evidence_cap: 8,
+            dedup_cap: 32,
         };
         let mut registry = SkillRegistry::new(config).unwrap();
         for id in ["p1", "p2"] {
@@ -427,6 +474,24 @@ mod tests {
     }
 
     #[test]
+    fn failed_unresolved_call_counts_as_one_negative_trial() {
+        let mut registry = SkillRegistry::new(SkillConfig::default()).unwrap();
+        let out = registry
+            .observe(&episode(
+                "fu",
+                &[ToolOutcome::FailedUnresolved],
+                "error",
+            ))
+            .unwrap();
+        assert_eq!(out.disposition, ObserveDisposition::Created);
+        let skill = registry.snapshot().skills.values().next().unwrap();
+        assert_eq!(skill.support, 0);
+        assert_eq!(skill.trials_attempted, 1);
+        assert_eq!(skill.trials_passed, 0);
+        assert_eq!(skill.eta, 1.0 / 3.0);
+    }
+
+    #[test]
     fn unresolved_call_counts_as_negative_trial() {
         let mut registry = SkillRegistry::new(SkillConfig::default()).unwrap();
         let out = registry
@@ -438,6 +503,64 @@ mod tests {
         assert_eq!(skill.trials_attempted, 1);
         assert_eq!(skill.trials_passed, 0);
         assert_eq!(skill.eta, 1.0 / 3.0);
+    }
+
+    #[test]
+    fn global_deduplication_window_is_bounded() {
+        let config = SkillConfig {
+            evidence_cap: 2,
+            dedup_cap: 3,
+            ..SkillConfig::default()
+        };
+        let mut registry = SkillRegistry::new(config).unwrap();
+        for id in ["e1", "e2", "e3", "e4", "e5"] {
+            registry
+                .observe(&episode(id, &[ToolOutcome::Succeeded], "completed"))
+                .unwrap();
+        }
+        assert_eq!(
+            registry.snapshot().observed_evidence_ids,
+            vec!["e3".to_string(), "e4".to_string(), "e5".to_string()]
+        );
+        let skill = registry.snapshot().skills.values().next().unwrap();
+        assert_eq!(
+            skill.evidence_ids,
+            vec!["e4".to_string(), "e5".to_string()]
+        );
+    }
+
+    #[test]
+    fn restored_snapshot_is_trimmed_when_caps_decrease() {
+        let mut registry = SkillRegistry::new(SkillConfig {
+            evidence_cap: 8,
+            dedup_cap: 8,
+            ..SkillConfig::default()
+        })
+        .unwrap();
+        for id in ["e1", "e2", "e3", "e4", "e5"] {
+            registry
+                .observe(&episode(id, &[ToolOutcome::Succeeded], "completed"))
+                .unwrap();
+        }
+        let snapshot = registry.into_snapshot();
+        let restored = SkillRegistry::from_snapshot(
+            SkillConfig {
+                evidence_cap: 2,
+                dedup_cap: 3,
+                ..SkillConfig::default()
+            },
+            snapshot,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.snapshot().observed_evidence_ids,
+            vec!["e3".to_string(), "e4".to_string(), "e5".to_string()]
+        );
+        let skill = restored.snapshot().skills.values().next().unwrap();
+        assert_eq!(
+            skill.evidence_ids,
+            vec!["e4".to_string(), "e5".to_string()]
+        );
     }
 
     #[test]

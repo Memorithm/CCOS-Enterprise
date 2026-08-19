@@ -135,6 +135,48 @@ function l1Capture({ secret, tool = 'memory.recall', turn = 2 }) {
   ].join('\n')
 }
 
+function observationalTrialCapture(skillRead, { secret, turn }) {
+  const episode = {
+    schema: 'ccos.dsh.episode.v1',
+    evidence_only: true,
+    host: 'deepseek-harness',
+    session_id: 'real-rust-e2e-session',
+    turn,
+    observed_outcome: { reason_kind: 'completed' },
+    evidence: {
+      tool_calls: 2,
+      tool_failures: 0,
+      unresolved_tool_calls: 0,
+    },
+  }
+  return [
+    `# DeepSeek Harness turn ${turn}`,
+    '',
+    'session: real-rust-e2e-session',
+    '',
+    '## User',
+    secret,
+    '',
+    '## Assistant',
+    'done',
+    '',
+    '## Tools',
+    '- ccos_skills (trial-read)',
+    '  input: {"limit":4}',
+    `  output: ${JSON.stringify(skillRead.content)}`,
+    '- memory.recall (trial-use)',
+    '  input: {}',
+    '  output: "ok"',
+    '',
+    'turn_end_reason: {"kind":"completed"}',
+    '',
+    '## CCOS Episode (evidence-only)',
+    '```json',
+    JSON.stringify(episode, null, 2),
+    '```',
+  ].join('\n')
+}
+
 function malformedL1Capture() {
   return [
     '# DeepSeek Harness turn 1',
@@ -304,6 +346,87 @@ test(
       assert.equal(replaySkills[0].support, 1)
       assert.equal(replaySkills[0].trials_attempted, 1)
       assert.equal(replaySkills[0].trials_passed, 1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  },
+)
+
+test(
+  'governed skill read becomes one private observational trial through real Rust projection',
+  { skip: !serverPath },
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ccos-dsh-skill-trial-e2e-'))
+    const identity = identityFixture()
+    const trialRequestId = 'real-rust-observational-trial'
+    const trialSecret = 'RAW-TRIAL-CONTENT-MUST-NEVER-PERSIST'
+
+    try {
+      const client = clientFor(root, identity)
+      try {
+        await client.start()
+        for (const turn of [10, 11, 12]) {
+          const ingested = await client.callTool(
+            'memory.ingest',
+            {
+              uri: `dsh/activate-${turn}.md`,
+              source: l1Capture({ secret: `activate-${turn}`, turn }),
+            },
+            ccosMeta(`activate-skill-${turn}`, 'alice', String(turn)),
+          )
+          assert.notEqual(ingested?.isError, true)
+        }
+
+        const skillRead = await client.callTool(
+          'memory.skills',
+          { limit: 4 },
+          ccosMeta('real-rust-skill-read', 'alice', '20'),
+        )
+        assert.equal(skillRead.structuredContent?.returned, 1)
+        assert.equal(skillRead.structuredContent?.skills?.[0]?.status, 'active')
+        const exposedSkillId = skillRead.structuredContent.skills[0].id
+
+        const source = observationalTrialCapture(skillRead, {
+          secret: trialSecret,
+          turn: 20,
+        })
+        const outcome = await client.callTool(
+          'memory.ingest',
+          { uri: 'dsh/observational-trial.md', source },
+          ccosMeta(trialRequestId, 'alice', '21'),
+        )
+        assert.notEqual(outcome?.isError, true)
+
+        const trialsPath = join(root, '.skills', 'acme', 'skill-trials.json')
+        const disk = await readFile(trialsPath, 'utf8')
+        assert.equal(disk.includes('real-rust-e2e-session'), false)
+        assert.equal(disk.includes(trialSecret), false)
+        assert.equal(disk.includes('input'), false)
+        assert.equal(disk.includes('output'), false)
+        const snapshot = JSON.parse(disk)
+        assert.equal(Object.keys(snapshot.trials).length, 1)
+        const trial = Object.values(snapshot.trials)[0]
+        assert.equal(trial.skill_id, exposedSkillId)
+        assert.equal(trial.status, 'passed')
+        assert.match(trial.turn_key, /^[0-9a-f]{64}$/)
+        assert.match(trial.evidence_id, /^[0-9a-f]{64}$/)
+
+        const replay = await client.callTool(
+          'memory.ingest',
+          {
+            uri: 'dsh/observational-trial.md',
+            source: l1Capture({ secret: 'ATTACKER-TRIAL-REPLAY', tool: 'memory.timeline', turn: 99 }),
+          },
+          ccosMeta(trialRequestId, 'alice', '99'),
+        )
+        assert.equal(replay.structuredContent?.replayed, true)
+
+        const afterReplay = JSON.parse(await readFile(trialsPath, 'utf8'))
+        assert.equal(Object.keys(afterReplay.trials).length, 1)
+        assert.equal(Object.values(afterReplay.trials)[0].status, 'passed')
+      } finally {
+        await client.close()
+      }
     } finally {
       await rm(root, { recursive: true, force: true })
     }

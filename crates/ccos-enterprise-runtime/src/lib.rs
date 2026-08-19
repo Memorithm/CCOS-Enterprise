@@ -444,6 +444,9 @@ pub struct TenantState {
     budget: TokenBudget,
     models: ModelAllowlist,
     qpages: QPageRegistry,
+    /// The per-tenant variant activation policy: which advanced variants may
+    /// be activated, and whether the experimental bridge demands approval.
+    variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
 }
 
 impl TenantState {
@@ -452,6 +455,7 @@ impl TenantState {
             budget: TokenBudget::new(token_limit),
             models: ModelAllowlist::default(),
             qpages: QPageRegistry::default(),
+            variant_policy: ccos_enterprise_qpages::policy::VariantPolicy::default(),
         }
     }
 
@@ -463,6 +467,56 @@ impl TenantState {
     pub fn activate(&mut self, variant: AdvancedQPageVariant) -> &mut Self {
         self.qpages.activate(variant);
         self
+    }
+
+    /// Activate a variant **through the variant policy**.
+    ///
+    /// Returns the policy decision: `Allowed` activates; `RequiresApproval`
+    /// (the experimental bridge) refuses unless an approval id is supplied;
+    /// `Denied` refuses outright. This is the governed activation path —
+    /// the raw [`TenantState::activate`] is the builder/restore path and is
+    /// never the one a live deployment's activation uses.
+    pub fn activate_governed(
+        &mut self,
+        variant: AdvancedQPageVariant,
+        approval_id: Option<&str>,
+    ) -> Result<(), String> {
+        match self.variant_policy.evaluate(variant) {
+            ccos_enterprise_qpages::policy::ActivationDecision::Allowed => {
+                self.qpages.activate(variant);
+                Ok(())
+            }
+            ccos_enterprise_qpages::policy::ActivationDecision::RequiresApproval => {
+                match approval_id {
+                    Some(id) if !id.is_empty() => {
+                        self.qpages.activate(variant);
+                        Ok(())
+                    }
+                    _ => Err(format!(
+                        "{variant:?} requires a recorded human approval to activate"
+                    )),
+                }
+            }
+            ccos_enterprise_qpages::policy::ActivationDecision::Denied => Err(format!(
+                "{variant:?} is not permitted by the tenant's variant policy"
+            )),
+        }
+    }
+
+    /// The tenant's variant policy (validated state only).
+    pub fn variant_policy(&self) -> &ccos_enterprise_qpages::policy::VariantPolicy {
+        &self.variant_policy
+    }
+
+    /// Permit a variant in the tenant's policy. Refused for the experimental
+    /// bridge (see [`VariantPolicy::permit`]).
+    pub fn permit_variant(&mut self, variant: AdvancedQPageVariant) -> bool {
+        self.variant_policy.permit(variant)
+    }
+
+    /// Opt the experimental bridge into the tenant's policy.
+    pub fn opt_in_experimental_bridge(&mut self) {
+        self.variant_policy.opt_in_experimental_bridge();
     }
 
     /// Tokens charged to this tenant so far.
@@ -1736,6 +1790,10 @@ pub struct TenantSnapshot {
     pub budget: TokenBudget,
     pub models: ModelAllowlist,
     pub qpages: QPageRegistry,
+    /// The variant activation policy. Empty by default so older snapshots
+    /// load; a policy with an unsupported schema is refused on restore.
+    #[serde(default)]
+    pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
 }
 
 /// The deployment's durable human approval ledger.
@@ -1860,6 +1918,10 @@ pub enum RestoreError {
     /// schema-unknown. Refused rather than silently dropping approvals:
     /// unrecorded approval must stay a denial, never an accident.
     ApprovalLedgerCorrupt { detail: String },
+    /// A tenant's variant activation policy has an unsupported schema.
+    /// Refused: a policy the build cannot interpret must not be carried
+    /// silently.
+    VariantPolicyCorrupt { tenant: String, detail: String },
     /// The journal does not continue the snapshot: replaying it would either
     /// skip decisions or double-count them.
     JournalDiscontinuity { expected: u64, found: u64 },
@@ -1892,6 +1954,9 @@ impl std::fmt::Display for RestoreError {
             ),
             Self::ApprovalLedgerCorrupt { detail } => {
                 write!(f, "approval ledger is corrupt: {detail}")
+            }
+            Self::VariantPolicyCorrupt { tenant, detail } => {
+                write!(f, "tenant {tenant:?} variant policy is corrupt: {detail}")
             }
             Self::JournalDiscontinuity { expected, found } => write!(
                 f,
@@ -1940,6 +2005,7 @@ impl Deployment {
                             budget: state.budget.clone(),
                             models: state.models.clone(),
                             qpages: state.qpages.clone(),
+                            variant_policy: state.variant_policy.clone(),
                         },
                     )
                 })
@@ -2015,12 +2081,21 @@ impl Deployment {
             }
             let id = TenantId(name);
             d.tenant_owner.insert(id.clone(), OrgId(t.owner));
+            // The variant policy must be schema-valid, or the restore is
+            // refused: a policy with an unsupported schema is corrupt state.
+            t.variant_policy
+                .validate()
+                .map_err(|detail| RestoreError::VariantPolicyCorrupt {
+                    tenant: id.0.clone(),
+                    detail,
+                })?;
             d.tenants.insert(
                 id,
                 TenantState {
                     budget: t.budget,
                     models: t.models,
                     qpages: t.qpages,
+                    variant_policy: t.variant_policy,
                 },
             );
         }
@@ -2704,6 +2779,73 @@ mod tests {
         assert!(
             matches!(err, RestoreError::ApprovalLedgerCorrupt { .. }),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn variant_activation_goes_through_the_policy_gate() {
+        let mut state = TenantState::new(100);
+        // By default no advanced variant is permitted: governed activation
+        // of Hierarchical is denied.
+        assert!(state
+            .activate_governed(AdvancedQPageVariant::Hierarchical, None)
+            .is_err());
+
+        // Permitting the variant makes governed activation work.
+        assert!(state.permit_variant(AdvancedQPageVariant::Hierarchical));
+        assert!(state
+            .activate_governed(AdvancedQPageVariant::Hierarchical, None)
+            .is_ok());
+        assert!(
+            state
+                .variant_policy()
+                .evaluate(AdvancedQPageVariant::Hierarchical)
+                == ccos_enterprise_qpages::policy::ActivationDecision::Allowed
+        );
+
+        // The experimental bridge is denied even when opted in, unless an
+        // approval id is supplied.
+        assert!(state
+            .activate_governed(AdvancedQPageVariant::ExperimentalBridge, None)
+            .is_err());
+        state.opt_in_experimental_bridge();
+        assert!(state
+            .activate_governed(AdvancedQPageVariant::ExperimentalBridge, None)
+            .is_err());
+        assert!(state
+            .activate_governed(
+                AdvancedQPageVariant::ExperimentalBridge,
+                Some("approval-v1-x")
+            )
+            .is_ok());
+        assert!(
+            state
+                .variant_policy()
+                .evaluate(AdvancedQPageVariant::ExperimentalBridge)
+                == ccos_enterprise_qpages::policy::ActivationDecision::RequiresApproval
+        );
+    }
+
+    #[test]
+    fn variant_policy_survives_snapshot_and_restore() {
+        let mut d = two_tenant_deployment();
+        d.tenant_mut("acme")
+            .unwrap()
+            .permit_variant(AdvancedQPageVariant::CostBounded);
+        let snapshot = d.snapshot();
+        let mut restored = Deployment::restore(snapshot, &[], &[]).expect("restore");
+        let policy = restored
+            .tenant_mut("acme")
+            .unwrap()
+            .variant_policy()
+            .clone();
+        assert_eq!(
+            policy.evaluate(AdvancedQPageVariant::CostBounded),
+            ccos_enterprise_qpages::policy::ActivationDecision::Allowed
+        );
+        assert_eq!(
+            policy.evaluate(AdvancedQPageVariant::Probabilistic),
+            ccos_enterprise_qpages::policy::ActivationDecision::Denied
         );
     }
 }

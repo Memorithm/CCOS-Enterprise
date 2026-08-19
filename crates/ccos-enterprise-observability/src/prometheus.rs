@@ -25,8 +25,7 @@ use crate::CounterRegistry;
 /// Maximum exported name bytes after escaping every source byte in the most
 /// expansive form plus the `ccos_` prefix. The registry's source bound is the
 /// authority; this constant documents the resulting exporter bound.
-pub const MAX_PROMETHEUS_NAME_BYTES: usize =
-    "ccos_".len() + CounterRegistry::MAX_NAME_BYTES * 3;
+pub const MAX_PROMETHEUS_NAME_BYTES: usize = "ccos_".len() + CounterRegistry::MAX_NAME_BYTES * 3;
 
 /// Translate one validated registry name into a valid, injective Prometheus
 /// metric name.
@@ -137,8 +136,14 @@ mod tests {
 
     #[test]
     fn name_translation_is_valid_and_injective_for_dot_and_underscore() {
-        assert_eq!(prometheus_name("gateway.requests"), "ccos_gateway_d_requests");
-        assert_eq!(prometheus_name("gateway_requests"), "ccos_gateway__requests");
+        assert_eq!(
+            prometheus_name("gateway.requests"),
+            "ccos_gateway_d_requests"
+        );
+        assert_eq!(
+            prometheus_name("gateway_requests"),
+            "ccos_gateway__requests"
+        );
         assert_ne!(
             prometheus_name("gateway.requests"),
             prometheus_name("gateway_requests")

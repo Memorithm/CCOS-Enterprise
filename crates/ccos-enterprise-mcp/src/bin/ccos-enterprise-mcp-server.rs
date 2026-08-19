@@ -30,14 +30,17 @@ use ccos_core::agent_session::AgentSession;
 use ccos_enterprise_auth::{AuthStrength, Authenticator, TokenAuthenticator};
 use ccos_enterprise_gateway::GatewayRequest;
 use ccos_enterprise_mcp::{
-    active_skill_tool_result, govern_catalogue, govern_skill_catalogue, permission_for,
-    skill_tool_spec, to_enterprise, Backend, GovernedMcp, McpOutcome, SKILL_READ_TOOL,
+    active_skill_tool_result_with_observational, govern_catalogue, govern_skill_catalogue,
+    permission_for, skill_tool_spec, to_enterprise, Backend, GovernedMcp, McpOutcome,
+    SKILL_READ_TOOL,
 };
 use ccos_enterprise_runtime::{
     is_canonical_identifier, AuditRecord, Call, Deployment, DeploymentSnapshot, GovernanceRecord,
     Outcome, TenantState,
 };
-use ccos_enterprise_skills::{parse_capture, SkillConfig, SkillStore};
+use ccos_enterprise_skills::{
+    parse_capture, SkillConfig, SkillStore, SkillTrialConfig, SkillTrialStore,
+};
 use ccos_enterprise_store::Store;
 use ed25519_dalek::VerifyingKey;
 #[cfg(test)]
@@ -1077,11 +1080,30 @@ impl Server {
                     ));
                 }
 
+                let skills_root = self
+                    .config
+                    .state_dir
+                    .join(SKILLS_DIR)
+                    .join(&self.config.tenant);
                 let result = self
                     .skill_store
                     .load_registry(SkillConfig::default())
                     .map_err(|error| format!("cannot load Enterprise skill registry: {error}"))
-                    .and_then(|registry| active_skill_tool_result(&registry, arguments));
+                    .and_then(|registry| {
+                        let trials = SkillTrialStore::open(&skills_root).map_err(|error| {
+                            format!("cannot open Enterprise skill trial store: {error}")
+                        })?;
+                        let trial_registry = trials
+                            .load_registry(SkillTrialConfig::default())
+                            .map_err(|error| {
+                                format!("cannot load Enterprise skill trial registry: {error}")
+                            })?;
+                        active_skill_tool_result_with_observational(
+                            &registry,
+                            &trial_registry,
+                            arguments,
+                        )
+                    });
                 let (success, output_sha256) = match &result {
                     Ok(value) => (
                         true,

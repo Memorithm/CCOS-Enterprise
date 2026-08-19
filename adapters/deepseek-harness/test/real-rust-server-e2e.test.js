@@ -5,7 +5,7 @@ import {
   randomUUID,
   sign,
 } from 'node:crypto'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -384,6 +384,14 @@ test(
         )
         assert.equal(skillRead.structuredContent?.returned, 1)
         assert.equal(skillRead.structuredContent?.skills?.[0]?.status, 'active')
+        assert.deepEqual(skillRead.structuredContent.skills[0].observational, {
+          total: 0,
+          pending: 0,
+          passed: 0,
+          failed: 0,
+          inconclusive: 0,
+          not_observed: 0,
+        })
         const exposedSkillId = skillRead.structuredContent.skills[0].id
 
         const source = observationalTrialCapture(skillRead, {
@@ -411,6 +419,22 @@ test(
         assert.match(trial.turn_key, /^[0-9a-f]{64}$/)
         assert.match(trial.evidence_id, /^[0-9a-f]{64}$/)
 
+        const observedRead = await client.callTool(
+          'memory.skills',
+          { limit: 4 },
+          ccosMeta('real-rust-skill-read-after-trial', 'alice', '22'),
+        )
+        assert.notEqual(observedRead?.isError, true)
+        assert.equal(observedRead.structuredContent?.skills?.[0]?.id, exposedSkillId)
+        assert.deepEqual(observedRead.structuredContent.skills[0].observational, {
+          total: 1,
+          pending: 0,
+          passed: 1,
+          failed: 0,
+          inconclusive: 0,
+          not_observed: 0,
+        })
+
         const replay = await client.callTool(
           'memory.ingest',
           {
@@ -424,6 +448,19 @@ test(
         const afterReplay = JSON.parse(await readFile(trialsPath, 'utf8'))
         assert.equal(Object.keys(afterReplay.trials).length, 1)
         assert.equal(Object.values(afterReplay.trials)[0].status, 'passed')
+
+        await writeFile(trialsPath, '{ definitely-corrupt-trial-ledger', 'utf8')
+        await assert.rejects(
+          client.callTool(
+            'memory.skills',
+            { limit: 4 },
+            ccosMeta('real-rust-skill-read-corrupt-ledger', 'alice', '23'),
+          ),
+          (error) =>
+            error?.code === 'MCP_TOOL_ERROR' &&
+            /skill retrieval failed/i.test(error.message) &&
+            error.result?.isError === true,
+        )
       } finally {
         await client.close()
       }

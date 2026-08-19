@@ -41,6 +41,23 @@ jobs:
         working-directory: adapters/deepseek-harness
         run: npm test
 
+  rust-stdio-e2e:
+    name: Real Rust stdio end-to-end
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build authenticated Enterprise MCP server
+        run: cargo build -p ccos-enterprise-mcp --bin ccos-enterprise-mcp-server
+      - name: Exercise adapter transport against real Rust server
+        env:
+          CCOS_REAL_MCP_SERVER: ${{ github.workspace }}/target/debug/ccos-enterprise-mcp-server
+        run: node --test adapters/deepseek-harness/test/real-rust-server-e2e.test.js
+
   rc7-source-compatibility:
     name: DeepSeek Harness rc.7 source compatibility
     runs-on: ubuntu-24.04

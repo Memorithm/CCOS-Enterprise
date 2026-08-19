@@ -4,11 +4,19 @@ on:
   pull_request:
     paths:
       - 'adapters/deepseek-harness/**'
+      - 'crates/ccos-enterprise-execution/**'
+      - 'crates/ccos-enterprise-mcp/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/ci-deepseek-harness.yml'
   push:
     branches: [main]
     paths:
       - 'adapters/deepseek-harness/**'
+      - 'crates/ccos-enterprise-execution/**'
+      - 'crates/ccos-enterprise-mcp/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/ci-deepseek-harness.yml'
 
 permissions:

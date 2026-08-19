@@ -3,8 +3,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::{
-    io, parse_capture, ObserveDisposition, ObserveResult, SkillConfig, SkillError, SkillRegistry,
-    SkillSnapshot, SKILL_SNAPSHOT_SCHEMA,
+    io, parse_capture, parse_skill_exposures, trial_turn_key, ObserveDisposition, ObserveResult,
+    SkillConfig, SkillError, SkillRegistry, SkillSnapshot, SkillTrialConfig, SkillTrialStore,
+    SKILL_SNAPSHOT_SCHEMA,
 };
 
 pub const SKILLS_FILE: &str = "skills.json";
@@ -110,6 +111,12 @@ impl SkillStore {
 
     /// Observe one complete DSH capture and atomically persist any resulting
     /// lifecycle update. A document without L1 evidence is a no-op.
+    ///
+    /// If the adapter-owned transcript also contains a successful governed
+    /// `ccos_skills` result, the strictly validated visible skill ids are
+    /// projected into the observational trial ledger from the same durable L1
+    /// source. Trial exposure is replay-safe: a crash after skill persistence
+    /// but before trial settlement is completed by the next projection retry.
     pub fn observe_capture(
         &self,
         config: SkillConfig,
@@ -122,6 +129,7 @@ impl SkillStore {
                 status: None,
             });
         };
+        let exposed = parse_skill_exposures(source);
         let mut registry = self.load_registry(config)?;
         let result = registry.observe(&episode)?;
         if matches!(
@@ -129,6 +137,27 @@ impl SkillStore {
             ObserveDisposition::Created | ObserveDisposition::Updated
         ) {
             self.save(registry.snapshot())?;
+        }
+
+        if !exposed.is_empty() {
+            // Exposure evidence is auxiliary and must never wedge an already
+            // admitted memory ingest. Unknown ids can only arise from a stale,
+            // truncated or tampered transcript, so they contribute no trial.
+            let known: Vec<String> = exposed
+                .into_iter()
+                .filter(|skill_id| registry.get(skill_id).is_some())
+                .collect();
+            if !known.is_empty() {
+                let trials = SkillTrialStore::open(&self.root)?;
+                let turn_key = trial_turn_key(&episode.session_id, episode.turn);
+                trials.replay_exposure_turn_key(
+                    SkillTrialConfig::default(),
+                    &turn_key,
+                    &registry,
+                    &known,
+                )?;
+                trials.resolve_episode(SkillTrialConfig::default(), &episode, &registry)?;
+            }
         }
         Ok(result)
     }
@@ -139,6 +168,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::{EpisodeObservation, SkillTrialStatus, ToolObservation, ToolOutcome};
 
     fn temp_dir(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -154,6 +184,50 @@ mod tests {
     fn capture(secret: &str) -> String {
         format!(
             "# DeepSeek Harness turn 1\nsession: s1\n\n## User\n{secret}\n\n## Tools\n- memory.recall (c1)\n  input: {{\"secret\":\"{secret}\"}}\n  output: {secret}\nturn_end_reason: {{\"kind\":\"completed\"}}\n\n## CCOS Episode (evidence-only)\n```json\n{{\"schema\":\"ccos.dsh.episode.v1\",\"evidence_only\":true,\"host\":\"deepseek-harness\",\"session_id\":\"s1\",\"turn\":1,\"observed_outcome\":{{\"reason_kind\":\"completed\"}},\"evidence\":{{\"tool_calls\":1,\"tool_failures\":0,\"unresolved_tool_calls\":0}}}}\n```\n"
+        )
+    }
+
+    fn install_active_recall_skill(store: &SkillStore) -> String {
+        let mut registry = SkillRegistry::new(SkillConfig::default()).unwrap();
+        for turn in 1..=3 {
+            registry
+                .observe(&EpisodeObservation {
+                    evidence_id: format!("{turn:064x}"),
+                    session_id: "skill-source".into(),
+                    turn,
+                    reason_kind: "completed".into(),
+                    tools: vec![ToolObservation {
+                        name: "memory.recall".into(),
+                        call_id: format!("call-{turn}"),
+                        outcome: ToolOutcome::Succeeded,
+                    }],
+                })
+                .unwrap();
+        }
+        let skill_id = registry.active().next().unwrap().id.clone();
+        store.save(registry.snapshot()).unwrap();
+        skill_id
+    }
+
+    fn exposed_capture(skill_id: &str) -> String {
+        let structured = serde_json::json!({
+            "skills": [{
+                "id": skill_id,
+                "tool_sequence": ["memory.recall"],
+                "status": "active",
+                "support": 3,
+                "trials_attempted": 3,
+                "trials_passed": 3,
+                "eta": 0.8
+            }],
+            "returned": 1,
+            "total_active": 1,
+            "truncated": false
+        })
+        .to_string();
+        let rendered = serde_json::json!([{ "type": "text", "text": structured }]).to_string();
+        format!(
+            "# DeepSeek Harness turn 9\nsession: trial-session\n\n## User\nuse the skill\n\n## Tools\n- ccos_skills (read-skill)\n  input: {{\"limit\":4}}\n  output: {rendered}\n- memory.recall (use-skill)\n  input: {{}}\n  output: ok\nturn_end_reason: {{\"kind\":\"completed\"}}\n\n## CCOS Episode (evidence-only)\n```json\n{{\"schema\":\"ccos.dsh.episode.v1\",\"evidence_only\":true,\"host\":\"deepseek-harness\",\"session_id\":\"trial-session\",\"turn\":9,\"observed_outcome\":{{\"reason_kind\":\"completed\"}},\"evidence\":{{\"tool_calls\":2,\"tool_failures\":0,\"unresolved_tool_calls\":0}}}}\n```\n"
         )
     }
 
@@ -183,6 +257,71 @@ mod tests {
             assert_eq!(skill.support, 1);
             assert_eq!(skill.trials_attempted, 1);
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn transcript_exposure_creates_and_resolves_private_trial_in_same_projection() {
+        let root = temp_dir("trial-projection");
+        let store = SkillStore::open(&root).unwrap();
+        let skill_id = install_active_recall_skill(&store);
+        let source = exposed_capture(&skill_id);
+        let observed = store
+            .observe_capture(SkillConfig::default(), &source)
+            .unwrap();
+        assert!(matches!(
+            observed.disposition,
+            ObserveDisposition::Created | ObserveDisposition::Updated
+        ));
+
+        let trials = SkillTrialStore::open(&root).unwrap();
+        let snapshot = trials.load().unwrap().unwrap();
+        assert_eq!(snapshot.trials.len(), 1);
+        let trial = snapshot.trials.values().next().unwrap();
+        assert_eq!(trial.skill_id, skill_id);
+        assert_eq!(trial.status, SkillTrialStatus::Passed);
+        assert_eq!(trial.turn_key, trial_turn_key("trial-session", 9));
+        assert!(trial.evidence_id.is_some());
+        drop(trials);
+
+        let disk = std::fs::read_to_string(root.join(crate::SKILL_TRIALS_FILE)).unwrap();
+        assert!(!disk.contains("trial-session"));
+        assert!(!disk.contains("use the skill"));
+        assert!(!disk.contains("input"));
+        assert!(!disk.contains("output"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn repeated_projection_is_trial_idempotent() {
+        let root = temp_dir("trial-replay");
+        let store = SkillStore::open(&root).unwrap();
+        let skill_id = install_active_recall_skill(&store);
+        let source = exposed_capture(&skill_id);
+        store
+            .observe_capture(SkillConfig::default(), &source)
+            .unwrap();
+        store
+            .observe_capture(SkillConfig::default(), &source)
+            .unwrap();
+        let trials = SkillTrialStore::open(&root).unwrap();
+        let snapshot = trials.load().unwrap().unwrap();
+        assert_eq!(snapshot.trials.len(), 1);
+        assert_eq!(
+            snapshot.trials.values().next().unwrap().status,
+            SkillTrialStatus::Passed
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unknown_exposure_id_never_wedges_memory_projection() {
+        let root = temp_dir("unknown-exposure");
+        let store = SkillStore::open(&root).unwrap();
+        let missing = format!("skill-v1-{}", "a".repeat(64));
+        let result = store.observe_capture(SkillConfig::default(), &exposed_capture(&missing));
+        assert!(result.is_ok());
+        assert!(!root.join(crate::SKILL_TRIALS_FILE).exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

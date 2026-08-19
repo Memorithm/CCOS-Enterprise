@@ -87,6 +87,8 @@ isolation, persistence and determinism contract.
 | `ccos-enterprise-backup` | backup manifests, restore gates |
 | `ccos-enterprise-governance` | license claim protocol, signed release-manifest verification, vendor issuance, offline revocation |
 | `ccos-enterprise-qpages` | advanced Q-Page variant registry (policy-gated) |
+| `ccos-enterprise-skills` | evidence-backed skill crystallization + observational trial ledger (validated, hashed-only) |
+| `ccos-enterprise-skills-audit` | operator-only, tenant-scoped, read-only skill/trial/evidence provenance audit (`audit.provenance`) |
 | `ccos-enterprise-admin` | administrative action validation + audit |
 | `ccos-enterprise-octasoma` | tenant-isolated semantic/episodic memory adapter; OctaSoma observations remain non-authoritative |
 | `tools/ccos-license-server` | vendor claim counter (HTTP/1.1) + vault admin CLI + PHP shared-hosting flow |

@@ -9,6 +9,8 @@ description = "The governed MCP front door for Core and explicitly enabled Enter
 
 [dependencies]
 ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }
+ccos-enterprise-rbac = { path = "../ccos-enterprise-rbac" }
+ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
 ccos-enterprise-gateway = { path = "../ccos-enterprise-gateway" }
 ccos-enterprise-auth = { path = "../ccos-enterprise-auth", features = ["token-auth"] }
 ccos-enterprise-decision-service = { path = "../ccos-enterprise-decision-service" }
@@ -16,6 +18,7 @@ ccos-enterprise-qpages = { path = "../ccos-enterprise-qpages" }
 ccos-enterprise-store = { path = "../ccos-enterprise-store" }
 ccos-enterprise-execution = { path = "../ccos-enterprise-execution" }
 ccos-enterprise-skills = { path = "../ccos-enterprise-skills" }
+ccos-enterprise-skills-audit = { path = "../ccos-enterprise-skills-audit" }
 ccos-core.workspace = true
 ed25519-dalek = "2"
 serde.workspace = true

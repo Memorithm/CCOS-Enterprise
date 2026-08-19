@@ -182,6 +182,8 @@ dependencies = [
  "ccos-enterprise-qpages",
  "ccos-enterprise-rbac",
  "ccos-enterprise-runtime",
+ "ccos-enterprise-skills",
+ "ccos-enterprise-skills-audit",
  "ccos-enterprise-tenancy",
  "ccos-license-server",
  "ed25519-dalek",
@@ -317,9 +319,12 @@ dependencies = [
  "ccos-enterprise-execution",
  "ccos-enterprise-gateway",
  "ccos-enterprise-qpages",
+ "ccos-enterprise-rbac",
  "ccos-enterprise-runtime",
  "ccos-enterprise-skills",
+ "ccos-enterprise-skills-audit",
  "ccos-enterprise-store",
+ "ccos-enterprise-tenancy",
  "ed25519-dalek",
  "serde",
  "serde_json",
@@ -476,6 +481,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "ccos-enterprise-skills-audit"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-rbac",
+ "ccos-enterprise-runtime",
+ "ccos-enterprise-skills",
+ "ccos-enterprise-tenancy",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -30,8 +30,9 @@ use ccos_core::agent_session::AgentSession;
 use ccos_enterprise_auth::{AuthStrength, Authenticator, TokenAuthenticator};
 use ccos_enterprise_gateway::GatewayRequest;
 use ccos_enterprise_mcp::{
-    active_skill_tool_result_with_observational, govern_catalogue, govern_skill_catalogue,
-    permission_for, skill_tool_spec, to_enterprise, Backend, GovernedMcp, McpOutcome,
+    active_skill_tool_result_with_observational, govern_catalogue, govern_skill_audit,
+    govern_skill_catalogue, permission_for, skill_audit_result, skill_audit_tool_spec,
+    skill_tool_spec, to_enterprise, Backend, GovernedMcp, McpOutcome, SKILL_AUDIT_TOOL,
     SKILL_READ_TOOL,
 };
 use ccos_enterprise_runtime::{
@@ -776,6 +777,7 @@ impl Server {
         // Restored deployments created before this capability do not carry its
         // static tool mapping. Reapplying the same permission is idempotent.
         govern_skill_catalogue(&mut deployment);
+        govern_skill_audit(&mut deployment);
 
         let skills_root = config.state_dir.join(SKILLS_DIR).join(&config.tenant);
         let skill_store = SkillStore::open(&skills_root)
@@ -1207,6 +1209,198 @@ impl Server {
         Ok(response)
     }
 
+    /// The operator provenance audit, governed and journaled like every other
+    /// tool: admitted through `admit` (RBAC `audit.provenance`, replay
+    /// suppression, budget), witnessed by a durable effect marker, and settled
+    /// only after the governance ledger is durable. The report itself is
+    /// derived from validated registries and never mutates them.
+    fn call_skill_audit(
+        &mut self,
+        identity: &ccos_enterprise_auth::AuthenticatedActor,
+        request: &GatewayRequest,
+        meta: &Meta,
+        arguments: &Value,
+    ) -> Result<Value, (i64, String)> {
+        let checkpoint = DeploymentCheckpoint::capture(self.front_door.deployment());
+        let execution = DispatchExecution::new(
+            meta.turn_id.clone(),
+            meta.step_id.clone(),
+            meta.execution_attempt_id.clone(),
+        );
+        let mut forwarded = false;
+
+        let response = match self.front_door.deployment_mut().admit(Call {
+            actor: identity,
+            request,
+            model: &meta.model,
+            cost_tokens: self.config.call_cost_tokens,
+            variant: None,
+            justification: None,
+        }) {
+            Outcome::Forwarded => {
+                forwarded = true;
+                let input_sha256 = successful_output_sha256(arguments).map_err(|error| {
+                    let reason = format!("cannot hash audit input: {error}");
+                    self.poisoned = Some(reason);
+                    (-32000, "Enterprise audit input is not durable".to_string())
+                })?;
+                self.append_skill_execution_event(
+                    &request.tenant,
+                    execution::ExecutionEvent::ToolRequested {
+                        turn_id: execution.turn_id.clone(),
+                        step_id: execution.step_id.clone(),
+                        call_id: execution.call_id.clone(),
+                        tool: SKILL_AUDIT_TOOL.to_string(),
+                        input_sha256,
+                    },
+                )?;
+                self.append_skill_execution_event(
+                    &request.tenant,
+                    execution::ExecutionEvent::ToolStarted {
+                        call_id: execution.call_id.clone(),
+                    },
+                )?;
+
+                // The audit is read-only, but the durable marker still closes
+                // the crash window between the physical read and the
+                // governance ledger commit, exactly as memory.skills does.
+                let mut effect = EffectRecord::from_request(
+                    request,
+                    meta,
+                    self.config.call_cost_tokens,
+                    arguments,
+                );
+                if let Err(error) = write_effect(&effect_path(&self.config.state_dir), &effect) {
+                    self.poisoned = Some(error.clone());
+                    return Err((
+                        -32000,
+                        "Enterprise audit settlement state is not durable".to_string(),
+                    ));
+                }
+
+                let skills_root = self
+                    .config
+                    .state_dir
+                    .join(SKILLS_DIR)
+                    .join(&self.config.tenant);
+                let result = self
+                    .skill_store
+                    .load_registry(SkillConfig::default())
+                    .map_err(|error| format!("cannot load Enterprise skill registry: {error}"))
+                    .and_then(|registry| {
+                        let trials = SkillTrialStore::open(&skills_root).map_err(|error| {
+                            format!("cannot open Enterprise skill trial store: {error}")
+                        })?;
+                        let trial_registry = trials
+                            .load_registry(SkillTrialConfig::default())
+                            .map_err(|error| {
+                                format!("cannot load Enterprise skill trial registry: {error}")
+                            })?;
+                        skill_audit_result(
+                            self.front_door.deployment(),
+                            &self.actor,
+                            &self.config.tenant,
+                            &registry,
+                            &trial_registry,
+                            arguments,
+                        )
+                    });
+                let (success, output_sha256) = match &result {
+                    Ok(value) => (
+                        true,
+                        successful_output_sha256(value).map_err(|error| {
+                            let reason = format!("cannot hash audit output: {error}");
+                            self.poisoned = Some(reason);
+                            (-32000, "Enterprise audit output is not durable".to_string())
+                        })?,
+                    ),
+                    Err(error) => (false, failed_output_sha256(error)),
+                };
+                effect.state = if success {
+                    EffectState::Succeeded
+                } else {
+                    EffectState::Failed
+                };
+                effect.output_sha256 = Some(output_sha256.clone());
+                if let Err(error) = write_effect(&effect_path(&self.config.state_dir), &effect) {
+                    self.poisoned = Some(error.clone());
+                    return Err((
+                        -32000,
+                        "Enterprise audit outcome is not durable".to_string(),
+                    ));
+                }
+                self.append_skill_execution_event(
+                    &request.tenant,
+                    execution::ExecutionEvent::ToolFinished {
+                        call_id: execution.call_id.clone(),
+                        success,
+                        output_sha256,
+                    },
+                )?;
+
+                match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let restored = checkpoint.restore().map_err(|restore_error| {
+                            self.poisoned = Some(restore_error.clone());
+                            (-32000, "Enterprise admission rollback failed".to_string())
+                        })?;
+                        *self.front_door.deployment_mut() = restored;
+                        if let Err(settle_error) = self
+                            .front_door
+                            .backend_mut()
+                            .inner_mut()
+                            .settle_marker(&request.request_id)
+                        {
+                            self.poisoned = Some(settle_error.clone());
+                            return Err((
+                                -32000,
+                                "Enterprise failed audit outcome could not be settled".to_string(),
+                            ));
+                        }
+                        eprintln!(
+                            "ccos-enterprise-mcp: admitted audit failed without side effect: {error}"
+                        );
+                        return Ok(tool_error("CCOS Enterprise audit refused"));
+                    }
+                }
+            }
+            Outcome::Replayed => json!({
+                "content": [{ "type": "text", "text": "CCOS Enterprise replay suppressed" }],
+                "structuredContent": { "replayed": true }
+            }),
+            Outcome::Refused(refusal) => {
+                eprintln!("ccos-enterprise-mcp: governed audit refused: {refusal:?}");
+                tool_error("CCOS Enterprise request refused")
+            }
+        };
+
+        if let Err(error) = persist_deployment(&mut self.store, self.front_door.deployment()) {
+            self.poisoned = Some(error.clone());
+            eprintln!("ccos-enterprise-mcp: durable audit governance commit failed: {error}");
+            return Err((
+                -32000,
+                "Enterprise governance state is not durable".to_string(),
+            ));
+        }
+        if forwarded {
+            if let Err(error) = self
+                .front_door
+                .backend_mut()
+                .inner_mut()
+                .settle_marker(&request.request_id)
+            {
+                self.poisoned = Some(error.clone());
+                eprintln!("ccos-enterprise-mcp: audit settlement marker failed: {error}");
+                return Err((
+                    -32000,
+                    "Enterprise audit settlement is not durable".to_string(),
+                ));
+            }
+        }
+        Ok(response)
+    }
+
     fn call_tool(&mut self, params: &Value) -> Result<Value, (i64, String)> {
         if let Some(reason) = &self.poisoned {
             eprintln!("ccos-enterprise-mcp: refusing call after durability failure: {reason}");
@@ -1268,6 +1462,9 @@ impl Server {
         };
         if request.tool == SKILL_READ_TOOL {
             return self.call_skill_tool(&identity, &request, &meta, &arguments);
+        }
+        if request.tool == SKILL_AUDIT_TOOL {
+            return self.call_skill_audit(&identity, &request, &meta, &arguments);
         }
 
         let checkpoint = DeploymentCheckpoint::capture(self.front_door.deployment());
@@ -1485,7 +1682,17 @@ fn enterprise_specs() -> Result<Vec<Value>, (i64, String)> {
             "Enterprise skill capability collides with Core catalogue".to_string(),
         ));
     }
+    if governed
+        .iter()
+        .any(|tool| tool.get("name").and_then(Value::as_str) == Some(SKILL_AUDIT_TOOL))
+    {
+        return Err((
+            -32000,
+            "Enterprise audit capability collides with Core catalogue".to_string(),
+        ));
+    }
     governed.push(skill_tool_spec());
+    governed.push(skill_audit_tool_spec());
     governed.sort_by(|left, right| {
         left.get("name")
             .and_then(Value::as_str)
@@ -1624,6 +1831,7 @@ mod tests {
         assert!(tools.iter().any(|tool| tool["name"] == "memory.recall"));
         assert!(tools.iter().any(|tool| tool["name"] == "memory.ingest"));
         assert!(tools.iter().any(|tool| tool["name"] == SKILL_READ_TOOL));
+        assert!(tools.iter().any(|tool| tool["name"] == SKILL_AUDIT_TOOL));
         assert!(tools
             .iter()
             .all(|tool| tool["name"].as_str().unwrap().contains('.')));
@@ -1678,6 +1886,117 @@ mod tests {
                 recovered[0].disposition,
                 ToolRecoveryDisposition::Completed { success: true, .. }
             ));
+        }
+        cleanup(&root);
+    }
+
+    #[test]
+    fn provenance_audit_is_governed_and_not_model_visible() {
+        let config = test_config("skill-audit-replay");
+        let root = config.state_dir.clone();
+        cleanup(&root);
+        let mut server = Server::new(config.clone()).unwrap();
+        // The DSH role grants memory.read/memory.write, NOT audit.provenance:
+        // the operator audit must never be reachable from model context.
+        let first = server
+            .handle(&call(
+                1,
+                "alice",
+                "audit-request",
+                SKILL_AUDIT_TOOL,
+                json!({"limit": 4}),
+            ))
+            .unwrap();
+        assert_eq!(first["result"]["isError"], true);
+        assert!(first["result"]["structuredContent"].is_null());
+        assert_eq!(
+            server.front_door.deployment().spent("acme"),
+            Some(0),
+            "a refused audit costs nothing"
+        );
+        // An operator holding the audit role can run the audit: grant it live
+        // through the governed admin handle, then call again under a fresh
+        // request id.
+        {
+            let d = server.front_door.deployment_mut();
+            let mut admin = d.as_admin("root", "grant operator audit");
+            admin.add_role("auditor", &["audit.provenance"]);
+            admin.assign("alice", "auditor");
+        }
+        let admitted = server
+            .handle(&call(
+                2,
+                "alice",
+                "audit-request-2",
+                SKILL_AUDIT_TOOL,
+                json!({"limit": 4}),
+            ))
+            .unwrap();
+        // No skills have ever crystallized in this tenant, so the report is
+        // the explicit empty tenant: a fact, not a refusal.
+        assert_eq!(admitted["result"]["structuredContent"]["empty"], true);
+        assert_eq!(admitted["result"]["structuredContent"]["tenant"], "acme");
+        assert_eq!(server.front_door.deployment().spent("acme"), Some(1));
+        assert_eq!(
+            read_effect(&effect_path(&root)).unwrap().unwrap().state,
+            EffectState::Settled
+        );
+        drop(server);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn provenance_audit_is_replay_idempotent_across_restart() {
+        let config = test_config("skill-audit-rbac");
+        let root = config.state_dir.clone();
+        cleanup(&root);
+        {
+            let mut server = Server::new(config.clone()).unwrap();
+            {
+                let d = server.front_door.deployment_mut();
+                let mut admin = d.as_admin("root", "grant operator audit");
+                admin.add_role("auditor", &["audit.provenance"]);
+                admin.assign("alice", "auditor");
+            }
+            let first = server
+                .handle(&call(
+                    1,
+                    "alice",
+                    "audit-replay-request",
+                    SKILL_AUDIT_TOOL,
+                    json!({"limit": 4}),
+                ))
+                .unwrap();
+            assert_eq!(first["result"]["structuredContent"]["empty"], true);
+            assert_eq!(server.front_door.deployment().spent("acme"), Some(1));
+            assert_eq!(
+                read_effect(&effect_path(&root)).unwrap().unwrap().state,
+                EffectState::Settled
+            );
+        }
+        {
+            let mut restarted = Server::new(config).unwrap();
+            let replay = restarted
+                .handle(&call(
+                    2,
+                    "alice",
+                    "audit-replay-request",
+                    SKILL_AUDIT_TOOL,
+                    json!({"limit": 99}),
+                ))
+                .unwrap();
+            assert_eq!(replay["result"]["structuredContent"]["replayed"], true);
+            assert_eq!(restarted.front_door.deployment().spent("acme"), Some(1));
+            // The audit request has a complete trail: forwarded once, then the
+            // replay journaled explicitly at zero cost — never re-executed.
+            let trail: Vec<_> = restarted.front_door.deployment().audit().collect();
+            assert_eq!(trail.len(), 2, "forwarded plus explicit replay");
+            assert_eq!(trail[0].tool, SKILL_AUDIT_TOOL);
+            assert_eq!(trail[0].request_id, "audit-replay-request");
+            assert!(trail[0].outcome.is_forwarded());
+            assert_eq!(trail[1].request_id, "audit-replay-request");
+            assert!(trail[1].outcome.is_replayed());
+            assert_eq!(trail[1].cost, 0, "a replay costs nothing");
         }
         cleanup(&root);
     }

@@ -891,6 +891,17 @@ impl Deployment {
         self.roles.roles_of(actor)
     }
 
+    /// The tenant ids of this deployment, in name order. `None` is never
+    /// conflated with an empty tenant: an empty deployment reports nothing.
+    pub fn tenant_ids(&self) -> impl Iterator<Item = &TenantId> {
+        self.tenants.keys()
+    }
+
+    /// The deployment's role book — the authority for permission checks.
+    pub fn roles(&self) -> &RoleBook {
+        &self.roles
+    }
+
     /// Grant a role. Returns false (and grants nothing) for unknown roles —
     /// the RBAC crate's fail-closed rule, surfaced here.
     pub fn assign(&mut self, actor: &str, role: &str) -> bool {

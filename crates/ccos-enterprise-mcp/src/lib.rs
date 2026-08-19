@@ -51,12 +51,18 @@
 
 pub mod decision;
 pub mod server;
+pub mod skill_audit;
 pub mod skills;
 pub use decision::{
     decision_governance_map, decision_governed_names, govern_decision_catalogue, DecisionBackend,
     NoDecisionBackend,
 };
 pub use server::{govern_catalogue, AdvertisedTool, Backend, GovernedMcp, McpOutcome};
+pub use skill_audit::{
+    govern_skill_audit, skill_audit_permission, skill_audit_permission_for, skill_audit_result,
+    skill_audit_tool_spec, DEFAULT_AUDIT_LIMIT, MAX_AUDIT_LIMIT, SKILL_AUDIT_PERMISSION,
+    SKILL_AUDIT_TOOL,
+};
 pub use skills::{
     active_skill_tool_result, active_skill_tool_result_with_observational, govern_skill_catalogue,
     skill_permission_for, skill_tool_spec, DEFAULT_SKILL_READ_LIMIT, MAX_SKILL_READ_LIMIT,

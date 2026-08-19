@@ -11,6 +11,7 @@ description = "One CCOS Core session per tenant: the backend the governed MCP fr
 path = "src/crate_root.rs"
 
 [dependencies]
+ccos-enterprise-execution = { path = "../ccos-enterprise-execution" }
 ccos-enterprise-mcp = { path = "../ccos-enterprise-mcp" }
 ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }
 ccos-core.workspace = true

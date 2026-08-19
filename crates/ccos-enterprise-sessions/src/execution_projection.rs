@@ -267,7 +267,9 @@ impl ExecutionProjection {
                         LifecycleState::Failed
                     };
                 }
-                ExecutionEvent::ToolStarted { .. } | ExecutionEvent::ToolFinished { .. } => {}
+                ExecutionEvent::HostCallCorrelated { .. }
+                | ExecutionEvent::ToolStarted { .. }
+                | ExecutionEvent::ToolFinished { .. } => {}
             }
         }
 

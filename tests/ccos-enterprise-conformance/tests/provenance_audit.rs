@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use ccos_enterprise_rbac::{Permission, Role, RoleBook};
-use ccos_enterprise_runtime::Deployment;
+use ccos_enterprise_runtime::{Deployment, TenantState};
 use ccos_enterprise_skills::{
     EpisodeObservation, SkillConfig, SkillRegistry, SkillTrialConfig, SkillTrialRegistry,
     ToolObservation, ToolOutcome,

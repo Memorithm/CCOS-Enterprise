@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{skill_fingerprint, EpisodeObservation, SkillError, ToolOutcome};
+use crate::{skill_fingerprint, EpisodeObservation, SkillError};
 
 pub const SKILL_SNAPSHOT_SCHEMA: u32 = 1;
 

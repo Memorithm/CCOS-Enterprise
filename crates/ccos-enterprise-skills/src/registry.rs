@@ -32,12 +32,13 @@ pub struct SkillRecord {
 pub struct SkillSnapshot {
     pub schema_version: u32,
     pub skills: BTreeMap<String, SkillRecord>,
-    /// Bounded FIFO of recently observed evidence IDs.
+    /// Bounded exact deduplication set.
     ///
-    /// In schema v1 this field was a `BTreeSet<String>`. Both representations
-    /// serialize to a JSON array, so existing snapshots remain readable while
-    /// the runtime can now enforce a finite retention window.
-    pub observed_evidence_ids: Vec<String>,
+    /// Schema v1 already persisted this field as a `BTreeSet<String>`, whose
+    /// JSON array order is lexical rather than chronological. Keep that exact
+    /// unordered representation so populated v1 snapshots are migrated without
+    /// inventing a FIFO chronology they never recorded.
+    pub observed_evidence_ids: BTreeSet<String>,
 }
 
 impl Default for SkillSnapshot {
@@ -45,7 +46,7 @@ impl Default for SkillSnapshot {
         Self {
             schema_version: SKILL_SNAPSHOT_SCHEMA,
             skills: BTreeMap::new(),
-            observed_evidence_ids: Vec::new(),
+            observed_evidence_ids: BTreeSet::new(),
         }
     }
 }
@@ -171,7 +172,7 @@ impl SkillRegistry {
         for record in snapshot.skills.values_mut() {
             trim_to_cap(&mut record.evidence_ids, config.evidence_cap);
         }
-        trim_to_cap(&mut snapshot.observed_evidence_ids, config.dedup_cap);
+        trim_dedup_set(&mut snapshot.observed_evidence_ids, config.dedup_cap);
 
         Ok(Self { config, snapshot })
     }
@@ -209,8 +210,7 @@ impl SkillRegistry {
         if self
             .snapshot
             .observed_evidence_ids
-            .iter()
-            .any(|id| id == &episode.evidence_id)
+            .contains(&episode.evidence_id)
         {
             return Ok(ObserveResult::ignored(ObserveDisposition::Duplicate));
         }
@@ -218,6 +218,20 @@ impl SkillRegistry {
         let fingerprint = skill_fingerprint(&episode.tools);
         let skill_id = format!("skill-v1-{fingerprint}");
         let was_present = self.snapshot.skills.contains_key(&skill_id);
+        if let Some(existing) = self.snapshot.skills.get(&skill_id) {
+            if existing
+                .evidence_ids
+                .iter()
+                .any(|id| id == &episode.evidence_id)
+            {
+                push_bounded_dedup(
+                    &mut self.snapshot.observed_evidence_ids,
+                    &episode.evidence_id,
+                    self.config.dedup_cap,
+                );
+                return Ok(ObserveResult::ignored(ObserveDisposition::Duplicate));
+            }
+        }
         let tool_sequence: Vec<String> =
             episode.tools.iter().map(|tool| tool.name.clone()).collect();
 
@@ -256,7 +270,7 @@ impl SkillRegistry {
         );
         advance_status(record, &self.config);
 
-        push_bounded_evidence(
+        push_bounded_dedup(
             &mut self.snapshot.observed_evidence_ids,
             &episode.evidence_id,
             self.config.dedup_cap,
@@ -302,6 +316,7 @@ fn advance_status(record: &mut SkillRecord, config: &SkillConfig) {
 }
 
 fn push_bounded_evidence(ids: &mut Vec<String>, id: &str, cap: usize) {
+    ids.retain(|existing| existing != id);
     while ids.len() >= cap {
         ids.remove(0);
     }
@@ -314,16 +329,26 @@ fn trim_to_cap(ids: &mut Vec<String>, cap: usize) {
     }
 }
 
-fn validate_snapshot(snapshot: &SkillSnapshot) -> Result<(), SkillError> {
-    let mut observed = BTreeSet::new();
-    for evidence_id in &snapshot.observed_evidence_ids {
-        if !observed.insert(evidence_id) {
-            return Err(SkillError::InvalidCapture(
-                "global evidence deduplication index contains duplicates".into(),
-            ));
-        }
+fn push_bounded_dedup(ids: &mut BTreeSet<String>, id: &str, cap: usize) {
+    ids.insert(id.to_string());
+    while ids.len() > cap {
+        let Some(evicted) = ids.iter().next_back().cloned() else {
+            break;
+        };
+        ids.remove(&evicted);
     }
+}
 
+fn trim_dedup_set(ids: &mut BTreeSet<String>, cap: usize) {
+    while ids.len() > cap {
+        let Some(evicted) = ids.iter().next_back().cloned() else {
+            break;
+        };
+        ids.remove(&evicted);
+    }
+}
+
+fn validate_snapshot(snapshot: &SkillSnapshot) -> Result<(), SkillError> {
     for (key, record) in &snapshot.skills {
         if key != &record.id {
             return Err(SkillError::InvalidCapture(
@@ -514,10 +539,7 @@ mod tests {
                 .observe(&episode(id, &[ToolOutcome::Succeeded], "completed"))
                 .unwrap();
         }
-        assert_eq!(
-            registry.snapshot().observed_evidence_ids,
-            vec!["e3".to_string(), "e4".to_string(), "e5".to_string()]
-        );
+        assert_eq!(registry.snapshot().observed_evidence_ids.len(), 3);
         let skill = registry.snapshot().skills.values().next().unwrap();
         assert_eq!(skill.evidence_ids, vec!["e4".to_string(), "e5".to_string()]);
     }
@@ -545,12 +567,60 @@ mod tests {
             snapshot,
         )
         .unwrap();
-        assert_eq!(
-            restored.snapshot().observed_evidence_ids,
-            vec!["e3".to_string(), "e4".to_string(), "e5".to_string()]
-        );
+        assert_eq!(restored.snapshot().observed_evidence_ids.len(), 3);
         let skill = restored.snapshot().skills.values().next().unwrap();
         assert_eq!(skill.evidence_ids, vec!["e4".to_string(), "e5".to_string()]);
+    }
+
+    #[test]
+    fn per_skill_evidence_prevents_recount_after_global_eviction() {
+        let config = SkillConfig {
+            evidence_cap: 4,
+            dedup_cap: 1,
+            ..SkillConfig::default()
+        };
+        let mut registry = SkillRegistry::new(config.clone()).unwrap();
+        let first = episode("e1", &[ToolOutcome::Succeeded], "completed");
+        registry.observe(&first).unwrap();
+        registry
+            .observe(&episode("e2", &[ToolOutcome::Succeeded], "completed"))
+            .unwrap();
+        registry.snapshot.observed_evidence_ids.remove("e1");
+        let before = registry.snapshot.clone();
+        assert_eq!(
+            registry.observe(&first).unwrap().disposition,
+            ObserveDisposition::Duplicate
+        );
+        let skill = registry.snapshot().skills.values().next().unwrap();
+        let previous = before.skills.values().next().unwrap();
+        assert_eq!(skill.trials_attempted, previous.trials_attempted);
+        assert_eq!(skill.trials_passed, previous.trials_passed);
+        assert_eq!(skill.evidence_ids, previous.evidence_ids);
+    }
+
+    #[test]
+    fn schema_v1_unordered_dedup_set_stays_compatible_when_capped() {
+        let mut registry = SkillRegistry::new(SkillConfig {
+            dedup_cap: 8,
+            ..SkillConfig::default()
+        })
+        .unwrap();
+        for id in ["z", "a", "m"] {
+            registry
+                .observe(&episode(id, &[ToolOutcome::Succeeded], "completed"))
+                .unwrap();
+        }
+        let encoded = serde_json::to_vec(registry.snapshot()).unwrap();
+        let snapshot: SkillSnapshot = serde_json::from_slice(&encoded).unwrap();
+        let restored = SkillRegistry::from_snapshot(
+            SkillConfig {
+                dedup_cap: 2,
+                ..SkillConfig::default()
+            },
+            snapshot,
+        )
+        .unwrap();
+        assert_eq!(restored.snapshot().observed_evidence_ids.len(), 2);
     }
 
     #[test]

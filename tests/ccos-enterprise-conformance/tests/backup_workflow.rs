@@ -1,36 +1,35 @@
-//! The composed backup/restore contract: produce, verify, stage, promote —
-//! never mutating live state before the complete backup verifies, and
-//! staying fail-closed on any corruption.
+//! The composed backup/restore contract: immutable generations, authenticated
+//! segment identities, exact-byte staging and atomic live-pointer promotion.
 
 use std::path::PathBuf;
 
 use ccos_enterprise_backup::{
-    create_backup, promote_staged, stage_restore, verify_backup, BackupManifest, BackupTarget,
-    FsBackupTarget, Segment,
+    create_backup, manifest_digest_v2, promote_staged, stage_restore, verify_backup, BackupError,
+    BackupManifest, BackupTarget, FsBackupTarget, Segment, BACKUP_SCHEMA,
 };
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "ccos-backup-conf-{tag}-{pid}",
-        pid = std::process::id()
+        "ccos-backup-conf-{tag}-{}",
+        std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
 
-fn segments() -> Vec<Segment> {
+fn segments(version: u8) -> Vec<Segment> {
     vec![
         Segment {
             name: "ledger".into(),
-            bytes: b"ledger-v1".to_vec(),
+            bytes: format!("ledger-v{version}").into_bytes(),
         },
         Segment {
             name: "memory-root".into(),
-            bytes: b"memory-v1".to_vec(),
+            bytes: format!("memory-v{version}").into_bytes(),
         },
         Segment {
             name: "skills".into(),
-            bytes: b"skills-v1".to_vec(),
+            bytes: format!("skills-v{version}").into_bytes(),
         },
     ]
 }
@@ -39,68 +38,99 @@ fn segments() -> Vec<Segment> {
 fn backup_verify_stage_promote_round_trip() {
     let root = scratch("roundtrip");
     let target = FsBackupTarget::new(&root);
-    let manifest = create_backup(&target, "acme", &segments(), 1_700_000_000).unwrap();
-    // The manifest binds tenant, time, digest and count.
+    let manifest = create_backup(&target, "acme", &segments(1), 1_700_000_000).unwrap();
     assert_eq!(manifest.tenant, "acme");
     assert_eq!(manifest.segments, 3);
-    assert_eq!(manifest.digest.len(), 64);
+    assert_eq!(manifest.schema_version, BACKUP_SCHEMA);
     verify_backup(&target, "acme", &manifest).unwrap();
 
-    // Stage into an empty directory; live state is untouched.
-    let staging = scratch("staging");
+    let parent = scratch("live-parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let staging = parent.join("stage");
+    let live = parent.join("live");
     stage_restore(&target, "acme", &manifest, &staging).unwrap();
     assert!(staging.join("manifest.json").exists());
-    assert!(staging.join("ledger").exists());
-
-    // Promote atomically over a live root that holds different content.
-    let live = scratch("live");
-    std::fs::create_dir_all(&live).unwrap();
-    std::fs::write(live.join("ledger"), b"old-live").unwrap();
+    assert!(staging.join("segments").join("ledger").exists());
     promote_staged(&staging, &live).unwrap();
+    #[cfg(unix)]
+    assert!(std::fs::symlink_metadata(&live).unwrap().file_type().is_symlink());
     assert_eq!(
-        std::fs::read_to_string(live.join("ledger")).unwrap(),
-        "ledger-v1",
-        "live state was replaced by the verified backup"
+        std::fs::read_to_string(live.join("segments").join("ledger")).unwrap(),
+        "ledger-v1"
     );
-    let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_dir_all(&staging);
-    let _ = std::fs::remove_dir_all(&live);
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(parent);
 }
 
 #[test]
-fn corrupted_backup_refuses_staging_and_promotion() {
+fn new_backup_never_mutates_last_known_good_generation() {
+    let root = scratch("immutable");
+    let target = FsBackupTarget::new(&root);
+    let first = create_backup(&target, "acme", &segments(1), 1).unwrap();
+    let first_dir = target.current_generation_dir("acme").unwrap().unwrap();
+    let old_bytes = std::fs::read(first_dir.join("segments").join("ledger")).unwrap();
+    let second = create_backup(&target, "acme", &segments(2), 2).unwrap();
+    assert_ne!(first.digest, second.digest);
+    assert_eq!(
+        std::fs::read(first_dir.join("segments").join("ledger")).unwrap(),
+        old_bytes
+    );
+    assert_eq!(
+        target.read_segment("acme", "ledger").unwrap().unwrap(),
+        b"ledger-v2"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn schema_v2_authenticates_segment_names_as_well_as_bytes() {
+    let original = vec![Segment {
+        name: "ledger".into(),
+        bytes: b"same".to_vec(),
+    }];
+    let renamed = vec![Segment {
+        name: "other".into(),
+        bytes: b"same".to_vec(),
+    }];
+    assert_ne!(manifest_digest_v2(&original), manifest_digest_v2(&renamed));
+
+    let root = scratch("rename");
+    let target = FsBackupTarget::new(&root);
+    let manifest = create_backup(&target, "acme", &segments(1), 1).unwrap();
+    let dir = target.current_generation_dir("acme").unwrap().unwrap();
+    std::fs::rename(
+        dir.join("segments").join("ledger"),
+        dir.join("segments").join("ledger-renamed"),
+    )
+    .unwrap();
+    assert!(matches!(
+        verify_backup(&target, "acme", &manifest),
+        Err(BackupError::DigestMismatch { .. })
+    ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn corrupted_backup_refuses_staging_before_touching_destination() {
     let root = scratch("corrupt");
     let target = FsBackupTarget::new(&root);
-    let manifest = create_backup(&target, "acme", &segments(), 1).unwrap();
-    // Tamper one segment after the fact.
-    let path = root.join("acme").join("segments").join("ledger");
-    std::fs::write(&path, b"tampered").unwrap();
+    let manifest = create_backup(&target, "acme", &segments(1), 1).unwrap();
+    let dir = target.current_generation_dir("acme").unwrap().unwrap();
+    std::fs::write(dir.join("segments").join("ledger"), b"tampered").unwrap();
     assert!(verify_backup(&target, "acme", &manifest).is_err());
-
-    // Staging must refuse before any byte is written.
     let staging = scratch("staging-corrupt");
     assert!(stage_restore(&target, "acme", &manifest, &staging).is_err());
     assert!(!staging.exists(), "staging was touched despite corruption");
-    let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn cross_tenant_material_is_refused() {
+fn cross_tenant_and_unsafe_material_is_refused() {
     let root = scratch("cross");
     let target = FsBackupTarget::new(&root);
-    let manifest = create_backup(&target, "acme", &segments(), 1).unwrap();
-    // A manifest that claims to be acme's but is verified as globex's is
-    // refused; and producing a backup for an unsafe tenant id is refused.
+    let manifest = create_backup(&target, "acme", &segments(1), 1).unwrap();
     assert!(verify_backup(&target, "globex", &manifest).is_err());
-    assert!(create_backup(&target, "../escape", &segments(), 1).is_err());
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn duplicate_and_unsafe_segments_are_refused_at_production() {
-    let root = scratch("unsafe");
-    let target = FsBackupTarget::new(&root);
+    assert!(create_backup(&target, "../escape", &segments(1), 1).is_err());
     let dupes = vec![
         Segment {
             name: "a".into(),
@@ -108,7 +138,7 @@ fn duplicate_and_unsafe_segments_are_refused_at_production() {
         },
         Segment {
             name: "a".into(),
-            bytes: b"x".to_vec(),
+            bytes: b"y".to_vec(),
         },
     ];
     assert!(create_backup(&target, "acme", &dupes, 1).is_err());
@@ -117,50 +147,75 @@ fn duplicate_and_unsafe_segments_are_refused_at_production() {
         bytes: b"x".to_vec(),
     }];
     assert!(create_backup(&target, "acme", &traversal, 1).is_err());
-    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn manifest_digest_is_reproducible_offline() {
-    let root = scratch("digest");
+#[cfg(unix)]
+fn repeated_promotion_has_no_mutable_directory_gap() {
+    let root = scratch("repeat-source");
     let target = FsBackupTarget::new(&root);
-    let manifest = create_backup(&target, "acme", &segments(), 42).unwrap();
-    // Recompute the aggregate from the on-disk segments in canonical order:
-    // the same bytes must produce the same manifest digest.
-    let mut names = target.list_segments("acme").unwrap();
-    names.sort();
-    let mut digests = Vec::new();
-    for name in &names {
-        let bytes = target.read_segment("acme", name).unwrap().unwrap();
-        digests.push(ccos_enterprise_backup::segment_digest(&bytes));
-    }
-    let recomputed = ccos_enterprise_backup::manifest_digest(&digests);
-    assert_eq!(recomputed, manifest.digest);
-    let _ = std::fs::remove_dir_all(&root);
+    let parent = scratch("repeat-live");
+    std::fs::create_dir_all(&parent).unwrap();
+    let live = parent.join("live");
+
+    let first = create_backup(&target, "acme", &segments(1), 1).unwrap();
+    let stage1 = parent.join("stage1");
+    stage_restore(&target, "acme", &first, &stage1).unwrap();
+    promote_staged(&stage1, &live).unwrap();
+    let old_target = std::fs::read_link(&live).unwrap();
+
+    let second = create_backup(&target, "acme", &segments(2), 2).unwrap();
+    let stage2 = parent.join("stage2");
+    stage_restore(&target, "acme", &second, &stage2).unwrap();
+    promote_staged(&stage2, &live).unwrap();
+    assert!(std::fs::symlink_metadata(&live).unwrap().file_type().is_symlink());
+    assert!(parent.join(old_target).exists(), "previous generation was destroyed");
+    assert_eq!(
+        std::fs::read(live.join("segments").join("ledger")).unwrap(),
+        b"ledger-v2"
+    );
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(parent);
 }
 
 #[test]
-fn future_schema_manifest_is_refused() {
+#[cfg(unix)]
+fn legacy_mutable_live_directory_is_refused_fail_closed() {
+    let root = scratch("legacy-source");
+    let target = FsBackupTarget::new(&root);
+    let manifest = create_backup(&target, "acme", &segments(1), 1).unwrap();
+    let parent = scratch("legacy-parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let live = parent.join("live");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("old"), b"old-live").unwrap();
+    let stage = parent.join("stage");
+    stage_restore(&target, "acme", &manifest, &stage).unwrap();
+    assert!(matches!(
+        promote_staged(&stage, &live),
+        Err(BackupError::UnsafeLiveLayout { .. })
+    ));
+    assert_eq!(std::fs::read(live.join("old")).unwrap(), b"old-live");
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(parent);
+}
+
+#[test]
+fn future_and_empty_manifests_are_refused() {
     let root = scratch("schema");
     let target = FsBackupTarget::new(&root);
-    let mut manifest = create_backup(&target, "acme", &segments(), 1).unwrap();
-    manifest.schema_version = 999;
+    let mut manifest = create_backup(&target, "acme", &segments(1), 1).unwrap();
+    manifest.schema_version = BACKUP_SCHEMA + 1;
     assert!(verify_backup(&target, "acme", &manifest).is_err());
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn empty_backup_is_refused() {
-    let root = scratch("empty");
-    let target = FsBackupTarget::new(&root);
     assert!(create_backup(&target, "acme", &[], 1).is_err());
-    let manifest = BackupManifest {
+    let empty = BackupManifest {
         tenant: "acme".into(),
         created_unix: 1,
         digest: "a".repeat(64),
         segments: 0,
         schema_version: 1,
     };
-    assert!(verify_backup(&target, "acme", &manifest).is_err());
-    let _ = std::fs::remove_dir_all(&root);
+    assert!(verify_backup(&target, "acme", &empty).is_err());
+    let _ = std::fs::remove_dir_all(root);
 }

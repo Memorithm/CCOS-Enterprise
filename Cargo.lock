@@ -460,6 +460,7 @@ dependencies = [
  "ccos-enterprise-rbac",
  "ccos-enterprise-tenancy",
  "serde",
+ "sha2",
 ]
 
 [[package]]

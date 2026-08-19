@@ -44,21 +44,21 @@ function identityFixture() {
   }
 }
 
-function ccosMeta(requestId, actor = 'alice') {
-    return {
-      tenant_id: 'acme',
-      actor_id: actor,
-      agent_id: 'deepseek-harness-agent',
-      host: 'deepseek-harness',
-      dsh_profile: 'e2e',
-      request_id: requestId,
-      model: 'deepseek-harness',
-      dsh_session_id: 'real-rust-e2e-session',
-      turn_id: '1',
-      step_id: '1',
-      trace_id: '0123456789abcdef0123456789abcdef',
-    }
+function ccosMeta(requestId, actor = 'alice', turn = '1') {
+  return {
+    tenant_id: 'acme',
+    actor_id: actor,
+    agent_id: 'deepseek-harness-agent',
+    host: 'deepseek-harness',
+    dsh_profile: 'e2e',
+    request_id: requestId,
+    model: 'deepseek-harness',
+    dsh_session_id: 'real-rust-e2e-session',
+    turn_id: turn,
+    step_id: '1',
+    trace_id: '0123456789abcdef0123456789abcdef',
   }
+}
 
 function clientFor(stateDir, identity) {
   return new StdioMcpClient({
@@ -77,6 +77,62 @@ function clientFor(stateDir, identity) {
     logger: { warn() {} },
     requestTimeoutMs: 30_000,
   })
+}
+
+function l1Capture({ secret, tool = 'memory.recall', turn = 2 }) {
+  const episode = {
+    schema: 'ccos.dsh.episode.v1',
+    evidence_only: true,
+    host: 'deepseek-harness',
+    session_id: 'real-rust-e2e-session',
+    turn,
+    timing: {
+      started_at_ms: 100,
+      ended_at_ms: 120,
+      duration_ms: 20,
+    },
+    observed_outcome: {
+      reason_kind: 'completed',
+    },
+    reward_proxy: {
+      value: 1,
+      range: [-1, 1],
+      heuristic: 'dsh_turn_end_reason_v1',
+    },
+    evidence: {
+      assistant_messages: 1,
+      tool_calls: 1,
+      tool_results: 1,
+      tool_failures: 0,
+      unresolved_tool_calls: 0,
+      failed_tools: [],
+      repeated_tool_failures: [],
+    },
+    reflection_signals: [],
+  }
+  return [
+    `# DeepSeek Harness turn ${turn}`,
+    '',
+    'session: real-rust-e2e-session',
+    '',
+    '## User',
+    secret,
+    '',
+    '## Assistant',
+    'done',
+    '',
+    '## Tools',
+    `- ${tool} (skill-call-1)`,
+    `  input: ${JSON.stringify({ secret })}`,
+    '  output: "ok"',
+    '',
+    'turn_end_reason: {"kind":"completed"}',
+    '',
+    '## CCOS Episode (evidence-only)',
+    '```json',
+    JSON.stringify(episode, null, 2),
+    '```',
+  ].join('\n')
 }
 
 test(
@@ -127,30 +183,101 @@ test(
       } finally {
         await restarted.close()
       }
-    const correlationText = await readFile(
-      join(root, '.execution', 'acme', 'correlation.jsonl'),
-      'utf8',
-    )
-    const correlation = correlationText
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line).event)
-      .filter((event) => event.type === 'host_call_correlated')
-    assert.equal(
-      correlation.length,
-      2,
-      'forged actor must not create an accepted host-correlation row',
-    )
-    assert.equal(correlation[0].request_id, requestId)
-    assert.equal(correlation[1].request_id, requestId)
-    assert.notEqual(correlation[0].call_id, correlation[1].call_id)
-    assert.equal(correlation[0].host, 'deepseek-harness')
-    assert.equal(correlation[0].host_session_id, 'real-rust-e2e-session')
-    assert.equal(correlation[0].agent_id, 'deepseek-harness-agent')
-    assert.equal(correlation[0].profile, 'e2e')
-    assert.equal(correlation[0].trace_id, '0123456789abcdef0123456789abcdef')
 
+      const correlationText = await readFile(
+        join(root, '.execution', 'acme', 'correlation.jsonl'),
+        'utf8',
+      )
+      const correlation = correlationText
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line).event)
+        .filter((event) => event.type === 'host_call_correlated')
+      assert.equal(
+        correlation.length,
+        2,
+        'forged actor must not create an accepted host-correlation row',
+      )
+      assert.equal(correlation[0].request_id, requestId)
+      assert.equal(correlation[1].request_id, requestId)
+      assert.notEqual(correlation[0].call_id, correlation[1].call_id)
+      assert.equal(correlation[0].host, 'deepseek-harness')
+      assert.equal(correlation[0].host_session_id, 'real-rust-e2e-session')
+      assert.equal(correlation[0].agent_id, 'deepseek-harness-agent')
+      assert.equal(correlation[0].profile, 'e2e')
+      assert.equal(correlation[0].trace_id, '0123456789abcdef0123456789abcdef')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  },
+)
+
+test(
+  'successful L1 ingest crystallizes once without retaining raw content',
+  { skip: !serverPath },
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ccos-dsh-skill-e2e-'))
+    const identity = identityFixture()
+    const requestId = 'real-rust-skill-ingest'
+    const secret = 'RAW-SKILL-SECRET-MUST-NEVER-PERSIST'
+    const source = l1Capture({ secret, turn: 2 })
+
+    try {
+      const first = clientFor(root, identity)
+      try {
+        await first.start()
+        const ingested = await first.callTool(
+          'memory.ingest',
+          { uri: 'dsh/skill-e2e.md', source },
+          ccosMeta(requestId, 'alice', '2'),
+        )
+        assert.notEqual(ingested?.isError, true)
+      } finally {
+        await first.close()
+      }
+
+      const skillsPath = join(root, '.skills', 'acme', 'skills.json')
+      const firstDisk = await readFile(skillsPath, 'utf8')
+      assert.equal(firstDisk.includes(secret), false)
+      const firstSnapshot = JSON.parse(firstDisk)
+      const firstSkills = Object.values(firstSnapshot.skills)
+      assert.equal(firstSkills.length, 1)
+      assert.deepEqual(firstSkills[0].tool_sequence, ['memory.recall'])
+      assert.equal(firstSkills[0].status, 'candidate')
+      assert.equal(firstSkills[0].support, 1)
+      assert.equal(firstSkills[0].trials_attempted, 1)
+      assert.equal(firstSkills[0].trials_passed, 1)
+
+      // A replay with the same idempotency key but attacker-controlled changed
+      // arguments must not create another skill or modify counters.
+      const restarted = clientFor(root, identity)
+      try {
+        await restarted.start()
+        const changedSource = l1Capture({
+          secret: 'ATTACKER-SUBSTITUTED-REPLAY-CONTENT',
+          tool: 'memory.timeline',
+          turn: 99,
+        })
+        const replay = await restarted.callTool(
+          'memory.ingest',
+          { uri: 'dsh/skill-e2e.md', source: changedSource },
+          ccosMeta(requestId, 'alice', '99'),
+        )
+        assert.equal(replay.structuredContent?.replayed, true)
+      } finally {
+        await restarted.close()
+      }
+
+      const replayDisk = await readFile(skillsPath, 'utf8')
+      assert.equal(replayDisk.includes('ATTACKER-SUBSTITUTED-REPLAY-CONTENT'), false)
+      const replaySnapshot = JSON.parse(replayDisk)
+      const replaySkills = Object.values(replaySnapshot.skills)
+      assert.equal(replaySkills.length, 1)
+      assert.deepEqual(replaySkills[0].tool_sequence, ['memory.recall'])
+      assert.equal(replaySkills[0].support, 1)
+      assert.equal(replaySkills[0].trials_attempted, 1)
+      assert.equal(replaySkills[0].trials_passed, 1)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

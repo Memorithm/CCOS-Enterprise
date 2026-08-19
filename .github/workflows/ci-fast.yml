@@ -47,7 +47,7 @@ jobs:
           printf '%s\n' "${OCTA_MANIFESTS[@]}" | grep -qx 'crates/ccos-enterprise-octasoma/Cargo.toml'
           test "${#OCTA_MANIFESTS[@]}" -eq 2
       - name: Workspace lockfile is current
-        run: cargo metadata --locked --no-deps --format-version 1 >/dev/null
+        run: cargo metadata --locked --format-version 1 >/dev/null
       - run: cargo fmt --all -- --check
       # NOT `--all-features` across the whole workspace. Core is a member now
       # and carries opt-in features of its own. Enterprise enables semantic

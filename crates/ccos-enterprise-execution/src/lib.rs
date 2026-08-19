@@ -279,6 +279,11 @@ impl ExecutionJournal {
             .unwrap_or(GENESIS_HASH)
     }
     pub fn recover_tools(&self) -> Result<Vec<ToolRecovery>, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Poisoned(
+                "recovery refused after a previous durable write error; reopen the journal to repair the tail".into(),
+            ));
+        }
         recover_tools(&self.records)
     }
 }
@@ -618,6 +623,10 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, JournalError::Io(_)));
         assert!(journal.is_poisoned());
+        assert!(matches!(
+            journal.recover_tools(),
+            Err(JournalError::Poisoned(_))
+        ));
         assert!(matches!(
             journal.append(ExecutionEvent::TurnStarted {
                 turn_id: "must-not-append".into()

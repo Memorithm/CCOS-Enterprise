@@ -124,7 +124,10 @@ pub fn seal_export(
     limits: ExportLimits,
 ) -> Result<SealedExport, String> {
     if !known_tenants.contains_key(tenant) {
-        return Err(format!("cannot build audit export: unknown tenant {:?}", tenant.0));
+        return Err(format!(
+            "cannot build audit export: unknown tenant {:?}",
+            tenant.0
+        ));
     }
     let report = crate::audit_provenance(
         crate::AuditQuery {
@@ -177,24 +180,8 @@ pub fn exports_are_deterministic(
     limits: ExportLimits,
 ) -> bool {
     match (
-        seal_export(
-            caller,
-            roles,
-            known_tenants,
-            tenant,
-            skills,
-            trials,
-            limits,
-        ),
-        seal_export(
-            caller,
-            roles,
-            known_tenants,
-            tenant,
-            skills,
-            trials,
-            limits,
-        ),
+        seal_export(caller, roles, known_tenants, tenant, skills, trials, limits),
+        seal_export(caller, roles, known_tenants, tenant, skills, trials, limits),
     ) {
         (Ok(first), Ok(second)) => first == second,
         _ => false,
@@ -339,7 +326,10 @@ mod tests {
 
         let mut export = make();
         export.report_schema = "ccos.enterprise.skill-audit/v999".into();
-        assert!(export.verify().is_err(), "unknown outer report schema is refused");
+        assert!(
+            export.verify().is_err(),
+            "unknown outer report schema is refused"
+        );
 
         let mut export = make();
         export.report.schema = "ccos.enterprise.skill-audit/v999".into();

@@ -200,7 +200,10 @@ mod tests {
     fn lock_prevents_two_live_writers() {
         let root = temp_dir("lock");
         let first = SkillStore::open(&root).unwrap();
-        assert!(matches!(SkillStore::open(&root), Err(SkillError::Io { .. })));
+        assert!(matches!(
+            SkillStore::open(&root),
+            Err(SkillError::Io { .. })
+        ));
         drop(first);
         assert!(SkillStore::open(&root).is_ok());
         let _ = std::fs::remove_dir_all(root);

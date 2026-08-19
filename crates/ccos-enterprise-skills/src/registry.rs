@@ -141,10 +141,7 @@ impl SkillRegistry {
         })
     }
 
-    pub fn from_snapshot(
-        config: SkillConfig,
-        snapshot: SkillSnapshot,
-    ) -> Result<Self, SkillError> {
+    pub fn from_snapshot(config: SkillConfig, snapshot: SkillSnapshot) -> Result<Self, SkillError> {
         config.validate()?;
         if snapshot.schema_version != SKILL_SNAPSHOT_SCHEMA {
             return Err(SkillError::UnsupportedSchema {
@@ -200,11 +197,8 @@ impl SkillRegistry {
         let fingerprint = skill_fingerprint(&episode.tools);
         let skill_id = format!("skill-v1-{fingerprint}");
         let was_present = self.snapshot.skills.contains_key(&skill_id);
-        let tool_sequence: Vec<String> = episode
-            .tools
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect();
+        let tool_sequence: Vec<String> =
+            episode.tools.iter().map(|tool| tool.name.clone()).collect();
 
         let record = self
             .snapshot
@@ -273,7 +267,8 @@ fn advance_status(record: &mut SkillRecord, config: &SkillConfig) {
     if record.trials_attempted >= config.candidate_trials {
         if record.eta < config.retire_eta {
             record.status = SkillStatus::Retired;
-        } else if record.status == SkillStatus::Probationary && record.eta >= config.activation_eta {
+        } else if record.status == SkillStatus::Probationary && record.eta >= config.activation_eta
+        {
             record.status = SkillStatus::Active;
         }
     }
@@ -369,12 +364,18 @@ mod tests {
             &[ToolOutcome::Succeeded, ToolOutcome::Succeeded],
             "completed",
         );
-        assert_eq!(registry.observe(&one).unwrap().status, Some(SkillStatus::Candidate));
+        assert_eq!(
+            registry.observe(&one).unwrap().status,
+            Some(SkillStatus::Candidate)
+        );
         assert_eq!(
             registry.observe(&two).unwrap().status,
             Some(SkillStatus::Probationary)
         );
-        assert_eq!(registry.observe(&three).unwrap().status, Some(SkillStatus::Active));
+        assert_eq!(
+            registry.observe(&three).unwrap().status,
+            Some(SkillStatus::Active)
+        );
         let skill = registry.snapshot().skills.values().next().unwrap();
         assert_eq!(skill.support, 3);
         assert_eq!(skill.trials_attempted, 3);

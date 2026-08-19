@@ -126,13 +126,7 @@ pub fn parse_capture(source: &str) -> Result<Option<EpisodeObservation>, SkillEr
         .ok_or_else(|| SkillError::InvalidCapture("episode turn is missing".into()))?;
     if !matches!(
         raw.observed_outcome.reason_kind.as_str(),
-        "completed"
-            | "aborted"
-            | "blocked"
-            | "error"
-            | "max-tokens"
-            | "interrupted"
-            | "unknown"
+        "completed" | "aborted" | "blocked" | "error" | "max-tokens" | "interrupted" | "unknown"
     ) {
         return Err(SkillError::InvalidCapture(format!(
             "unknown turn-end reason {}",
@@ -325,14 +319,18 @@ mod tests {
     #[test]
     fn explicit_failure_without_output_is_still_failure_evidence() {
         let source = capture("error", 1).replace("  output: bad\n  failed: true", "  failed: true");
-        let source = source.replace("\"unresolved_tool_calls\": 0", "\"unresolved_tool_calls\": 0");
+        let source = source.replace(
+            "\"unresolved_tool_calls\": 0",
+            "\"unresolved_tool_calls\": 0",
+        );
         let episode = parse_capture(&source).unwrap().unwrap();
         assert_eq!(episode.tools[1].outcome, ToolOutcome::Failed);
     }
 
     #[test]
     fn refuses_mismatch_between_transcript_and_episode_counts() {
-        let source = capture("completed", 1).replace("\"tool_failures\": 1", "\"tool_failures\": 0");
+        let source =
+            capture("completed", 1).replace("\"tool_failures\": 1", "\"tool_failures\": 0");
         assert!(matches!(
             parse_capture(&source),
             Err(SkillError::InvalidCapture(_))

@@ -126,7 +126,10 @@ mod tests {
             .values()
             .min_by_key(|trial| trial.ordinal)
             .unwrap();
-        assert_eq!(provenance.trial_ids, vec![newest.id.clone(), oldest.id.clone()]);
+        assert_eq!(
+            provenance.trial_ids,
+            vec![newest.id.clone(), oldest.id.clone()]
+        );
     }
 
     #[test]
@@ -135,7 +138,9 @@ mod tests {
         let mut trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
         let ids = vec![skill_id.clone()];
         for turn in [20, 21] {
-            trials.expose("RAW-SESSION-MUST-NOT-LEAK", turn, &skills, &ids).unwrap();
+            trials
+                .expose("RAW-SESSION-MUST-NOT-LEAK", turn, &skills, &ids)
+                .unwrap();
             trials
                 .resolve_episode(&episode("RAW-SESSION-MUST-NOT-LEAK", turn, 'b'), &skills)
                 .unwrap();

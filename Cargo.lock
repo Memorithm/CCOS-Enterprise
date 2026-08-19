@@ -147,6 +147,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-approval"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-rbac",
+ "ccos-enterprise-tenancy",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ccos-enterprise-auth"
 version = "0.1.0-pre"
 dependencies = [
@@ -439,6 +450,7 @@ name = "ccos-enterprise-runtime"
 version = "0.1.0-pre"
 dependencies = [
  "ccos-enterprise-admin",
+ "ccos-enterprise-approval",
  "ccos-enterprise-auth",
  "ccos-enterprise-gateway",
  "ccos-enterprise-observability",

@@ -16,6 +16,17 @@ pub enum ToolOutcome {
     Succeeded,
     Failed,
     Unresolved,
+    FailedUnresolved,
+}
+
+impl ToolOutcome {
+    fn is_failed(self) -> bool {
+        matches!(self, Self::Failed | Self::FailedUnresolved)
+    }
+
+    fn is_unresolved(self) -> bool {
+        matches!(self, Self::Unresolved | Self::FailedUnresolved)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +58,7 @@ impl EpisodeObservation {
     pub fn is_negative_trial(&self) -> bool {
         self.tools
             .iter()
-            .any(|tool| tool.outcome == ToolOutcome::Failed)
+            .any(|tool| tool.outcome != ToolOutcome::Succeeded)
             || matches!(
                 self.reason_kind.as_str(),
                 "error" | "blocked" | "interrupted"
@@ -153,11 +164,11 @@ pub fn parse_capture(source: &str) -> Result<Option<EpisodeObservation>, SkillEr
         let parsed = parse_tools(tools_text)?;
         let failures = parsed
             .iter()
-            .filter(|tool| tool.outcome == ToolOutcome::Failed)
+            .filter(|tool| tool.outcome.is_failed())
             .count();
         let unresolved = parsed
             .iter()
-            .filter(|tool| tool.outcome == ToolOutcome::Unresolved)
+            .filter(|tool| tool.outcome.is_unresolved())
             .count();
         if parsed.len() != raw.evidence.tool_calls
             || failures != raw.evidence.tool_failures
@@ -197,12 +208,11 @@ fn parse_tools(text: &str) -> Result<Vec<ToolObservation>, SkillError> {
         ToolObservation {
             name: pending.name,
             call_id: pending.call_id,
-            outcome: if pending.failed {
-                ToolOutcome::Failed
-            } else if !pending.has_result {
-                ToolOutcome::Unresolved
-            } else {
-                ToolOutcome::Succeeded
+            outcome: match (pending.failed, pending.has_result) {
+                (false, true) => ToolOutcome::Succeeded,
+                (false, false) => ToolOutcome::Unresolved,
+                (true, true) => ToolOutcome::Failed,
+                (true, false) => ToolOutcome::FailedUnresolved,
             },
         }
     }
@@ -317,14 +327,16 @@ mod tests {
     }
 
     #[test]
-    fn explicit_failure_without_output_is_still_failure_evidence() {
-        let source = capture("error", 1).replace("  output: bad\n  failed: true", "  failed: true");
-        let source = source.replace(
-            "\"unresolved_tool_calls\": 0",
-            "\"unresolved_tool_calls\": 0",
-        );
+    fn explicit_failure_without_output_counts_as_failed_and_unresolved() {
+        let source = capture("error", 1)
+            .replace("  output: bad\n  failed: true", "  failed: true")
+            .replace(
+                "\"unresolved_tool_calls\": 0",
+                "\"unresolved_tool_calls\": 1",
+            );
         let episode = parse_capture(&source).unwrap().unwrap();
-        assert_eq!(episode.tools[1].outcome, ToolOutcome::Failed);
+        assert_eq!(episode.tools[1].outcome, ToolOutcome::FailedUnresolved);
+        assert!(episode.is_negative_trial());
     }
 
     #[test]

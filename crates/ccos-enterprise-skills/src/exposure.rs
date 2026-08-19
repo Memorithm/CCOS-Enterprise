@@ -12,10 +12,14 @@ const SKILL_PREFIX: &str = "skill-v1-";
 /// Recover only validated skill ids that were actually rendered by a successful
 /// governed skill-read call in the adapter-owned DSH transcript.
 ///
-/// This evidence is deliberately best-effort: malformed/truncated tool output
-/// contributes no trial evidence instead of making the already-admitted memory
-/// capture fail. Canonical L1 parsing remains authoritative for the episode
-/// itself.
+/// Exposure evidence is conservative in time as well as shape: only leading
+/// skill-read calls are considered. Once any other tool begins, later
+/// `ccos_skills` results are ignored because they cannot prove that a skill was
+/// visible before the already-observed tool activity in the turn.
+///
+/// Malformed/truncated tool output contributes no trial evidence instead of
+/// making the already-admitted memory capture fail. Canonical L1 parsing remains
+/// authoritative for the episode itself.
 pub fn parse_skill_exposures(source: &str) -> Vec<String> {
     let Some(marker_at) = source.rfind(EPISODE_MARKER) else {
         return Vec::new();
@@ -33,10 +37,11 @@ pub fn parse_skill_exposures(source: &str) -> Vec<String> {
     let mut current_tool: Option<&str> = None;
     let mut current_output: Option<&str> = None;
     let mut failed = false;
+    let mut leading_skill_reads = true;
 
     let finish =
         |tool: Option<&str>, output: Option<&str>, failed: bool, out: &mut BTreeSet<String>| {
-            if failed || !matches!(tool, Some(DSH_SKILL_TOOL | ENTERPRISE_SKILL_TOOL)) {
+            if failed || !is_skill_read(tool) {
                 return;
             }
             let Some(output) = output else {
@@ -53,7 +58,14 @@ pub fn parse_skill_exposures(source: &str) -> Vec<String> {
 
     for line in tools_text.lines() {
         if let Some(rest) = line.strip_prefix("- ") {
-            finish(current_tool, current_output, failed, &mut exposed);
+            if current_tool.is_some() {
+                if leading_skill_reads {
+                    finish(current_tool, current_output, failed, &mut exposed);
+                }
+                if !is_skill_read(current_tool) {
+                    leading_skill_reads = false;
+                }
+            }
             current_output = None;
             failed = false;
             current_tool = rest.rfind(" (").map(|open| &rest[..open]);
@@ -63,8 +75,14 @@ pub fn parse_skill_exposures(source: &str) -> Vec<String> {
             failed = true;
         }
     }
-    finish(current_tool, current_output, failed, &mut exposed);
+    if leading_skill_reads {
+        finish(current_tool, current_output, failed, &mut exposed);
+    }
     exposed.into_iter().collect()
+}
+
+fn is_skill_read(tool: Option<&str>) -> bool {
+    matches!(tool, Some(DSH_SKILL_TOOL | ENTERPRISE_SKILL_TOOL))
 }
 
 fn skill_ids_from_rendered_output(output: &str) -> Option<Vec<String>> {
@@ -152,6 +170,18 @@ mod tests {
         format!("skill-v1-{}", id_byte.to_string().repeat(64))
     }
 
+    fn rendered_skill_output(ids: &[String]) -> String {
+        let text = serde_json::json!({
+            "skills": ids
+                .iter()
+                .map(|id| serde_json::json!({ "id": id, "status": "active" }))
+                .collect::<Vec<_>>(),
+            "returned": ids.len()
+        })
+        .to_string();
+        serde_json::json!([{ "type": "text", "text": text }]).to_string()
+    }
+
     fn capture(output: &str, failed: bool) -> String {
         format!(
             "# turn\n\n## Tools\n- ccos_skills (read-1)\n  output: {output}\n{}\n- memory.recall (call-2)\n  output: ok\nturn_end_reason: {{\"kind\":\"completed\"}}\n\n{EPISODE_MARKER}\n```json\n{{}}\n```\n",
@@ -162,26 +192,14 @@ mod tests {
     #[test]
     fn extracts_only_active_ids_from_rendered_skill_result() {
         let id = skill('a');
-        let text = serde_json::json!({
-            "skills": [{ "id": id, "status": "active" }],
-            "returned": 1,
-            "total_active": 1,
-            "truncated": false
-        })
-        .to_string();
-        let output = serde_json::json!([{ "type": "text", "text": text }]).to_string();
+        let output = rendered_skill_output(std::slice::from_ref(&id));
         assert_eq!(parse_skill_exposures(&capture(&output, false)), vec![id]);
     }
 
     #[test]
     fn failed_truncated_or_non_active_results_are_not_evidence() {
         let id = skill('b');
-        let valid_text = serde_json::json!({
-            "skills": [{ "id": id, "status": "active" }],
-            "returned": 1
-        })
-        .to_string();
-        let valid = serde_json::json!([{ "type": "text", "text": valid_text }]).to_string();
+        let valid = rendered_skill_output(std::slice::from_ref(&id));
         assert!(parse_skill_exposures(&capture(&valid, true)).is_empty());
 
         let truncated = serde_json::json!([{
@@ -201,31 +219,24 @@ mod tests {
     }
 
     #[test]
-    fn unions_repeated_reads_without_duplicates() {
+    fn unions_repeated_leading_reads_without_duplicates() {
         let left = skill('d');
         let right = skill('e');
-        let first = serde_json::json!([{
-            "type": "text",
-            "text": serde_json::json!({
-                "skills": [{ "id": left, "status": "active" }],
-                "returned": 1
-            }).to_string()
-        }])
-        .to_string();
-        let second = serde_json::json!([{
-            "type": "text",
-            "text": serde_json::json!({
-                "skills": [
-                    { "id": left, "status": "active" },
-                    { "id": right, "status": "active" }
-                ],
-                "returned": 2
-            }).to_string()
-        }])
-        .to_string();
+        let first = rendered_skill_output(std::slice::from_ref(&left));
+        let second = rendered_skill_output(&[left.clone(), right.clone()]);
         let source = format!(
-            "# turn\n\n## Tools\n- ccos_skills (read-1)\n  output: {first}\n- ccos_skills (read-2)\n  output: {second}\nturn_end_reason: {{\"kind\":\"completed\"}}\n\n{EPISODE_MARKER}\n```json\n{{}}\n```\n"
+            "# turn\n\n## Tools\n- ccos_skills (read-1)\n  output: {first}\n- ccos_skills (read-2)\n  output: {second}\n- memory.recall (use-1)\n  output: ok\nturn_end_reason: {{\"kind\":\"completed\"}}\n\n{EPISODE_MARKER}\n```json\n{{}}\n```\n"
         );
         assert_eq!(parse_skill_exposures(&source), vec![left, right]);
+    }
+
+    #[test]
+    fn skill_read_after_other_tool_is_not_prior_exposure_evidence() {
+        let id = skill('f');
+        let output = rendered_skill_output(std::slice::from_ref(&id));
+        let source = format!(
+            "# turn\n\n## Tools\n- memory.recall (use-first)\n  output: ok\n- ccos_skills (read-late)\n  output: {output}\nturn_end_reason: {{\"kind\":\"completed\"}}\n\n{EPISODE_MARKER}\n```json\n{{}}\n```\n"
+        );
+        assert!(parse_skill_exposures(&source).is_empty());
     }
 }

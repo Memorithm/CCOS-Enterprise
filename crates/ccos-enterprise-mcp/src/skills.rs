@@ -9,9 +9,7 @@
 use std::collections::BTreeMap;
 
 use ccos_enterprise_runtime::Deployment;
-use ccos_enterprise_skills::{
-    SkillObservationalSummary, SkillRecord, SkillRegistry, SkillStatus,
-};
+use ccos_enterprise_skills::{SkillObservationalSummary, SkillRecord, SkillRegistry, SkillStatus};
 use serde_json::{json, Value};
 
 pub const SKILL_READ_TOOL: &str = "memory.skills";

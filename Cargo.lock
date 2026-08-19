@@ -447,6 +447,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-retention"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-tenancy",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ccos-enterprise-runtime"
 version = "0.1.0-pre"
 dependencies = [

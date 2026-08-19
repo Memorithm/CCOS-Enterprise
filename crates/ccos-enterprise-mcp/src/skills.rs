@@ -9,7 +9,10 @@
 use std::collections::BTreeMap;
 
 use ccos_enterprise_runtime::Deployment;
-use ccos_enterprise_skills::{SkillObservationalSummary, SkillRecord, SkillRegistry, SkillStatus};
+use ccos_enterprise_skills::{
+    summarize_observational_trials, SkillObservationalSummary, SkillRecord, SkillRegistry,
+    SkillStatus, SkillTrialRegistry,
+};
 use serde_json::{json, Value};
 
 pub const SKILL_READ_TOOL: &str = "memory.skills";
@@ -56,18 +59,20 @@ pub fn active_skill_tool_result(
     active_skill_tool_result_inner(registry, None, arguments)
 }
 
-/// Read-only projection that augments each Active skill with the validated
-/// observational counters introduced by the post-exposure trial ledger.
+/// Read-only projection that augments each Active skill with counters derived
+/// from a validated post-exposure trial registry.
 ///
-/// The caller must derive `observational` from a validated `SkillTrialRegistry`
-/// (normally through `summarize_observational_trials`). This function never
-/// scores those counters and never mutates lifecycle state.
+/// Accepting `SkillTrialRegistry` rather than a raw snapshot or caller-built
+/// counter map preserves #61's validation boundary: arbitrary persisted bytes
+/// cannot be summarized, and callers cannot inject fabricated counters. This
+/// function never scores the aggregate and never mutates lifecycle state.
 pub fn active_skill_tool_result_with_observational(
     registry: &SkillRegistry,
-    observational: &BTreeMap<String, SkillObservationalSummary>,
+    trials: &SkillTrialRegistry,
     arguments: &Value,
 ) -> Result<Value, String> {
-    active_skill_tool_result_inner(registry, Some(observational), arguments)
+    let observational = summarize_observational_trials(trials);
+    active_skill_tool_result_inner(registry, Some(&observational), arguments)
 }
 
 fn active_skill_tool_result_inner(

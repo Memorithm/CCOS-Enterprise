@@ -193,6 +193,7 @@ dependencies = [
  "ccos-enterprise-policy",
  "ccos-enterprise-qpages",
  "ccos-enterprise-rbac",
+ "ccos-enterprise-retention",
  "ccos-enterprise-runtime",
  "ccos-enterprise-skills",
  "ccos-enterprise-skills-audit",

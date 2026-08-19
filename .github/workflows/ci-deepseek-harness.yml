@@ -5,6 +5,7 @@ on:
     paths:
       - 'adapters/deepseek-harness/**'
       - 'crates/ccos-enterprise-execution/**'
+      - 'crates/ccos-enterprise-skills/**'
       - 'crates/ccos-enterprise-mcp/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -14,6 +15,7 @@ on:
     paths:
       - 'adapters/deepseek-harness/**'
       - 'crates/ccos-enterprise-execution/**'
+      - 'crates/ccos-enterprise-skills/**'
       - 'crates/ccos-enterprise-mcp/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -40,6 +42,15 @@ jobs:
       - name: Unit and stdio protocol tests
         working-directory: adapters/deepseek-harness
         run: npm test
+
+  skill-crystallization:
+    name: Evidence-only skill crystallization
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify DSH L1 skill contract
+        run: cargo test -p ccos-enterprise-skills
 
   rust-stdio-e2e:
     name: Real Rust stdio end-to-end

@@ -479,6 +479,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-skills-audit"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-rbac",
+ "ccos-enterprise-runtime",
+ "ccos-enterprise-skills",
+ "ccos-enterprise-tenancy",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ccos-enterprise-store"
 version = "0.1.0-pre"
 dependencies = [

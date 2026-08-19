@@ -1,0 +1,18 @@
+[package]
+name = "ccos-enterprise-skills-audit"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Tenant-scoped, RBAC-governed, read-only skill/trial/evidence provenance audit derived from validated durable ledgers."
+
+[dependencies]
+ccos-enterprise-rbac = { path = "../ccos-enterprise-rbac" }
+ccos-enterprise-skills = { path = "../ccos-enterprise-skills" }
+ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
+serde.workspace = true
+
+[dev-dependencies]
+ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime", features = ["test-fixtures"] }
+serde_json = "1"

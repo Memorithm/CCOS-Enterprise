@@ -22,6 +22,10 @@ on:
 permissions:
   contents: read
 
+env:
+  DSH_RC7_SHA: 99f6f02fecdb7dff40c3fbc9470f5907c29f74ca
+  DSH_RC7_VERSION: 0.1.0-rc.7
+
 jobs:
   adapter:
     runs-on: ubuntu-24.04
@@ -29,10 +33,61 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22.19.0'
       - name: Syntax
         working-directory: adapters/deepseek-harness
         run: npm run check
       - name: Unit and stdio protocol tests
         working-directory: adapters/deepseek-harness
         run: npm test
+
+  rc7-source-compatibility:
+    name: DeepSeek Harness rc.7 source compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout CCOS Enterprise
+        uses: actions/checkout@v4
+        with:
+          path: ccos-enterprise
+      - name: Checkout pinned DeepSeek Harness rc.7
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: 99f6f02fecdb7dff40c3fbc9470f5907c29f74ca
+          path: deepseek-harness
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+      - name: Verify upstream pin and toolchain
+        working-directory: deepseek-harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$DSH_RC7_SHA"
+          node -e 'const p=require("./package.json"); if (p.version !== process.env.DSH_RC7_VERSION) throw new Error(`unexpected DSH version ${p.version}`); if (p.packageManager !== "pnpm@11.7.0") throw new Error(`unexpected package manager ${p.packageManager}`)'
+          corepack enable
+          test "$(pnpm --version)" = "11.7.0"
+      - name: Install pinned DSH workspace
+        working-directory: deepseek-harness
+        run: pnpm install --frozen-lockfile
+      - name: Compile CCOS contract against actual rc.7 APIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp ccos-enterprise/adapters/deepseek-harness/compat/rc7-contract.ts \
+            deepseek-harness/packages/core/tools/src/ccos-enterprise-compat.ts
+          cd deepseek-harness
+          pnpm run build:lib:host
+      - name: Install CCOS bundle into a real DSH profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -R ccos-enterprise/adapters/deepseek-harness deepseek-harness/ccos-enterprise-plugin
+          mkdir -p "$RUNNER_TEMP/dsh-home"
+          cd deepseek-harness
+          HOME="$RUNNER_TEMP/dsh-home" pnpm dsh plugin --profile ccos-ci add ./ccos-enterprise-plugin
+          HOME="$RUNNER_TEMP/dsh-home" pnpm dsh --profile ccos-ci --dump-config > "$RUNNER_TEMP/ccos-dsh-config.yml"
+          grep -q '@memorithm/ccos-deepseek-harness' "$RUNNER_TEMP/ccos-dsh-config.yml"
+          grep -q 'ccos-enterprise-memory' "$RUNNER_TEMP/ccos-dsh-config.yml"

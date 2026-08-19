@@ -615,7 +615,9 @@ mod tests {
             TailRepair::DiscardedPartialTail { bytes } if bytes > 0
         ));
         assert_eq!(reopened.journal.len(), 1);
-        assert!(std::fs::read(&path).expect("read repaired").ends_with(b"\n"));
+        assert!(std::fs::read(&path)
+            .expect("read repaired")
+            .ends_with(b"\n"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

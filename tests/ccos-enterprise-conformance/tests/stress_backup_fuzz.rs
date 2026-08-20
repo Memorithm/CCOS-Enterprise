@@ -371,11 +371,11 @@ fn two_hundred_thousand_digests_only_lowercase_64_hex_is_ever_accepted() {
             );
         }
 
-        // The digest verdict must not depend on any other field: same input,
-        // the widest legal segment count and the oldest possible schema
-        // against the newest possible build.
+        // The digest verdict must not depend on any other field once the
+        // other fields are themselves structurally valid. Schema zero is now
+        // deliberately fail-closed, so use the oldest supported schema here.
         m.segments = u32::MAX;
-        m.schema_version = 0;
+        m.schema_version = 1;
         assert_eq!(
             m.restorable_by(u32::MAX).is_ok(),
             expected,
@@ -736,8 +736,8 @@ fn schema_matrix_across_zero_one_and_u32_max_with_neighbours() {
 
     let good = "ab".repeat(32);
     let bad = "AB".repeat(32);
-    let mut newer_refusals = 0usize;
-    let mut equal_or_older_accepts = 0usize;
+    let mut unsupported_schema_refusals = 0usize;
+    let mut supported_equal_or_older_accepts = 0usize;
     let mut checked = 0usize;
 
     for &snapshot in &VERSIONS {
@@ -747,7 +747,7 @@ fn schema_matrix_across_zero_one_and_u32_max_with_neighbours() {
                     let m = manifest(digest, segments, snapshot);
                     let verdict = m.restorable_by(build);
                     let digest_ok = digest == good;
-                    let expected = digest_ok && segments != 0 && snapshot <= build;
+                    let expected = digest_ok && segments != 0 && snapshot != 0 && snapshot <= build;
                     assert_eq!(
                         verdict.is_ok(),
                         expected,
@@ -757,8 +757,8 @@ fn schema_matrix_across_zero_one_and_u32_max_with_neighbours() {
                     checked += 1;
 
                     if digest_ok && segments != 0 {
-                        if snapshot > build {
-                            newer_refusals += 1;
+                        if snapshot == 0 || snapshot > build {
+                            unsupported_schema_refusals += 1;
                             let why = verdict.unwrap_err();
                             assert!(
                                 why.contains(&snapshot.to_string())
@@ -766,7 +766,7 @@ fn schema_matrix_across_zero_one_and_u32_max_with_neighbours() {
                                 "the refusal must name both versions, got {why:?}"
                             );
                         } else {
-                            equal_or_older_accepts += 1;
+                            supported_equal_or_older_accepts += 1;
                         }
                     }
                 }
@@ -776,23 +776,23 @@ fn schema_matrix_across_zero_one_and_u32_max_with_neighbours() {
 
     assert_eq!(checked, 9 * 9 * 3 * 2);
     assert_eq!(
-        newer_refusals,
-        36 * 2,
-        "every newer pair, both segment counts"
+        unsupported_schema_refusals,
+        45 * 2,
+        "schema zero plus every newer-than-build pair, both nonzero segment counts"
     );
-    assert_eq!(equal_or_older_accepts, 45 * 2);
+    assert_eq!(supported_equal_or_older_accepts, 36 * 2);
 
     // The two extremes, spelled out.
     assert!(manifest(&good, 1, u32::MAX).restorable_by(u32::MAX).is_ok());
     assert!(manifest(&good, 1, u32::MAX)
         .restorable_by(u32::MAX - 1)
         .is_err());
-    assert!(manifest(&good, 1, 0).restorable_by(0).is_ok());
+    assert!(manifest(&good, 1, 0).restorable_by(0).is_err());
     assert!(manifest(&good, 1, 1).restorable_by(0).is_err());
 
     println!(
-        "schema matrix: {checked} verdicts, {newer_refusals} newer-than-build refusals, \
-         {equal_or_older_accepts} equal-or-older accepts"
+        "schema matrix: {checked} verdicts, {unsupported_schema_refusals} unsupported-schema \
+         refusals, {supported_equal_or_older_accepts} supported equal-or-older accepts"
     );
 }
 
@@ -842,15 +842,18 @@ fn segments_matrix_has_a_floor_but_no_ceiling_and_no_cross_check() {
     );
 }
 
-/// **BROKE 7.** No schema floor, and only the first failure is reported.
+/// Schema zero is fail-closed; malformed manifests still report the first
+/// structural failure deterministically.
 #[test]
-fn schema_has_no_floor_and_only_the_first_failure_is_reported() {
+fn schema_zero_is_refused_and_first_failure_is_reported() {
     let good = "ab".repeat(32);
 
-    // A snapshot from schema 0 — a pre-versioning artefact — is restorable by
-    // a build 4 billion versions later. There is no deprecation window and no
-    // minimum-supported-schema constant anywhere in the crate.
-    assert!(manifest(&good, 1, 0).restorable_by(u32::MAX).is_ok());
+    // Schema zero is never a valid restore format, regardless of how new the
+    // reader is. This pins the new minimum supported schema.
+    assert_eq!(
+        manifest(&good, 1, 0).restorable_by(u32::MAX).unwrap_err(),
+        "snapshot schema v0 is unsupported by this build (latest v4294967295)"
+    );
 
     // Three defects at once: only the digest is reported. An operator
     // triaging "why will this backup not restore" is never told it is also
@@ -870,7 +873,7 @@ fn schema_has_no_floor_and_only_the_first_failure_is_reported() {
     assert!(one_wrong
         .restorable_by(0)
         .unwrap_err()
-        .starts_with("snapshot schema v4294967295 is newer"));
+        .starts_with("snapshot schema v4294967295 is unsupported"));
 }
 
 // ── 4. THE CRITICAL FINDING ──────────────────────────────────────────────
@@ -987,7 +990,7 @@ fn fabricated_digest_restores_because_no_byte_of_content_is_ever_hashed() {
     // it does not own.
     let planted_file = format!(
         r#"{{"tenant":"acme","created_unix":18446744073709551615,
-            "digest":"{fabricated}","segments":4294967295,"schema_version":0}}"#
+            "digest":"{fabricated}","segments":4294967295,"schema_version":1}}"#
     );
     assert!(planted_file.len() < 300, "a very small file");
     let planted: BackupManifest = serde_json::from_str(&planted_file).expect("parses");
@@ -1038,12 +1041,23 @@ fn restore_gate_never_consults_the_tenant_and_is_outside_the_governed_path() {
             segments: 4,
             schema_version: 1,
         };
-        assert_eq!(
-            m.restorable_by(1),
-            baseline,
-            "the verdict changed with the tenant field — it must not have, and \
-             that is the finding: there is no tenant binding"
+        let canonical = matches!(
+            tenant.as_str(),
+            "acme" | "globex" | "tenant-that-does-not-exist"
         );
+        if canonical {
+            assert_eq!(
+                m.restorable_by(1),
+                baseline,
+                "a canonical tenant id remains structurally acceptable"
+            );
+        } else {
+            assert_eq!(
+                m.restorable_by(1).unwrap_err(),
+                "manifest tenant is not canonical",
+                "unsafe tenant material must fail closed"
+            );
+        }
     }
 
     // A manifest naming a tenant that does not exist in the deployment is
@@ -1149,7 +1163,7 @@ fn dr_latest_manifest_selection_prefers_a_planted_future_manifest() {
         created_unix: u64::MAX,
         digest: "beefcafe".repeat(8),
         segments: 1,
-        schema_version: 0,
+        schema_version: 1,
     };
     assert!(
         is_sha256_hex(&planted.digest),
@@ -1343,7 +1357,10 @@ fn refusal_messages_never_echo_the_digest_or_the_tenant() {
         schema_version: 9,
     };
     let why = m.restorable_by(4).unwrap_err();
-    assert_eq!(why, "snapshot schema v9 is newer than this build (v4)");
+    assert_eq!(
+        why,
+        "snapshot schema v9 is unsupported by this build (latest v4)"
+    );
     assert!(!why.contains('\u{1b}'));
     assert!(!why.contains("root"));
 }

@@ -47,3 +47,28 @@ new_trial = '''        let mut snapshot = SkillTrialSnapshot {
 if t.count(old_trial) != 1:
     raise SystemExit(f'expected one trial snapshot initializer anchor, found {t.count(old_trial)}')
 trials.write_text(t.replace(old_trial, new_trial, 1))
+
+# Operator audit effects are written under the independently authenticated
+# operator actor after the P1 patch. A terminal Settled marker needs no startup
+# recovery authority, so it may safely survive restart with that actor. Any
+# non-terminal marker must still match the configured DSH principal because
+# startup has no operator credential with which to recover/settle it.
+server = Path('crates/ccos-enterprise-mcp/src/bin/ccos-enterprise-mcp-server.rs')
+r = server.read_text()
+old_marker = '''            if effect.tenant != config.tenant
+                || effect.actor != actor
+                || effect.model != config.model
+                || effect.cost_tokens != config.call_cost_tokens
+            {
+'''
+new_marker = '''            let settled_operator_audit = effect.tool == SKILL_AUDIT_TOOL
+                && effect.state == EffectState::Settled;
+            if effect.tenant != config.tenant
+                || (effect.actor != actor && !settled_operator_audit)
+                || effect.model != config.model
+                || effect.cost_tokens != config.call_cost_tokens
+            {
+'''
+if r.count(old_marker) != 1:
+    raise SystemExit(f'expected one durable marker principal anchor, found {r.count(old_marker)}')
+server.write_text(r.replace(old_marker, new_marker, 1))

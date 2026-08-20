@@ -31,9 +31,8 @@ use ccos_enterprise_auth::{AuthStrength, Authenticator, TokenAuthenticator};
 use ccos_enterprise_gateway::GatewayRequest;
 use ccos_enterprise_mcp::{
     active_skill_tool_result_with_observational, govern_catalogue, govern_skill_audit,
-    govern_skill_catalogue, permission_for, skill_audit_result, skill_audit_tool_spec,
-    skill_tool_spec, to_enterprise, Backend, GovernedMcp, McpOutcome, SKILL_AUDIT_TOOL,
-    SKILL_READ_TOOL,
+    govern_skill_catalogue, permission_for, skill_audit_result, skill_tool_spec, to_enterprise,
+    Backend, GovernedMcp, McpOutcome, SKILL_AUDIT_TOOL, SKILL_READ_TOOL,
 };
 use ccos_enterprise_runtime::{
     is_canonical_identifier, AuditRecord, Call, Deployment, DeploymentSnapshot, GovernanceRecord,
@@ -55,6 +54,8 @@ use skill_projection::{source_sha256, ProjectionState};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const HOST_KIND: &str = "deepseek-harness";
+const OPERATOR_HOST_KIND: &str = "ccos-operator";
+const OPERATOR_AUDIT_METHOD: &str = "ccos/operator/audit/provenance";
 const ROLE_NAME: &str = "dsh-memory";
 const GOVERNANCE_DIR: &str = ".enterprise";
 const EFFECT_FILE: &str = "effect.json";
@@ -792,8 +793,10 @@ impl Server {
 
         let marker_path = effect_path(&config.state_dir);
         if let Some(mut effect) = read_effect(&marker_path)? {
+            let settled_operator_audit =
+                effect.tool == SKILL_AUDIT_TOOL && effect.state == EffectState::Settled;
             if effect.tenant != config.tenant
-                || effect.actor != actor
+                || (effect.actor != actor && !settled_operator_audit)
                 || effect.model != config.model
                 || effect.cost_tokens != config.call_cost_tokens
             {
@@ -965,6 +968,9 @@ impl Server {
             "ping" => Ok(json!({})),
             "tools/list" => enterprise_specs().map(|tools| json!({ "tools": tools })),
             "tools/call" => self.call_tool(message.get("params").unwrap_or(&Value::Null)),
+            OPERATOR_AUDIT_METHOD => {
+                self.call_operator_audit(message.get("params").unwrap_or(&Value::Null))
+            }
             "ccos/execution/event" => execution_backend::handle_lifecycle_event(
                 self,
                 message.get("params").unwrap_or(&Value::Null),
@@ -1283,25 +1289,15 @@ impl Server {
                     .state_dir
                     .join(SKILLS_DIR)
                     .join(&self.config.tenant);
-                let result = self
-                    .skill_store
-                    .load_registry(SkillConfig::default())
-                    .map_err(|error| format!("cannot load Enterprise skill registry: {error}"))
-                    .and_then(|registry| {
-                        let trials = SkillTrialStore::open(&skills_root).map_err(|error| {
-                            format!("cannot open Enterprise skill trial store: {error}")
-                        })?;
-                        let trial_registry = trials
-                            .load_registry(SkillTrialConfig::default())
-                            .map_err(|error| {
-                                format!("cannot load Enterprise skill trial registry: {error}")
-                            })?;
+                let result = SkillTrialStore::open(&skills_root)
+                    .map_err(|error| format!("cannot open Enterprise skill trial store: {error}"))
+                    .and_then(|trials| {
                         skill_audit_result(
                             self.front_door.deployment(),
-                            &self.actor,
+                            &request.actor,
                             &self.config.tenant,
-                            &registry,
-                            &trial_registry,
+                            &self.skill_store,
+                            &trials,
                             arguments,
                         )
                     });
@@ -1401,6 +1397,63 @@ impl Server {
         Ok(response)
     }
 
+    fn call_operator_audit(&mut self, params: &Value) -> Result<Value, (i64, String)> {
+        if let Some(reason) = &self.poisoned {
+            eprintln!(
+                "ccos-enterprise-mcp: refusing operator audit after durability failure: {reason}"
+            );
+            return Err((-32000, "Enterprise durable state unavailable".to_string()));
+        }
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let operator_token = params
+            .get("operator_identity_token")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty() && token.len() <= 8192)
+            .ok_or_else(|| (-32001, "operator credential required".to_string()))?;
+        let meta = parse_meta(params).map_err(|_| (-32602, "invalid params".to_string()))?;
+        let identity = self
+            .authenticator
+            .authenticate(
+                operator_token,
+                now().map_err(|_| (-32000, "server time unavailable".to_string()))?,
+            )
+            .map_err(|error| {
+                eprintln!("ccos-enterprise-mcp: operator identity refused: {error}");
+                (-32001, error.client_message().to_string())
+            })?;
+        if identity.org().0.as_str() != self.org.as_str()
+            || identity.actor().0.as_str() == self.actor.as_str()
+            || meta.tenant != self.config.tenant
+            || meta.actor != identity.actor().0.as_str()
+            || meta.host != OPERATOR_HOST_KIND
+            || meta.model != self.config.model
+        {
+            eprintln!(
+                "ccos-enterprise-mcp: operator claims did not match configured identity/context"
+            );
+            return Err((-32001, "not authenticated".to_string()));
+        }
+        self.append_host_correlation(SKILL_AUDIT_TOOL, &meta)
+            .map_err(|error| {
+                self.poisoned = Some(error.clone());
+                (
+                    -32000,
+                    "Enterprise host correlation is not durable".to_string(),
+                )
+            })?;
+        let request = GatewayRequest {
+            tenant: meta.tenant.clone(),
+            actor: meta.actor.clone(),
+            tool: SKILL_AUDIT_TOOL.to_string(),
+            request_id: meta.request_id.clone(),
+        };
+        self.call_skill_audit(&identity, &request, &meta, &arguments)
+    }
+
     fn call_tool(&mut self, params: &Value) -> Result<Value, (i64, String)> {
         if let Some(reason) = &self.poisoned {
             eprintln!("ccos-enterprise-mcp: refusing call after durability failure: {reason}");
@@ -1464,7 +1517,10 @@ impl Server {
             return self.call_skill_tool(&identity, &request, &meta, &arguments);
         }
         if request.tool == SKILL_AUDIT_TOOL {
-            return self.call_skill_audit(&identity, &request, &meta, &arguments);
+            // Operator audit is intentionally absent from tools/list and from
+            // model-originated tools/call even when the same human identity
+            // also holds an auditor role. Context, not RBAC alone, separates it.
+            return Ok(tool_error("unknown CCOS Enterprise tool"));
         }
 
         let checkpoint = DeploymentCheckpoint::capture(self.front_door.deployment());
@@ -1692,7 +1748,6 @@ fn enterprise_specs() -> Result<Vec<Value>, (i64, String)> {
         ));
     }
     governed.push(skill_tool_spec());
-    governed.push(skill_audit_tool_spec());
     governed.sort_by(|left, right| {
         left.get("name")
             .and_then(Value::as_str)
@@ -1804,6 +1859,48 @@ mod tests {
         })
     }
 
+    fn operator_token(actor: &str) -> String {
+        let seed = [7u8; 32];
+        let now = now().unwrap();
+        let claims = IdentityClaims {
+            version: IDENTITY_TOKEN_VERSION,
+            jti: format!("operator-{actor}"),
+            org: "memorithm".into(),
+            actor: actor.into(),
+            audience: "ccos-test".into(),
+            issued_at: now,
+            expires_at: now + 600,
+            not_before: None,
+        };
+        issue_identity_token(&seed, "test-key", &claims).unwrap()
+    }
+
+    fn operator_audit(id: u64, actor: &str, request_id: &str, arguments: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": OPERATOR_AUDIT_METHOD,
+            "params": {
+                "operator_identity_token": operator_token(actor),
+                "arguments": arguments,
+                "_meta": { "ccos": {
+                    "tenant_id": "acme",
+                    "actor_id": actor,
+                    "agent_id": "ccos-operator-agent",
+                    "host": OPERATOR_HOST_KIND,
+                    "dsh_profile": "operator",
+                    "dsh_session_id": "operator-session",
+                    "request_id": request_id,
+                    "trace_id": "0123456789abcdef0123456789abcdef",
+                    "model": "deepseek-harness",
+                    "turn_id": format!("operator-turn-{id}"),
+                    "step_id": "operator-step-1",
+                    "execution_attempt_id": format!("operator-attempt-{id}")
+                }}
+            }
+        })
+    }
+
     fn lifecycle(id: u64, actor: &str, event: Value) -> Value {
         json!({
             "jsonrpc": "2.0",
@@ -1831,7 +1928,10 @@ mod tests {
         assert!(tools.iter().any(|tool| tool["name"] == "memory.recall"));
         assert!(tools.iter().any(|tool| tool["name"] == "memory.ingest"));
         assert!(tools.iter().any(|tool| tool["name"] == SKILL_READ_TOOL));
-        assert!(tools.iter().any(|tool| tool["name"] == SKILL_AUDIT_TOOL));
+        assert!(
+            !tools.iter().any(|tool| tool["name"] == SKILL_AUDIT_TOOL),
+            "operator audit must never be model-visible"
+        );
         assert!(tools
             .iter()
             .all(|tool| tool["name"].as_str().unwrap().contains('.')));
@@ -1922,13 +2022,35 @@ mod tests {
             let mut admin = d.as_admin("root", "grant operator audit");
             admin.add_role("auditor", &["audit.provenance"]);
             admin.assign("alice", "auditor");
+            admin.assign("operator", "auditor");
         }
-        let admitted = server
+        let guessed_from_model = server
             .handle(&call(
-                2,
+                20,
                 "alice",
-                "audit-request-2",
+                "audit-model-guess",
                 SKILL_AUDIT_TOOL,
+                json!({"limit": 4}),
+            ))
+            .unwrap();
+        assert_eq!(guessed_from_model["result"]["isError"], true);
+        assert_eq!(server.front_door.deployment().spent("acme"), Some(0));
+        let dsh_credential_on_operator_rpc = server
+            .handle(&operator_audit(
+                21,
+                "alice",
+                "audit-dsh-credential",
+                json!({"limit": 4}),
+            ))
+            .unwrap();
+        assert_eq!(dsh_credential_on_operator_rpc["error"]["code"], -32001);
+        assert_eq!(server.front_door.deployment().spent("acme"), Some(0));
+
+        let admitted = server
+            .handle(&operator_audit(
+                2,
+                "operator",
+                "audit-request-2",
                 json!({"limit": 4}),
             ))
             .unwrap();
@@ -1956,14 +2078,13 @@ mod tests {
                 let d = server.front_door.deployment_mut();
                 let mut admin = d.as_admin("root", "grant operator audit");
                 admin.add_role("auditor", &["audit.provenance"]);
-                admin.assign("alice", "auditor");
+                admin.assign("operator", "auditor");
             }
             let first = server
-                .handle(&call(
+                .handle(&operator_audit(
                     1,
-                    "alice",
+                    "operator",
                     "audit-replay-request",
-                    SKILL_AUDIT_TOOL,
                     json!({"limit": 4}),
                 ))
                 .unwrap();
@@ -1977,11 +2098,10 @@ mod tests {
         {
             let mut restarted = Server::new(config).unwrap();
             let replay = restarted
-                .handle(&call(
+                .handle(&operator_audit(
                     2,
-                    "alice",
+                    "operator",
                     "audit-replay-request",
-                    SKILL_AUDIT_TOOL,
                     json!({"limit": 99}),
                 ))
                 .unwrap();

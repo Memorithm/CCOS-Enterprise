@@ -315,9 +315,12 @@ impl FsBackupTarget {
     }
 
     pub fn current_generation_dir(&self, tenant: &str) -> Result<Option<PathBuf>, BackupError> {
-        Ok(self
-            .read_current_generation(tenant)?
-            .map(|generation| self.root.join(tenant).join(GENERATIONS_DIR).join(generation)))
+        Ok(self.read_current_generation(tenant)?.map(|generation| {
+            self.root
+                .join(tenant)
+                .join(GENERATIONS_DIR)
+                .join(generation)
+        }))
     }
 
     fn generation_id(manifest: &BackupManifest) -> String {
@@ -327,12 +330,13 @@ impl FsBackupTarget {
     fn read_generation_dir(path: &Path) -> Result<StoredBackup, BackupError> {
         let manifest_path = path.join(MANIFEST_FILE);
         let manifest_bytes = std::fs::read(&manifest_path).map_err(io(&manifest_path))?;
-        let manifest: BackupManifest = serde_json::from_slice(&manifest_bytes).map_err(|error| {
-            BackupError::CorruptManifest {
-                path: manifest_path.clone(),
-                detail: error.to_string(),
-            }
-        })?;
+        let manifest: BackupManifest =
+            serde_json::from_slice(&manifest_bytes).map_err(|error| {
+                BackupError::CorruptManifest {
+                    path: manifest_path.clone(),
+                    detail: error.to_string(),
+                }
+            })?;
         let segments_path = path.join(SEGMENTS_DIR);
         let entries = std::fs::read_dir(&segments_path).map_err(io(&segments_path))?;
         let mut segments = Vec::new();
@@ -344,12 +348,13 @@ impl FsBackupTarget {
                     detail: format!("non-file entry in segments: {:?}", entry.file_name()),
                 });
             }
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| BackupError::InvalidSegment {
-                    detail: "non-UTF-8 segment name".into(),
-                })?;
+            let name =
+                entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| BackupError::InvalidSegment {
+                        detail: "non-UTF-8 segment name".into(),
+                    })?;
             if !is_safe_segment_name(&name) {
                 return Err(BackupError::InvalidSegment {
                     detail: format!("unsafe segment name {name:?}"),
@@ -370,15 +375,16 @@ impl FsBackupTarget {
         std::fs::create_dir_all(path.join(SEGMENTS_DIR)).map_err(io(path))?;
         for segment in segments {
             let segment_path = path.join(SEGMENTS_DIR).join(&segment.name);
-            ccos_core::util::write_durable(&segment_path, &segment.bytes).map_err(io(&segment_path))?;
+            ccos_core::util::write_durable(&segment_path, &segment.bytes)
+                .map_err(io(&segment_path))?;
         }
-        let manifest_bytes = serde_json::to_vec_pretty(manifest).map_err(|error| {
-            BackupError::InvalidManifest {
+        let manifest_bytes =
+            serde_json::to_vec_pretty(manifest).map_err(|error| BackupError::InvalidManifest {
                 detail: format!("cannot serialize manifest: {error}"),
-            }
-        })?;
+            })?;
         let manifest_path = path.join(MANIFEST_FILE);
-        ccos_core::util::write_durable(&manifest_path, &manifest_bytes).map_err(io(&manifest_path))?;
+        ccos_core::util::write_durable(&manifest_path, &manifest_bytes)
+            .map_err(io(&manifest_path))?;
         std::fs::File::open(path)
             .and_then(|directory| directory.sync_all())
             .map_err(io(path))?;
@@ -400,11 +406,11 @@ impl BackupTarget for FsBackupTarget {
         manifest: &BackupManifest,
         segments: &[Segment],
     ) -> Result<(), BackupError> {
-        if manifest.tenant != tenant {
-            return Err(BackupError::CrossTenant {
-                tenant: manifest.tenant.clone(),
-            });
-        }
+        let requested = StoredBackup {
+            manifest: manifest.clone(),
+            segments: segments.to_vec(),
+        };
+        verify_stored(tenant, manifest, &requested)?;
         let tenant_root = self.tenant_root(tenant)?;
         let generations = self.generations_dir(tenant)?;
         std::fs::create_dir_all(&generations).map_err(io(&generations))?;
@@ -574,32 +580,60 @@ pub fn stage_restore(
     verify_stored(tenant, manifest, &stored)?;
 
     if staging.exists() {
-        if std::fs::read_dir(staging).map_err(io(staging))?.next().is_some() {
+        let existing = FsBackupTarget::read_generation_dir(staging)
+            .and_then(|staged| verify_stored(tenant, manifest, &staged));
+        if existing.is_ok() {
+            return Ok(());
+        }
+        if std::fs::read_dir(staging)
+            .map_err(io(staging))?
+            .next()
+            .is_some()
+        {
             return Err(BackupError::StagingNotEmpty {
                 path: staging.to_path_buf(),
             });
         }
-    } else {
-        std::fs::create_dir_all(staging).map_err(io(staging))?;
+        std::fs::remove_dir(staging).map_err(io(staging))?;
     }
-    std::fs::create_dir_all(staging.join(SEGMENTS_DIR)).map_err(io(staging))?;
+
+    let parent = staging
+        .parent()
+        .ok_or_else(|| BackupError::InvalidManifest {
+            detail: "staging path has no parent".into(),
+        })?;
+    std::fs::create_dir_all(parent).map_err(io(parent))?;
+    let basename = staging
+        .file_name()
+        .ok_or_else(|| BackupError::InvalidManifest {
+            detail: "staging path has no basename".into(),
+        })?
+        .to_string_lossy();
+    let work = parent.join(format!(".{basename}.ccos-stage-next"));
+    if work.exists() {
+        std::fs::remove_dir_all(&work).map_err(io(&work))?;
+    }
+    std::fs::create_dir_all(work.join(SEGMENTS_DIR)).map_err(io(&work))?;
     for segment in &stored.segments {
-        let path = staging.join(SEGMENTS_DIR).join(&segment.name);
+        let path = work.join(SEGMENTS_DIR).join(&segment.name);
         ccos_core::util::write_durable(&path, &segment.bytes).map_err(io(&path))?;
     }
-    let manifest_bytes = serde_json::to_vec_pretty(manifest).map_err(|error| {
-        BackupError::InvalidManifest {
+    let manifest_bytes =
+        serde_json::to_vec_pretty(manifest).map_err(|error| BackupError::InvalidManifest {
             detail: format!("cannot serialize manifest: {error}"),
-        }
-    })?;
-    let manifest_path = staging.join(MANIFEST_FILE);
+        })?;
+    let manifest_path = work.join(MANIFEST_FILE);
     ccos_core::util::write_durable(&manifest_path, &manifest_bytes).map_err(io(&manifest_path))?;
-    std::fs::File::open(staging)
+    std::fs::File::open(&work)
         .and_then(|directory| directory.sync_all())
-        .map_err(io(staging))?;
+        .map_err(io(&work))?;
 
-    let staged = FsBackupTarget::read_generation_dir(staging)?;
+    let staged = FsBackupTarget::read_generation_dir(&work)?;
     verify_stored(tenant, manifest, &staged)?;
+    std::fs::rename(&work, staging).map_err(io(staging))?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(io(parent))?;
     Ok(())
 }
 
@@ -671,11 +705,12 @@ pub fn promote_staged(staging: &Path, live: &Path) -> Result<(), BackupError> {
         let next = parent.join(format!(".{live_name}.next-{}", std::process::id()));
         let _ = std::fs::remove_file(&next);
         // Relative target keeps the pointer valid if the whole parent tree is moved.
-        let generation_dir_name = generations
-            .file_name()
-            .ok_or_else(|| BackupError::InvalidManifest {
-                detail: "generation directory has no basename".into(),
-            })?;
+        let generation_dir_name =
+            generations
+                .file_name()
+                .ok_or_else(|| BackupError::InvalidManifest {
+                    detail: "generation directory has no basename".into(),
+                })?;
         let relative = PathBuf::from(generation_dir_name).join(&generation);
         symlink(&relative, &next).map_err(io(&next))?;
         std::fs::rename(&next, live).map_err(io(live))?;
@@ -688,10 +723,43 @@ pub fn promote_staged(staging: &Path, live: &Path) -> Result<(), BackupError> {
     {
         let _ = final_dir;
         Err(BackupError::InvalidManifest {
-            detail: "atomic live generation switching is currently supported on Unix deployments only"
-                .into(),
+            detail:
+                "atomic live generation switching is currently supported on Unix deployments only"
+                    .into(),
         })
     }
+}
+
+fn reseal_staged_after_replay(
+    staging: &Path,
+    tenant: &str,
+    created_unix: u64,
+) -> Result<(), BackupError> {
+    let staged = FsBackupTarget::read_generation_dir(staging)?;
+    if staged.manifest.tenant != tenant {
+        return Err(BackupError::CrossTenant {
+            tenant: staged.manifest.tenant,
+        });
+    }
+    validate_segments(&staged.segments)?;
+    let manifest = BackupManifest {
+        tenant: tenant.to_string(),
+        created_unix,
+        digest: manifest_digest_v2(&staged.segments),
+        segments: staged.segments.len() as u32,
+        schema_version: BACKUP_SCHEMA,
+    };
+    let manifest_bytes =
+        serde_json::to_vec_pretty(&manifest).map_err(|error| BackupError::InvalidManifest {
+            detail: format!("cannot serialize replayed manifest: {error}"),
+        })?;
+    let manifest_path = staging.join(MANIFEST_FILE);
+    ccos_core::util::write_durable(&manifest_path, &manifest_bytes).map_err(io(&manifest_path))?;
+    std::fs::File::open(staging)
+        .and_then(|directory| directory.sync_all())
+        .map_err(io(staging))?;
+    let sealed = FsBackupTarget::read_generation_dir(staging)?;
+    verify_stored(tenant, &manifest, &sealed)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -794,14 +862,7 @@ pub fn run_disaster_recovery(
         });
         return failed(stages);
     }
-    if let Err(error) = promote_staged(staging, live) {
-        stages.push(RecoveryStage::FailClosed {
-            detail: format!("promotion failed: {error}"),
-        });
-        return failed(stages);
-    }
-
-    let replayed = match replay_tail(live) {
+    let replayed = match replay_tail(staging) {
         Ok(records) => records,
         Err(error) => {
             stages.push(RecoveryStage::FailClosed {
@@ -811,6 +872,19 @@ pub fn run_disaster_recovery(
         }
     };
     stages.push(RecoveryStage::ReplayJournalTail { records: replayed });
+
+    if let Err(error) = reseal_staged_after_replay(staging, tenant, now) {
+        stages.push(RecoveryStage::FailClosed {
+            detail: format!("replayed staging reseal failed: {error}"),
+        });
+        return failed(stages);
+    }
+    if let Err(error) = promote_staged(staging, live) {
+        stages.push(RecoveryStage::FailClosed {
+            detail: format!("promotion failed: {error}"),
+        });
+        return failed(stages);
+    }
 
     match verify_live(live) {
         Ok(()) => stages.push(RecoveryStage::VerifyEndToEnd { ok: true }),
@@ -838,10 +912,7 @@ mod tests {
     use super::*;
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ccos-backup-{tag}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ccos-backup-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -891,7 +962,10 @@ mod tests {
             first_bytes,
             "old generation was mutated"
         );
-        assert_eq!(target.read_segment("acme", "ledger").unwrap().unwrap(), b"ledger-v2");
+        assert_eq!(
+            target.read_segment("acme", "ledger").unwrap().unwrap(),
+            b"ledger-v2"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -943,7 +1017,10 @@ mod tests {
         let staging1 = parent.join("stage1");
         stage_restore(&target, "acme", &first, &staging1).unwrap();
         promote_staged(&staging1, &live).unwrap();
-        assert!(std::fs::symlink_metadata(&live).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&live)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(
             std::fs::read(live.join(SEGMENTS_DIR).join("ledger")).unwrap(),
             b"ledger-v1"
@@ -956,7 +1033,10 @@ mod tests {
         promote_staged(&staging2, &live).unwrap();
         let new_target = std::fs::read_link(&live).unwrap();
         assert_ne!(old_target, new_target);
-        assert!(parent.join(old_target).exists(), "old live generation was deleted");
+        assert!(
+            parent.join(old_target).exists(),
+            "old live generation was deleted"
+        );
         assert_eq!(
             std::fs::read(live.join(SEGMENTS_DIR).join("ledger")).unwrap(),
             b"ledger-v2"
@@ -988,6 +1068,47 @@ mod tests {
     }
 
     #[test]
+    fn direct_publish_rejects_unsafe_paths_before_writing() {
+        let root = scratch("unsafe-publish");
+        let target = FsBackupTarget::new(&root);
+        let outside = root.parent().unwrap().join("ccos-backup-escape-sentinel");
+        let _ = std::fs::remove_file(&outside);
+        let segments = vec![Segment {
+            name: "../../ccos-backup-escape-sentinel".into(),
+            bytes: b"owned".to_vec(),
+        }];
+        let manifest = BackupManifest {
+            tenant: "acme".into(),
+            created_unix: 1,
+            digest: "ab".repeat(32),
+            segments: 1,
+            schema_version: BACKUP_SCHEMA,
+        };
+        assert!(target.publish_backup("acme", &manifest, &segments).is_err());
+        assert!(!outside.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn interrupted_owned_staging_workdir_is_replaced_on_retry() {
+        let root = scratch("stage-retry");
+        let target = FsBackupTarget::new(&root);
+        let manifest = create_backup(&target, "acme", &segments(1), 1).unwrap();
+        let parent = scratch("stage-retry-parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let staging = parent.join("stage");
+        let work = parent.join(".stage.ccos-stage-next");
+        std::fs::create_dir_all(work.join(SEGMENTS_DIR)).unwrap();
+        std::fs::write(work.join(SEGMENTS_DIR).join("partial"), b"partial").unwrap();
+        stage_restore(&target, "acme", &manifest, &staging).unwrap();
+        let staged = FsBackupTarget::read_generation_dir(&staging).unwrap();
+        verify_stored("acme", &manifest, &staged).unwrap();
+        assert!(!work.exists());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn disaster_recovery_executes_replay_and_unfreezes_only_after_verification() {
         let root = scratch("dr");
@@ -1012,12 +1133,14 @@ mod tests {
             100,
             &|path| {
                 assert!(path.exists());
+                std::fs::write(path.join(SEGMENTS_DIR).join("ledger"), b"ledger-replayed")
+                    .map_err(|error| error.to_string())?;
                 Ok(7)
             },
             &|path| {
                 let bytes = std::fs::read(path.join(SEGMENTS_DIR).join("ledger"))
                     .map_err(|error| error.to_string())?;
-                (bytes == b"ledger-v1")
+                (bytes == b"ledger-replayed")
                     .then_some(())
                     .ok_or_else(|| "wrong live bytes".to_string())
             },

@@ -9,10 +9,7 @@ use ccos_enterprise_backup::{
 };
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "ccos-backup-conf-{tag}-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ccos-backup-conf-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -53,7 +50,10 @@ fn backup_verify_stage_promote_round_trip() {
     assert!(staging.join("segments").join("ledger").exists());
     promote_staged(&staging, &live).unwrap();
     #[cfg(unix)]
-    assert!(std::fs::symlink_metadata(&live).unwrap().file_type().is_symlink());
+    assert!(std::fs::symlink_metadata(&live)
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert_eq!(
         std::fs::read_to_string(live.join("segments").join("ledger")).unwrap(),
         "ledger-v1"
@@ -169,8 +169,14 @@ fn repeated_promotion_has_no_mutable_directory_gap() {
     let stage2 = parent.join("stage2");
     stage_restore(&target, "acme", &second, &stage2).unwrap();
     promote_staged(&stage2, &live).unwrap();
-    assert!(std::fs::symlink_metadata(&live).unwrap().file_type().is_symlink());
-    assert!(parent.join(old_target).exists(), "previous generation was destroyed");
+    assert!(std::fs::symlink_metadata(&live)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(
+        parent.join(old_target).exists(),
+        "previous generation was destroyed"
+    );
     assert_eq!(
         std::fs::read(live.join("segments").join("ledger")).unwrap(),
         b"ledger-v2"

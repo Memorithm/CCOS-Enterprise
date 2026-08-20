@@ -1,0 +1,46 @@
+name: Temporary model-switch validator
+
+on:
+  pull_request:
+    branches:
+      - fix/model-switch-replacement
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ci/model-switch-p1-hardening-v1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply and validate product patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .ci/model-switch-hardening.py "$RUNNER_TEMP/model-switch-hardening.py"
+          git fetch origin fix/model-switch-replacement
+          git checkout --detach origin/fix/model-switch-replacement
+          test "$(git rev-parse HEAD)" = "1ca496c3d88670e5362e0464fe41b3c440929056"
+          python3 "$RUNNER_TEMP/model-switch-hardening.py"
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
+          cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
+          cargo test -p ccos-enterprise-runtime --all-features
+          cargo test -p ccos-enterprise-conformance --all-features --release
+          git diff --check
+          test ! -e .ci/model-switch-hardening.py
+          git status --short
+          git add crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-runtime/src/model_switch.rs
+          test -n "$(git diff --cached --name-only)"
+          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = "crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-runtime/src/model_switch.rs "
+          git config user.name "MEMOPERF"
+          git config user.email "contact@checkupauto.fr"
+          git commit -m "fix(runtime): harden governed model switch"
+          git push origin HEAD:fix/model-switch-replacement

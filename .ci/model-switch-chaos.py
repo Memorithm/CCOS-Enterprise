@@ -90,3 +90,44 @@ replace_once(
 )
 
 p.write_text(s)
+
+# The RBAC scope test is specifically about a deployment-global role grant.
+# Globex's fixture already has gpt-5 as its explicit active model. The old test
+# widened Globex's allowlist with claude-opus and then used claude-opus as if
+# allowlisting selected it, masking the RBAC invariant behind ModelNotAllowed.
+rbac_path = Path("tests/ccos-enterprise-conformance/tests/stress_rbac_scale.rs")
+rbac = rbac_path.read_text()
+old = '''    let mut d = two_tenant_deployment();
+    d.tenant_mut("globex")
+        .expect("globex exists")
+        .allow_model("claude-opus");
+
+    // alice was assigned `writer` with no tenant in sight; the grant applies
+'''
+new = '''    let mut d = two_tenant_deployment();
+
+    // alice was assigned `writer` with no tenant in sight; the grant applies
+'''
+if rbac.count(old) != 1:
+    raise SystemExit("expected one stale globex allowlist setup in RBAC scope test")
+rbac = rbac.replace(old, new, 1)
+old = '''            model: "claude-opus",
+            cost_tokens: 10,
+            variant: None,
+            justification: None,
+        }),
+        Outcome::Forwarded,
+        "an acme grant is honoured inside globex: RBAC is not tenant-scoped"
+'''
+new = '''            model: "gpt-5",
+            cost_tokens: 10,
+            variant: None,
+            justification: None,
+        }),
+        Outcome::Forwarded,
+        "an acme grant is honoured inside globex: RBAC is not tenant-scoped"
+'''
+if rbac.count(old) != 1:
+    raise SystemExit("expected one stale globex model call in RBAC scope test")
+rbac = rbac.replace(old, new, 1)
+rbac_path.write_text(rbac)

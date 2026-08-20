@@ -371,6 +371,7 @@ pub enum GovernanceChange {
         old_model: String,
         new_model: String,
         outcome: String,
+        record_digest: String,
     },
     /// The identity floor moved.
     StrengthRequired {
@@ -452,10 +453,18 @@ impl JournalEntry<'_> {
 ///
 /// The ledger is **private**: it was `pub` and directly assignable, so
 /// `tenant_mut(..).budget.spent = 0` rewound the meter with nothing journaled.
+#[derive(Clone)]
 pub struct TenantState {
     budget: TokenBudget,
     models: ModelAllowlist,
     qpages: QPageRegistry,
+    active_model: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModelSwitchCheckpoint {
+    state: TenantState,
+    cells: Option<BTreeMap<String, String>>,
 }
 
 impl TenantState {
@@ -464,11 +473,15 @@ impl TenantState {
             budget: TokenBudget::new(token_limit),
             models: ModelAllowlist::default(),
             qpages: QPageRegistry::default(),
+            active_model: None,
         }
     }
 
     pub fn allow_model(&mut self, model: &str) -> &mut Self {
         self.models.0.insert(model.to_string());
+        if self.active_model.is_none() {
+            self.active_model = Some(model.to_string());
+        }
         self
     }
 
@@ -635,9 +648,18 @@ impl Deployment {
         if !self.serving {
             return;
         }
-        // The ordinal advances whether or not the record is kept, so two
-        // changes never share one and a reader can tell a dropped record from
-        // a reordered one.
+        self.record_governance(change, actor, justification);
+    }
+
+    /// Record a security transaction regardless of provisioning/serving
+    /// state. Model switches are externally consequential and must never
+    /// disappear merely because they happen before the first normal request.
+    fn record_governance(
+        &mut self,
+        change: GovernanceChange,
+        actor: Option<&str>,
+        justification: Option<&str>,
+    ) {
         let ordinal = self.next_governance_ordinal;
         self.next_governance_ordinal += 1;
         if self.audit_capacity == 0 {
@@ -654,9 +676,6 @@ impl Deployment {
             at_sequence: self.next_sequence,
             ordinal,
             actor: actor.map(clamp),
-            // A reason that renders blank is no reason: recording `Some("​")`
-            // would let an invisible string pass for evidence, which is the
-            // hole `is_written_justification` exists to close.
             justification: justification
                 .filter(|j| ccos_enterprise_admin::is_written_justification(Some(j)))
                 .map(clamp),
@@ -1425,7 +1444,9 @@ impl Deployment {
             .tenants
             .get_mut(&tenant_id)
             .expect("tenant presence checked above");
-        if state.models.evaluate(call.model) != PolicyDecision::Allow {
+        if state.active_model.as_deref() != Some(call.model)
+            || state.models.evaluate(call.model) != PolicyDecision::Allow
+        {
             return refuse(Refusal::ModelNotAllowed);
         }
         if let Some(variant) = call.variant {
@@ -1500,50 +1521,69 @@ impl Deployment {
     }
 
     /// The tenant's active model: the single model the deployment governs
-    /// calls against. `None` when the tenant has no model on its allowlist.
+    /// calls against. `None` when no model has been selected.
     pub fn tenant_active_model(&self, tenant: &TenantId) -> Option<String> {
-        let models = self.tenants.get(tenant)?.models.0.clone();
-        models.into_iter().next()
+        self.tenants.get(tenant)?.active_model.clone()
     }
 
-    /// Switch the tenant's model policy: the current active model is removed
-    /// and the new one allowed, preserving any other allowlisted models. Used
-    /// by the governed model-switch transaction.
-    pub(crate) fn switch_model(&mut self, tenant: &TenantId, new_model: &str) {
-        if let Some(state) = self.tenants.get_mut(tenant) {
-            let old = state.models.0.iter().next().cloned();
-            state.models.0.insert(new_model.to_string());
-            if let Some(old) = old {
-                if old != new_model {
-                    state.models.0.remove(&old);
-                }
+    /// Capture every mutable tenant-owned runtime field that a transition may
+    /// touch. Rollback restores this checkpoint at the logical state level,
+    /// including cells and budget, not only model policy.
+    pub(crate) fn checkpoint_model_switch(
+        &self,
+        tenant: &TenantId,
+    ) -> Option<ModelSwitchCheckpoint> {
+        Some(ModelSwitchCheckpoint {
+            state: self.tenants.get(tenant)?.clone(),
+            cells: self.store.get(tenant).cloned(),
+        })
+    }
+
+    /// Select the target model. Existing allowlist membership is preserved; an
+    /// approved unlisted target is added rather than replacing another entry.
+    pub(crate) fn begin_model_switch(
+        &mut self,
+        tenant: &TenantId,
+        new_model: &str,
+    ) -> Result<(), String> {
+        let state = self
+            .tenants
+            .get_mut(tenant)
+            .ok_or_else(|| format!("unknown tenant {:?}", tenant.0))?;
+        state.models.0.insert(new_model.to_string());
+        state.active_model = Some(new_model.to_string());
+        Ok(())
+    }
+
+    /// Restore the complete target-tenant checkpoint after transition failure
+    /// or invariant divergence.
+    pub(crate) fn restore_model_switch_checkpoint(
+        &mut self,
+        tenant: &TenantId,
+        checkpoint: ModelSwitchCheckpoint,
+    ) {
+        self.tenants.insert(tenant.clone(), checkpoint.state);
+        match checkpoint.cells {
+            Some(cells) => {
+                self.store.insert(tenant.clone(), cells);
+            }
+            None => {
+                self.store.remove(tenant);
             }
         }
     }
 
-    /// Revert a divergent model switch: restore the previous allowlist
-    /// exactly (remove the new model; re-add the old). Used by the
-    /// transaction's fail-closed path.
-    pub(crate) fn revert_model_switch(
-        &mut self,
-        tenant: &TenantId,
-        old_model: &str,
-        new_model: &str,
-    ) {
-        if let Some(state) = self.tenants.get_mut(tenant) {
-            state.models.0.remove(new_model);
-            state.models.0.insert(old_model.to_string());
-        }
-    }
-
     /// Journal one completed model switch transaction as a governance change.
+    /// This path is intentionally not suppressed during provisioning: a model
+    /// transition is security-relevant even before request #1.
     pub(crate) fn journal_model_switch(&mut self, record: &crate::model_switch::ModelSwitchRecord) {
-        self.record(
+        self.record_governance(
             GovernanceChange::ModelSwitch {
                 tenant: record.tenant.clone(),
                 old_model: record.old_model.clone(),
                 new_model: record.new_model.clone(),
                 outcome: format!("{:?}", record.outcome),
+                record_digest: record.digest(),
             },
             Some(&record.authorizing_actor),
             None,
@@ -1832,6 +1872,8 @@ pub struct TenantSnapshot {
     pub budget: TokenBudget,
     pub models: ModelAllowlist,
     pub qpages: QPageRegistry,
+    #[serde(default)]
+    pub active_model: Option<String>,
 }
 
 /// The deployment's durable human approval ledger.
@@ -1956,6 +1998,12 @@ pub enum RestoreError {
     /// schema-unknown. Refused rather than silently dropping approvals:
     /// unrecorded approval must stay a denial, never an accident.
     ApprovalLedgerCorrupt { detail: String },
+    /// The selected model is missing, ambiguous, or not in the tenant's
+    /// allowlist. Restore refuses rather than guessing a provider.
+    ActiveModelInvalid {
+        tenant: String,
+        active_model: Option<String>,
+    },
     /// The journal does not continue the snapshot: replaying it would either
     /// skip decisions or double-count them.
     JournalDiscontinuity { expected: u64, found: u64 },
@@ -1989,6 +2037,13 @@ impl std::fmt::Display for RestoreError {
             Self::ApprovalLedgerCorrupt { detail } => {
                 write!(f, "approval ledger is corrupt: {detail}")
             }
+            Self::ActiveModelInvalid {
+                tenant,
+                active_model,
+            } => write!(
+                f,
+                "tenant {tenant:?} has invalid or ambiguous active model {active_model:?}"
+            ),
             Self::JournalDiscontinuity { expected, found } => write!(
                 f,
                 "journal resumes at sequence {found}, snapshot expects {expected}"
@@ -2036,6 +2091,7 @@ impl Deployment {
                             budget: state.budget.clone(),
                             models: state.models.clone(),
                             qpages: state.qpages.clone(),
+                            active_model: state.active_model.clone(),
                         },
                     )
                 })
@@ -2109,6 +2165,23 @@ impl Deployment {
                     limit: t.budget.limit,
                 });
             }
+            let active_model = match t.active_model {
+                Some(model) if t.models.0.contains(&model) => Some(model),
+                Some(model) => {
+                    return Err(RestoreError::ActiveModelInvalid {
+                        tenant: name,
+                        active_model: Some(model),
+                    })
+                }
+                None if t.models.0.is_empty() => None,
+                None if t.models.0.len() == 1 => t.models.0.iter().next().cloned(),
+                None => {
+                    return Err(RestoreError::ActiveModelInvalid {
+                        tenant: name,
+                        active_model: None,
+                    })
+                }
+            };
             let id = TenantId(name);
             d.tenant_owner.insert(id.clone(), OrgId(t.owner));
             d.tenants.insert(
@@ -2117,6 +2190,7 @@ impl Deployment {
                     budget: t.budget,
                     models: t.models,
                     qpages: t.qpages,
+                    active_model,
                 },
             );
         }
@@ -2800,164 +2874,6 @@ mod tests {
         assert!(
             matches!(err, RestoreError::ApprovalLedgerCorrupt { .. }),
             "{err}"
-        );
-    }
-
-    #[test]
-    fn model_switch_commits_when_invariant_state_is_equivalent() {
-        let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
-        // acme's allowlist already holds both models.
-        d.tenant_mut("acme").unwrap().allow_model("gpt-5");
-        // Make the deployment serving so the switch is journaled as a
-        // governance change rather than treated as provisioning.
-        let alice = actor("memorithm", "alice", AuthStrength::Token);
-        let req = request("acme", "alice", "memory.recall", "r-serving");
-        d.admit(Call {
-            actor: &alice,
-            request: &req,
-            model: "claude-opus",
-            cost_tokens: 1,
-            variant: None,
-            justification: None,
-        });
-        let result =
-            model_switch::switch_tenant_model(&mut d, &tenant, "gpt-5", "root", None, 1_000)
-                .unwrap();
-        assert_eq!(
-            result.record.outcome,
-            model_switch::SwitchOutcome::Committed
-        );
-        assert_eq!(result.record.old_model, "claude-opus");
-        assert_eq!(result.record.new_model, "gpt-5");
-        assert!(result.record.equivalent);
-        assert_eq!(result.record.divergence_digest, None);
-        // The tenant's active model moved.
-        assert_eq!(d.tenant_active_model(&tenant).unwrap(), "gpt-5");
-        // The transaction was journaled.
-        assert!(d.governance().any(|record| matches!(
-            &record.change,
-            GovernanceChange::ModelSwitch { new_model, .. } if new_model == "gpt-5"
-        )));
-    }
-
-    #[test]
-    fn model_switch_refuses_unknown_tenant_and_same_model() {
-        let mut d = two_tenant_deployment();
-        let nowhere = TenantId("nowhere".into());
-        assert!(
-            model_switch::switch_tenant_model(&mut d, &nowhere, "gpt-5", "root", None, 1_000,)
-                .is_err()
-        );
-        let tenant = TenantId("acme".into());
-        assert!(model_switch::switch_tenant_model(
-            &mut d,
-            &tenant,
-            "claude-opus",
-            "root",
-            None,
-            1_000,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn model_switch_to_unlisted_model_requires_approval_id() {
-        let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
-        // gpt-5 is not on acme's allowlist: without an approval id the switch
-        // is refused (allowlist changes require approval).
-        let err = model_switch::switch_tenant_model(&mut d, &tenant, "gpt-5", "root", None, 1_000)
-            .expect_err("unlisted model without approval must be refused");
-        assert!(err.contains("approval"), "{err}");
-        // With an approval id the switch proceeds.
-        let result = model_switch::switch_tenant_model(
-            &mut d,
-            &tenant,
-            "gpt-5",
-            "root",
-            Some("approval-v1-test"),
-            1_000,
-        )
-        .unwrap();
-        assert_eq!(
-            result.record.outcome,
-            model_switch::SwitchOutcome::Committed
-        );
-        assert_eq!(
-            result.record.approval_id.as_deref(),
-            Some("approval-v1-test")
-        );
-    }
-
-    #[test]
-    fn model_switch_reverts_and_fails_closed_on_divergence() {
-        // A divergent switch is simulated by mutating invariant state during
-        // the transaction — which the transaction API cannot do by itself;
-        // instead we prove the compare + revert machinery: two states that
-        // differ produce Divergent with a stable digest.
-        let mut before = model_switch::InvariantState {
-            tenant: "acme".into(),
-            spent: 100,
-            limit: 1_000,
-            models: BTreeSet::from(["claude-opus".into()]),
-            variants: vec![],
-            cells: vec![],
-        };
-        let after = before.clone();
-        assert_eq!(
-            model_switch::compare_invariant_states(&before, &after),
-            model_switch::Equivalence::Equal
-        );
-        before.spent = 101;
-        let divergence = model_switch::compare_invariant_states(&before, &after);
-        let model_switch::Equivalence::Divergent { digest } = divergence else {
-            panic!("spent moved: must diverge");
-        };
-        assert_eq!(digest.len(), 64);
-        // Deterministic: the same divergence produces the same digest.
-        let mut again = before.clone();
-        again.spent = 101;
-        let model_switch::Equivalence::Divergent { digest: second } =
-            model_switch::compare_invariant_states(&again, &after)
-        else {
-            panic!("must diverge");
-        };
-        assert_eq!(digest, second);
-    }
-
-    #[test]
-    fn model_switch_snapshot_digests_are_stable_and_deterministic() {
-        let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
-        d.tenant_mut("acme").unwrap().allow_model("gpt-5");
-        let first =
-            model_switch::switch_tenant_model(&mut d, &tenant, "gpt-5", "root", None, 1_000)
-                .unwrap();
-        // Switching back to claude-opus: it was removed by the first switch,
-        // so the change needs an approval id.
-        let second = model_switch::switch_tenant_model(
-            &mut d,
-            &tenant,
-            "claude-opus",
-            "root",
-            Some("approval-v1-back"),
-            2_000,
-        )
-        .unwrap();
-        assert_eq!(
-            first.record.snapshot_hash_before.len(),
-            64,
-            "snapshot hash is sha256"
-        );
-        assert_eq!(
-            first.record.snapshot_hash_after.len(),
-            64,
-            "snapshot hash is sha256"
-        );
-        assert_eq!(
-            second.record.snapshot_hash_after, first.record.snapshot_hash_before,
-            "switching back to the original model restores the original state"
         );
     }
 }

@@ -695,7 +695,7 @@ fn chaos_op(rng: &mut Rng, tid: usize, home: &str, k: usize) -> Op {
             tool: rng.pick(CHAOS_TOOLS).to_string(),
             model: match rng.below(6) {
                 0 => NEVER_ALLOWED_MODEL.to_string(),
-                n => format!("chaos-model-{}", n - 1),
+                _ => BASE_MODEL.to_string(),
             },
             cost: 1 + rng.below(17),
             variant: if rng.below(3) == 0 {
@@ -1944,16 +1944,16 @@ fn identical_concurrent_calls_are_ordered_and_billed_exactly_once() {
     assert_eq!(Some(billed), d.spent("acme"));
 }
 
-/// **REPAIRED (audit completeness).** A governance change races with the
-/// admissions it governs, and the journal now records it, in order, between
-/// the two outcomes it flipped.
+/// **REPAIRED (audit completeness + explicit selection).** A direct
+/// allowlist change races with admissions and is journaled in order, while
+/// remaining deliberately insufficient to select the newly allowed model.
 ///
-/// The two admissions below are identical apart from their request id; the
-/// first is refused, the second forwarded. The merged journal holds three
-/// rows, and the middle one says the allowlist widened. `tenant_mut` hands out
-/// a guard that compares the tenant's rules before and after the borrow and
-/// journals the difference on drop — the most a `&mut` borrow can honestly
-/// report, and enough to answer the question.
+/// The two admissions below are identical apart from their request id and
+/// both are refused: widening the allowlist is not an activation primitive.
+/// The merged journal still holds three rows, and the middle one says the
+/// allowlist widened. `tenant_mut` compares the tenant's rules before and
+/// after the borrow and journals the difference on drop, so the mutation is
+/// visible without becoming an implicit model switch.
 ///
 /// **Still open**, and asserted at the end so it cannot quietly change: the
 /// change requires no identity and no permission. What is repaired is that it
@@ -1961,7 +1961,7 @@ fn identical_concurrent_calls_are_ordered_and_billed_exactly_once() {
 /// unattributed. Demanding an identity would mean `&mut Deployment` were not
 /// already full authority, which it is.
 #[test]
-fn a_concurrent_governance_change_is_journaled_between_the_outcomes_it_flips() {
+fn a_concurrent_allowlist_change_is_journaled_without_selecting_the_model() {
     let _wd = Watchdog::arm("governance_change_flips_outcome", 30);
     let d = Arc::new(Mutex::new(one_tenant(1_000)));
     let gate = Arc::new(Barrier::new(2));
@@ -2005,7 +2005,7 @@ fn a_concurrent_governance_change_is_journaled_between_the_outcomes_it_flips() {
             })
         };
         assert_eq!(before.refusal(), Some(&Refusal::ModelNotAllowed));
-        assert_eq!(after, Outcome::Forwarded);
+        assert_eq!(after.refusal(), Some(&Refusal::ModelNotAllowed));
     });
 
     let d = guard(&d);
@@ -2014,20 +2014,20 @@ fn a_concurrent_governance_change_is_journaled_between_the_outcomes_it_flips() {
         2,
         "the two admissions, and only those: a rule change is not a decision"
     );
-    // The two decisions are ordered and priced, so the *flip* is legible — the
-    // refusal cost 0 and the forward cost 10.
+    // The two decisions are ordered and priced. Both remain refusals at zero
+    // cost: direct allowlist widening cannot bypass explicit active selection.
     let rows = journal_of(&d);
     assert_eq!(rows[0].sequence, 0);
     assert_eq!(rows[1].sequence, 1);
     assert_eq!((rows[0].forwarded, rows[0].cost), (false, 0));
-    assert_eq!((rows[1].forwarded, rows[1].cost), (true, 10));
+    assert_eq!((rows[1].forwarded, rows[1].cost), (false, 0));
 
-    // …and the merged journal now says WHY, in the one position that answers
-    // it: after the refusal, before the forward.
+    // The merged journal still places the allowlist mutation exactly between
+    // the two decisions, without pretending that mutation selected a model.
     let merged = d.journal();
     assert_eq!(merged.len(), 3, "{merged:?}");
     assert!(matches!(merged[0], JournalEntry::Decision(r) if !r.outcome.is_forwarded()));
-    assert!(matches!(merged[2], JournalEntry::Decision(r) if r.outcome.is_forwarded()));
+    assert!(matches!(merged[2], JournalEntry::Decision(r) if !r.outcome.is_forwarded()));
     let JournalEntry::Governance(change) = merged[1] else {
         panic!("the middle row must be the change: {merged:?}");
     };

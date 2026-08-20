@@ -82,7 +82,6 @@ fn crossing_tenants_is_explicit_and_visible() {
 #[test]
 fn exhausting_one_tenants_budget_leaves_the_other_untouched() {
     let mut d = two_tenant_deployment();
-    d.tenant_mut("globex").unwrap().allow_model("claude-opus");
     let alice = actor("memorithm", "alice", AuthStrength::Token);
 
     // Drain acme (limit 1_000 in the fixture).
@@ -112,13 +111,15 @@ fn exhausting_one_tenants_budget_leaves_the_other_untouched() {
         Some(&Refusal::BudgetExhausted)
     );
 
-    // globex is unaffected.
+    // globex is unaffected. Use its explicitly selected model so this test
+    // isolates budget state rather than relying on allowlist insertion to
+    // change model selection.
     let req = request("globex", "alice", "memory.recall", "r-other");
     assert_eq!(
         d.admit(Call {
             actor: &alice,
             request: &req,
-            model: "claude-opus",
+            model: "gpt-5",
             cost_tokens: 400,
             variant: None,
             justification: None,

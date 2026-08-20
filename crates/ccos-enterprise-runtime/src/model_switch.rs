@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use ccos_enterprise_approval::{ApprovalDecision, ApprovalQuery, GateOutcome};
+use ccos_enterprise_approval::{ApprovalDecision, APPROVAL_SCHEMA};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -50,7 +50,8 @@ impl ModelSwitchRecord {
     /// Stable digest used by the governance journal to point at the complete
     /// transaction without copying its fields into the bounded journal.
     pub fn digest(&self) -> String {
-        let bytes = serde_json::to_vec(self).expect("serializing a model-switch record cannot fail");
+        let bytes =
+            serde_json::to_vec(self).expect("serializing a model-switch record cannot fail");
         digest_framed(b"ccos-enterprise-model-switch-record-v2", &[&bytes])
     }
 }
@@ -212,6 +213,9 @@ pub fn switch_tenant_model(
         .ok_or_else(|| "cannot capture pre-switch invariant state".to_string())?;
     let snapshot_hash_before = snapshot_digest(&before);
 
+    let checkpoint = deployment
+        .checkpoint_model_switch(tenant)
+        .ok_or_else(|| "cannot capture model-switch rollback checkpoint".to_string())?;
     deployment
         .begin_model_switch(tenant, new_model)
         .map_err(|error| format!("cannot begin model switch: {error}"))?;
@@ -228,18 +232,13 @@ pub fn switch_tenant_model(
             b"ccos-enterprise-model-switch-transition-error-v1",
             &[error.as_bytes()],
         );
-        deployment.revert_model_switch(tenant, &old_model, new_model, target_was_allowlisted);
+        deployment.restore_model_switch_checkpoint(tenant, checkpoint);
         (false, Some(digest), SwitchOutcome::TransitionFailedReverted)
     } else {
         match compare_invariant_states(&before, &after) {
             Equivalence::Equal => (true, None, SwitchOutcome::Committed),
             Equivalence::Divergent { digest } => {
-                deployment.revert_model_switch(
-                    tenant,
-                    &old_model,
-                    new_model,
-                    target_was_allowlisted,
-                );
+                deployment.restore_model_switch_checkpoint(tenant, checkpoint);
                 (false, Some(digest), SwitchOutcome::DivergedReverted)
             }
         }
@@ -274,28 +273,28 @@ fn validate_allowlist_approval(
         "adding a model to the allowlist requires a recorded human approval".to_string()
     })?;
     let artifact_hash = allowlist_artifact_hash(tenant, new_model)?;
-    let record = deployment
-        .approvals()
-        .registry()
+    let registry = deployment.approvals().registry();
+    let record = registry
         .snapshot()
         .approvals
         .get(approval_id)
         .ok_or_else(|| "supplied model-switch approval id is not recorded".to_string())?;
-    if record.tenant != tenant.0
+    if !record.id.starts_with("approval-v2-")
+        || record.schema_version != APPROVAL_SCHEMA
+        || record.tenant != tenant.0
         || record.action != MODEL_ALLOWLIST_ACTION
         || record.artifact_hash != artifact_hash
         || record.decision != ApprovalDecision::Approved
     {
-        return Err("supplied approval is not bound to this model allowlist change".into());
+        return Err(
+            "supplied approval is not a live v2 approval bound to this model change".into(),
+        );
     }
-    let query = ApprovalQuery {
-        tenant,
-        action: MODEL_ALLOWLIST_ACTION,
-        artifact_hash: &artifact_hash,
-        now: at_unix,
-    };
-    if deployment.approvals().evaluate(&query) != GateOutcome::Approved {
-        return Err("model allowlist approval is expired, revoked, legacy, or otherwise invalid".into());
+    if registry.is_revoked(approval_id) {
+        return Err("supplied model-switch approval is revoked".into());
+    }
+    if record.expires_at.is_some_and(|expiry| expiry <= at_unix) {
+        return Err("supplied model-switch approval is expired".into());
     }
     Ok(approval_id.to_string())
 }
@@ -306,7 +305,9 @@ fn validate_model_name(model: &str) -> Result<(), String> {
         || model.chars().any(|c| c.is_control())
         || model.trim() != model
     {
-        return Err("model name is empty, oversized, padded, or contains control characters".into());
+        return Err(
+            "model name is empty, oversized, padded, or contains control characters".into(),
+        );
     }
     Ok(())
 }
@@ -335,6 +336,20 @@ fn digest_framed(domain: &[u8], fields: &[&[u8]]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ccos_enterprise_approval::{ApprovalDecision, ApprovalRequest};
+    use ccos_enterprise_auth::AuthStrength;
+    use ccos_enterprise_tenancy::TenantScope;
+
+    use crate::{actor, request, two_tenant_deployment, Call, GovernanceChange, Outcome, Refusal};
+
+    fn noop_transition(
+        _deployment: &mut Deployment,
+        _tenant: &TenantId,
+        _old_model: &str,
+        _new_model: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 
     #[test]
     fn framing_distinguishes_variable_length_fields() {
@@ -370,5 +385,238 @@ mod tests {
             Equivalence::Divergent { .. }
         ));
         assert_ne!(snapshot_digest(&a), snapshot_digest(&b));
+    }
+
+    #[test]
+    fn active_model_is_distinct_from_allowlist_and_enforced_by_admission() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        d.tenant_mut("acme").unwrap().allow_model("gpt-5");
+        assert_eq!(
+            d.tenant_active_model(&tenant).as_deref(),
+            Some("claude-opus")
+        );
+
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+        let before = request("acme", "alice", "memory.recall", "before-switch");
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice,
+                request: &before,
+                model: "gpt-5",
+                cost_tokens: 1,
+                variant: None,
+                justification: None,
+            })
+            .refusal(),
+            Some(&Refusal::ModelNotAllowed)
+        );
+
+        let mut transition = noop_transition;
+        let result = switch_tenant_model(
+            &mut d,
+            &tenant,
+            "gpt-5",
+            "root",
+            None,
+            1_000,
+            &mut transition,
+        )
+        .unwrap();
+        assert_eq!(result.record.outcome, SwitchOutcome::Committed);
+        assert_eq!(d.tenant_active_model(&tenant).as_deref(), Some("gpt-5"));
+
+        let old = request("acme", "alice", "memory.recall", "after-old");
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice,
+                request: &old,
+                model: "claude-opus",
+                cost_tokens: 1,
+                variant: None,
+                justification: None,
+            })
+            .refusal(),
+            Some(&Refusal::ModelNotAllowed)
+        );
+        let selected = request("acme", "alice", "memory.recall", "after-new");
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice,
+                request: &selected,
+                model: "gpt-5",
+                cost_tokens: 1,
+                variant: None,
+                justification: None,
+            }),
+            Outcome::Forwarded
+        );
+    }
+
+    #[test]
+    fn failed_transition_restores_full_target_tenant_checkpoint() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        d.tenant_mut("acme").unwrap().allow_model("gpt-5");
+        let scope = TenantScope::new(tenant.clone(), "checkpoint-cell".to_string());
+        assert!(d.put(&scope, "before"));
+        let spent_before = d.spent("acme");
+        let models_before = d.tenant_models("acme").unwrap();
+        let active_before = d.tenant_active_model(&tenant);
+        let variants_before = d.tenant_variants("acme").unwrap();
+
+        let mut transition = |deployment: &mut Deployment,
+                              tenant: &TenantId,
+                              _old: &str,
+                              _new: &str|
+         -> Result<(), String> {
+            let state = deployment.tenants.get_mut(tenant).unwrap();
+            state.budget.spent = state.budget.spent.saturating_add(37);
+            state
+                .qpages
+                .activate(ccos_enterprise_qpages::AdvancedQPageVariant::ExperimentalBridge);
+            let scope = TenantScope::new(tenant.clone(), "checkpoint-cell".to_string());
+            assert!(deployment.put(&scope, "mutated"));
+            Err("provider transition failed after partial replay".into())
+        };
+        let result = switch_tenant_model(
+            &mut d,
+            &tenant,
+            "gpt-5",
+            "root",
+            None,
+            1_000,
+            &mut transition,
+        )
+        .unwrap();
+        assert_eq!(
+            result.record.outcome,
+            SwitchOutcome::TransitionFailedReverted
+        );
+        assert_eq!(d.spent("acme"), spent_before);
+        assert_eq!(d.tenant_models("acme").unwrap(), models_before);
+        assert_eq!(d.tenant_active_model(&tenant), active_before);
+        assert_eq!(d.tenant_variants("acme").unwrap(), variants_before);
+        assert_eq!(d.get(&scope), Some("before"));
+    }
+
+    #[test]
+    fn supplied_approval_id_must_itself_be_live() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        let artifact = allowlist_artifact_hash(&tenant, "gpt-5").unwrap();
+
+        let expired_id = d
+            .record_approval(
+                ApprovalRequest::new(
+                    tenant.clone(),
+                    MODEL_ALLOWLIST_ACTION,
+                    &artifact,
+                    "operator-one",
+                    ApprovalDecision::Approved,
+                    100,
+                    Some(200),
+                    "temporary model approval",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let _live_id = d
+            .record_approval(
+                ApprovalRequest::new(
+                    tenant.clone(),
+                    MODEL_ALLOWLIST_ACTION,
+                    &artifact,
+                    "operator-two",
+                    ApprovalDecision::Approved,
+                    150,
+                    None,
+                    "replacement model approval",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let mut transition = noop_transition;
+        let error = switch_tenant_model(
+            &mut d,
+            &tenant,
+            "gpt-5",
+            "root",
+            Some(&expired_id),
+            300,
+            &mut transition,
+        )
+        .expect_err("an expired supplied id cannot borrow validity from another record");
+        assert!(error.contains("expired"), "{error}");
+        assert_eq!(
+            d.tenant_active_model(&tenant).as_deref(),
+            Some("claude-opus")
+        );
+    }
+
+    #[test]
+    fn model_switch_is_journaled_before_first_request_and_links_record_digest() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        d.tenant_mut("acme").unwrap().allow_model("gpt-5");
+        assert!(!d.is_serving());
+
+        let mut transition = noop_transition;
+        let result = switch_tenant_model(
+            &mut d,
+            &tenant,
+            "gpt-5",
+            "root",
+            None,
+            1_000,
+            &mut transition,
+        )
+        .unwrap();
+        let expected = result.record.digest();
+        let change = d
+            .governance()
+            .find_map(|record| match &record.change {
+                GovernanceChange::ModelSwitch { record_digest, .. } => Some(record_digest.clone()),
+                _ => None,
+            })
+            .expect("model switch must be journaled even before request #1");
+        assert_eq!(change, expected);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_active_model_and_ambiguous_legacy_state_fails_closed() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        d.tenant_mut("acme").unwrap().allow_model("gpt-5");
+        let mut transition = noop_transition;
+        switch_tenant_model(
+            &mut d,
+            &tenant,
+            "gpt-5",
+            "root",
+            None,
+            1_000,
+            &mut transition,
+        )
+        .unwrap();
+
+        let snapshot = d.snapshot();
+        let restored = Deployment::restore(snapshot.clone(), &[], &[]).unwrap();
+        assert_eq!(
+            restored.tenant_active_model(&tenant).as_deref(),
+            Some("gpt-5")
+        );
+
+        let mut legacy = snapshot;
+        legacy.tenants.get_mut("acme").unwrap().active_model = None;
+        let error = match Deployment::restore(legacy, &[], &[]) {
+            Ok(_) => panic!("multi-model snapshot without active selection must fail closed"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            crate::RestoreError::ActiveModelInvalid { .. }
+        ));
     }
 }

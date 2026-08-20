@@ -1522,9 +1522,6 @@ fn authorization_is_keyed_on_the_authenticated_identity_not_the_request() {
 fn role_grants_are_deployment_global_not_tenant_scoped() {
     let _guard = serialized();
     let mut d = two_tenant_deployment();
-    d.tenant_mut("globex")
-        .expect("globex exists")
-        .allow_model("claude-opus");
 
     // alice was assigned `writer` with no tenant in sight; the grant applies
     // in globex, a tenant nobody granted her anything in.
@@ -1534,7 +1531,7 @@ fn role_grants_are_deployment_global_not_tenant_scoped() {
         d.admit(Call {
             actor: &alice,
             request: &cross,
-            model: "claude-opus",
+            model: "gpt-5",
             cost_tokens: 10,
             variant: None,
             justification: None,

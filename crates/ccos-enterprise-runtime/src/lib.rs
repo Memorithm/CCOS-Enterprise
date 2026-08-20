@@ -121,6 +121,9 @@ use ccos_enterprise_qpages::{AdvancedQPageVariant, QPageRegistry};
 use ccos_enterprise_rbac::{Permission, Role, RoleBook};
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 
+/// Governed model switch transaction (docs/MODEL_SWITCHING_POLICY.md).
+pub mod model_switch;
+
 /// Longest identifier the runtime will record verbatim. Tenant and actor
 /// names arrive from the wire; the gateway bounds tool names, nothing bounded
 /// these, and an unauthenticated caller could make every audit record a
@@ -360,6 +363,16 @@ pub enum GovernanceChange {
     ApprovalRecorded {
         approval_id: String,
     },
+    /// A governed model switch transaction completed (or diverged and
+    /// reverted). Carries the durable record digest so the audit can point at
+    /// the full transaction.
+    ModelSwitch {
+        tenant: String,
+        old_model: String,
+        new_model: String,
+        outcome: String,
+        record_digest: String,
+    },
     /// The identity floor moved.
     StrengthRequired {
         from: AuthStrength,
@@ -440,10 +453,18 @@ impl JournalEntry<'_> {
 ///
 /// The ledger is **private**: it was `pub` and directly assignable, so
 /// `tenant_mut(..).budget.spent = 0` rewound the meter with nothing journaled.
+#[derive(Clone)]
 pub struct TenantState {
     budget: TokenBudget,
     models: ModelAllowlist,
     qpages: QPageRegistry,
+    active_model: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModelSwitchCheckpoint {
+    state: TenantState,
+    cells: Option<BTreeMap<String, String>>,
 }
 
 impl TenantState {
@@ -452,11 +473,15 @@ impl TenantState {
             budget: TokenBudget::new(token_limit),
             models: ModelAllowlist::default(),
             qpages: QPageRegistry::default(),
+            active_model: None,
         }
     }
 
     pub fn allow_model(&mut self, model: &str) -> &mut Self {
         self.models.0.insert(model.to_string());
+        if self.active_model.is_none() {
+            self.active_model = Some(model.to_string());
+        }
         self
     }
 
@@ -623,9 +648,18 @@ impl Deployment {
         if !self.serving {
             return;
         }
-        // The ordinal advances whether or not the record is kept, so two
-        // changes never share one and a reader can tell a dropped record from
-        // a reordered one.
+        self.record_governance(change, actor, justification);
+    }
+
+    /// Record a security transaction regardless of provisioning/serving
+    /// state. Model switches are externally consequential and must never
+    /// disappear merely because they happen before the first normal request.
+    fn record_governance(
+        &mut self,
+        change: GovernanceChange,
+        actor: Option<&str>,
+        justification: Option<&str>,
+    ) {
         let ordinal = self.next_governance_ordinal;
         self.next_governance_ordinal += 1;
         if self.audit_capacity == 0 {
@@ -642,9 +676,6 @@ impl Deployment {
             at_sequence: self.next_sequence,
             ordinal,
             actor: actor.map(clamp),
-            // A reason that renders blank is no reason: recording `Some("​")`
-            // would let an invisible string pass for evidence, which is the
-            // hole `is_written_justification` exists to close.
             justification: justification
                 .filter(|j| ccos_enterprise_admin::is_written_justification(Some(j)))
                 .map(clamp),
@@ -1413,7 +1444,9 @@ impl Deployment {
             .tenants
             .get_mut(&tenant_id)
             .expect("tenant presence checked above");
-        if state.models.evaluate(call.model) != PolicyDecision::Allow {
+        if state.active_model.as_deref() != Some(call.model)
+            || state.models.evaluate(call.model) != PolicyDecision::Allow
+        {
             return refuse(Refusal::ModelNotAllowed);
         }
         if let Some(variant) = call.variant {
@@ -1453,6 +1486,109 @@ impl Deployment {
     }
 
     // ── Observation ──────────────────────────────────────────────────────
+
+    /// Whether a tenant exists in this deployment.
+    pub fn tenant_exists(&self, tenant: &TenantId) -> bool {
+        self.tenants.contains_key(tenant)
+    }
+
+    /// The tenant's token budget ceiling.
+    pub fn tenant_limit(&self, tenant: &str) -> Option<u64> {
+        self.tenants
+            .get(&TenantId(tenant.to_string()))
+            .map(TenantState::limit)
+    }
+
+    /// The tenant's model allowlist, in name order.
+    pub fn tenant_models(&self, tenant: &str) -> Option<BTreeSet<String>> {
+        self.tenants
+            .get(&TenantId(tenant.to_string()))
+            .map(|state| state.models.0.clone())
+    }
+
+    /// The tenant's active Q-Page variants, in name order.
+    pub fn tenant_variants(&self, tenant: &str) -> Option<Vec<String>> {
+        self.tenants
+            .get(&TenantId(tenant.to_string()))
+            .map(|state| {
+                state
+                    .qpages
+                    .active()
+                    .into_iter()
+                    .map(|v| format!("{v:?}"))
+                    .collect()
+            })
+    }
+
+    /// The tenant's active model: the single model the deployment governs
+    /// calls against. `None` when no model has been selected.
+    pub fn tenant_active_model(&self, tenant: &TenantId) -> Option<String> {
+        self.tenants.get(tenant)?.active_model.clone()
+    }
+
+    /// Capture every mutable tenant-owned runtime field that a transition may
+    /// touch. Rollback restores this checkpoint at the logical state level,
+    /// including cells and budget, not only model policy.
+    pub(crate) fn checkpoint_model_switch(
+        &self,
+        tenant: &TenantId,
+    ) -> Option<ModelSwitchCheckpoint> {
+        Some(ModelSwitchCheckpoint {
+            state: self.tenants.get(tenant)?.clone(),
+            cells: self.store.get(tenant).cloned(),
+        })
+    }
+
+    /// Select the target model. Existing allowlist membership is preserved; an
+    /// approved unlisted target is added rather than replacing another entry.
+    pub(crate) fn begin_model_switch(
+        &mut self,
+        tenant: &TenantId,
+        new_model: &str,
+    ) -> Result<(), String> {
+        let state = self
+            .tenants
+            .get_mut(tenant)
+            .ok_or_else(|| format!("unknown tenant {:?}", tenant.0))?;
+        state.models.0.insert(new_model.to_string());
+        state.active_model = Some(new_model.to_string());
+        Ok(())
+    }
+
+    /// Restore the complete target-tenant checkpoint after transition failure
+    /// or invariant divergence.
+    pub(crate) fn restore_model_switch_checkpoint(
+        &mut self,
+        tenant: &TenantId,
+        checkpoint: ModelSwitchCheckpoint,
+    ) {
+        self.tenants.insert(tenant.clone(), checkpoint.state);
+        match checkpoint.cells {
+            Some(cells) => {
+                self.store.insert(tenant.clone(), cells);
+            }
+            None => {
+                self.store.remove(tenant);
+            }
+        }
+    }
+
+    /// Journal one completed model switch transaction as a governance change.
+    /// This path is intentionally not suppressed during provisioning: a model
+    /// transition is security-relevant even before request #1.
+    pub(crate) fn journal_model_switch(&mut self, record: &crate::model_switch::ModelSwitchRecord) {
+        self.record_governance(
+            GovernanceChange::ModelSwitch {
+                tenant: record.tenant.clone(),
+                old_model: record.old_model.clone(),
+                new_model: record.new_model.clone(),
+                outcome: format!("{:?}", record.outcome),
+                record_digest: record.digest(),
+            },
+            Some(&record.authorizing_actor),
+            None,
+        );
+    }
 
     /// Tokens charged to a tenant. `None` for a tenant this deployment does
     /// not have — distinguishable from a tenant that has spent nothing, which
@@ -1736,6 +1872,8 @@ pub struct TenantSnapshot {
     pub budget: TokenBudget,
     pub models: ModelAllowlist,
     pub qpages: QPageRegistry,
+    #[serde(default)]
+    pub active_model: Option<String>,
 }
 
 /// The deployment's durable human approval ledger.
@@ -1860,6 +1998,12 @@ pub enum RestoreError {
     /// schema-unknown. Refused rather than silently dropping approvals:
     /// unrecorded approval must stay a denial, never an accident.
     ApprovalLedgerCorrupt { detail: String },
+    /// The selected model is missing, ambiguous, or not in the tenant's
+    /// allowlist. Restore refuses rather than guessing a provider.
+    ActiveModelInvalid {
+        tenant: String,
+        active_model: Option<String>,
+    },
     /// The journal does not continue the snapshot: replaying it would either
     /// skip decisions or double-count them.
     JournalDiscontinuity { expected: u64, found: u64 },
@@ -1893,6 +2037,13 @@ impl std::fmt::Display for RestoreError {
             Self::ApprovalLedgerCorrupt { detail } => {
                 write!(f, "approval ledger is corrupt: {detail}")
             }
+            Self::ActiveModelInvalid {
+                tenant,
+                active_model,
+            } => write!(
+                f,
+                "tenant {tenant:?} has invalid or ambiguous active model {active_model:?}"
+            ),
             Self::JournalDiscontinuity { expected, found } => write!(
                 f,
                 "journal resumes at sequence {found}, snapshot expects {expected}"
@@ -1940,6 +2091,7 @@ impl Deployment {
                             budget: state.budget.clone(),
                             models: state.models.clone(),
                             qpages: state.qpages.clone(),
+                            active_model: state.active_model.clone(),
                         },
                     )
                 })
@@ -2013,6 +2165,23 @@ impl Deployment {
                     limit: t.budget.limit,
                 });
             }
+            let active_model = match t.active_model {
+                Some(model) if t.models.0.contains(&model) => Some(model),
+                Some(model) => {
+                    return Err(RestoreError::ActiveModelInvalid {
+                        tenant: name,
+                        active_model: Some(model),
+                    })
+                }
+                None if t.models.0.is_empty() => None,
+                None if t.models.0.len() == 1 => t.models.0.iter().next().cloned(),
+                None => {
+                    return Err(RestoreError::ActiveModelInvalid {
+                        tenant: name,
+                        active_model: None,
+                    })
+                }
+            };
             let id = TenantId(name);
             d.tenant_owner.insert(id.clone(), OrgId(t.owner));
             d.tenants.insert(
@@ -2021,6 +2190,7 @@ impl Deployment {
                     budget: t.budget,
                     models: t.models,
                     qpages: t.qpages,
+                    active_model,
                 },
             );
         }

@@ -516,16 +516,16 @@ fn advanced_variants_are_policy_activated_per_tenant() {
         Outcome::Forwarded
     );
 
-    // globex did not — the same call, same actor, same variant, refused.
-    // Both tenants belong to alice's organization, so nothing but the
-    // activation differs between the two calls.
+    // globex did not. Use globex's explicitly selected model so the model
+    // gate passes and this assertion continues to isolate Q-Page activation.
+    // Both tenants belong to alice's organization and each call uses that
+    // tenant's active model; the refusal below must therefore be the variant.
     d.assign("alice", "writer");
-    d.tenant_mut("globex").unwrap().allow_model("claude-opus");
     let req = request("globex", "alice", "memory.recall", "r-2");
     let outcome = d.admit(Call {
         actor: &alice,
         request: &req,
-        model: "claude-opus",
+        model: "gpt-5",
         cost_tokens: 10,
         variant: Some(AdvancedQPageVariant::Hierarchical),
         justification: None,

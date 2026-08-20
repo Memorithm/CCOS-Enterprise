@@ -1894,8 +1894,9 @@ fn the_allowlist_is_case_sensitive_but_the_gateway_is_not() {
 
 /// The allowlist accepts entries the gateway would refuse outright for a tool:
 /// the empty string, whitespace, control bytes. Nothing canonicalizes an
-/// allowlist entry on the way in, so `allow_model("")` really does make the
-/// empty model name a governed, billable model.
+/// allowlist entry on the way in. Selection is now a separate invariant: only
+/// the explicitly active model may execute even when several raw entries are
+/// stored in the allowlist.
 ///
 /// Not a hole by itself — you have to configure it — but it is the mirror of
 /// the gateway's canonicality check, which exists precisely because "the
@@ -1911,22 +1912,44 @@ fn the_allowlist_accepts_non_canonical_entries() {
     assert!(d.assign("a", "writer"));
     let who = actor("o", "a", AuthStrength::Token);
 
-    for (i, model) in ["", " ", "a\nb"].into_iter().enumerate() {
-        let req = request("acme", "a", "memory.ingest", &format!("r-{i}"));
-        assert_eq!(
-            d.admit(Call {
-                actor: &who,
-                request: &req,
-                model,
-                cost_tokens: 1,
-                variant: None,
-                justification: None,
-            }),
-            Outcome::Forwarded,
-            "TRUTH: {model:?} is a perfectly good model name to the allowlist"
+    let stored = d.tenant_models("acme").expect("tenant model allowlist");
+    assert_eq!(stored.len(), 3);
+    for model in ["", " ", "a\nb"] {
+        assert!(
+            stored.contains(model),
+            "TRUTH: raw non-canonical entry {model:?} is still stored in the allowlist"
         );
     }
-    assert_eq!(d.spent("acme"), Some(3), "and all three calls were billed");
+
+    // The first configured entry is the initial explicit selection. The two
+    // other allowlisted spellings cannot execute until a governed switch
+    // selects them.
+    assert_eq!(
+        d.tenant_active_model(&ccos_enterprise_tenancy::TenantId("acme".into()))
+            .as_deref(),
+        Some("")
+    );
+    for (i, model) in ["", " ", "a\nb"].into_iter().enumerate() {
+        let req = request("acme", "a", "memory.ingest", &format!("r-{i}"));
+        let outcome = d.admit(Call {
+            actor: &who,
+            request: &req,
+            model,
+            cost_tokens: 1,
+            variant: None,
+            justification: None,
+        });
+        if model.is_empty() {
+            assert_eq!(outcome, Outcome::Forwarded);
+        } else {
+            assert_eq!(outcome.refusal(), Some(&Refusal::ModelNotAllowed));
+        }
+    }
+    assert_eq!(
+        d.spent("acme"),
+        Some(1),
+        "only the selected non-canonical model is billable"
+    );
 
     // The gateway refuses exactly these spellings for a tool name.
     for tool in ["", " ", "a\nb"] {

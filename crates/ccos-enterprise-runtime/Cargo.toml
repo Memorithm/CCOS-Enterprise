@@ -26,3 +26,5 @@ ccos-enterprise-qpages = { path = "../ccos-enterprise-qpages" }
 ccos-enterprise-admin = { path = "../ccos-enterprise-admin" }
 ccos-enterprise-approval = { path = "../ccos-enterprise-approval" }
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

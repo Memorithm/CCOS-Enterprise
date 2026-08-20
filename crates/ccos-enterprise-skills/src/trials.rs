@@ -647,8 +647,10 @@ mod tests {
         let turn_key = trial_turn_key("session-tamper", 1);
         let original_skill = "skill-v1-original";
         let id = trial_id(&turn_key, original_skill);
-        let mut snapshot = SkillTrialSnapshot::default();
-        snapshot.next_ordinal = 1;
+        let mut snapshot = SkillTrialSnapshot {
+            next_ordinal: 1,
+            ..Default::default()
+        };
         snapshot.trials.insert(
             id.clone(),
             SkillTrialRecord {

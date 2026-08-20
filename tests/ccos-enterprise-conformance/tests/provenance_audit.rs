@@ -7,13 +7,39 @@ use std::collections::BTreeMap;
 use ccos_enterprise_rbac::{Permission, Role, RoleBook};
 use ccos_enterprise_runtime::{Deployment, TenantState};
 use ccos_enterprise_skills::{
-    EpisodeObservation, SkillConfig, SkillRegistry, SkillTrialConfig, SkillTrialRegistry,
-    ToolObservation, ToolOutcome,
+    EpisodeObservation, SkillConfig, SkillRegistry, SkillStore, SkillTrialConfig,
+    SkillTrialRegistry, SkillTrialStore, ToolObservation, ToolOutcome,
 };
 use ccos_enterprise_skills_audit::{
     audit_provenance, AuditLimits, AuditQuery, AuditSources, SKILL_AUDIT_PERMISSION,
 };
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
+
+fn bound_sources<'a>(
+    tenant: &str,
+    skills: &'a SkillRegistry,
+    trials: &'a SkillTrialRegistry,
+) -> AuditSources<'a> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir()
+        .join(format!(
+            "ccos-conformance-audit-source-{}-{nonce}",
+            std::process::id()
+        ))
+        .join(tenant);
+    let skill_store = SkillStore::open(&root).unwrap();
+    skill_store.save(skills.snapshot()).unwrap();
+    let trial_store = SkillTrialStore::open(&root).unwrap();
+    trial_store.save(trials.snapshot()).unwrap();
+    let sources = AuditSources::from_stores(&skill_store, &trial_store, skills, trials).unwrap();
+    drop(trial_store);
+    drop(skill_store);
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    sources
+}
 
 fn episode(session: &str, turn: u64, evidence: char) -> EpisodeObservation {
     EpisodeObservation {
@@ -96,11 +122,7 @@ fn operator_audit_is_tenant_scoped_and_newest_first() {
             caller: "operator",
             scope: &scope,
             limits: AuditLimits::default(),
-            sources: AuditSources {
-                tenant: TenantId("acme".into()),
-                skills: &skills,
-                trials: &trials,
-            },
+            sources: bound_sources("acme", &skills, &trials),
             roles: &roles,
         },
         &known,
@@ -133,11 +155,7 @@ fn cross_tenant_audit_is_refused() {
             caller: "operator",
             scope: &foreign,
             limits: AuditLimits::default(),
-            sources: AuditSources {
-                tenant: TenantId("acme".into()),
-                skills: &skills,
-                trials: &trials,
-            },
+            sources: bound_sources("acme", &skills, &trials),
             roles: &roles,
         },
         &known,
@@ -159,11 +177,7 @@ fn audit_denied_without_the_permission() {
             caller: "operator",
             scope: &scope,
             limits: AuditLimits::default(),
-            sources: AuditSources {
-                tenant: TenantId("acme".into()),
-                skills: &skills,
-                trials: &trials,
-            },
+            sources: bound_sources("acme", &skills, &trials),
             roles: &locked,
         },
         &known,
@@ -186,11 +200,7 @@ fn audit_refuses_a_forged_actor_without_the_role() {
             caller: "mallory",
             scope: &scope,
             limits: AuditLimits::default(),
-            sources: AuditSources {
-                tenant: TenantId("acme".into()),
-                skills: &skills,
-                trials: &trials,
-            },
+            sources: bound_sources("acme", &skills, &trials),
             roles: &roles,
         },
         &known,
@@ -235,11 +245,7 @@ fn bounded_audit_reports_truncation_without_hiding_counters() {
                 max_evidence_per_skill: 5,
                 max_skills: 16,
             },
-            sources: AuditSources {
-                tenant: TenantId("acme".into()),
-                skills: &skills,
-                trials: &trials,
-            },
+            sources: bound_sources("acme", &skills, &trials),
             roles: &operator_roles(),
         },
         &known,
@@ -263,11 +269,7 @@ fn report_serializes_schema_versioned_without_raw_material() {
             caller: "operator",
             scope: &scope,
             limits: AuditLimits::default(),
-            sources: AuditSources {
-                tenant: TenantId("acme".into()),
-                skills: &skills,
-                trials: &trials,
-            },
+            sources: bound_sources("acme", &skills, &trials),
             roles: &roles,
         },
         &known,
@@ -304,11 +306,7 @@ fn report_level_skill_cap_is_explicit() {
                 max_evidence_per_skill: 8,
                 max_skills: 1,
             },
-            sources: AuditSources {
-                tenant: TenantId("acme".into()),
-                skills: &skills,
-                trials: &trials,
-            },
+            sources: bound_sources("acme", &skills, &trials),
             roles: &roles,
         },
         &known,

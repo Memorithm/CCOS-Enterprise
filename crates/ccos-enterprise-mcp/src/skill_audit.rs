@@ -8,7 +8,7 @@
 
 use ccos_enterprise_rbac::Permission;
 use ccos_enterprise_runtime::Deployment;
-use ccos_enterprise_skills::{SkillRegistry, SkillTrialRegistry};
+use ccos_enterprise_skills::{SkillConfig, SkillStore, SkillTrialConfig, SkillTrialStore};
 use ccos_enterprise_skills_audit::{audit_provenance, AuditLimits, AuditQuery, AuditSources};
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 use serde_json::{json, Value};
@@ -58,13 +58,21 @@ pub fn skill_audit_result(
     deployment: &Deployment,
     actor: &str,
     tenant: &str,
-    skills: &SkillRegistry,
-    trials: &SkillTrialRegistry,
+    skill_store: &SkillStore,
+    trial_store: &SkillTrialStore,
     arguments: &Value,
 ) -> Result<Value, String> {
     let limit = skill_audit_limit(arguments)?;
     let tenant_id = TenantId(tenant.to_string());
-    let scope = TenantScope::new(tenant_id.clone(), ());
+    let scope = TenantScope::new(tenant_id, ());
+    let skills = skill_store
+        .load_registry(SkillConfig::default())
+        .map_err(|error| format!("cannot load Enterprise skill registry: {error}"))?;
+    let trials = trial_store
+        .load_registry(SkillTrialConfig::default())
+        .map_err(|error| format!("cannot load Enterprise skill trial registry: {error}"))?;
+    let sources = AuditSources::from_stores(skill_store, trial_store, &skills, &trials)
+        .map_err(|error| format!("skill provenance source binding refused: {error}"))?;
     // The tenant set is the deployment's own tenant map; an unknown tenant is
     // refused before any ledger material is touched.
     let known: std::collections::BTreeMap<TenantId, ()> =
@@ -78,11 +86,7 @@ pub fn skill_audit_result(
                 max_evidence_per_skill: limit,
                 max_skills: limit,
             },
-            sources: AuditSources {
-                tenant: tenant_id,
-                skills,
-                trials,
-            },
+            sources,
             roles: deployment.roles(),
         },
         &known,
@@ -173,20 +177,37 @@ mod tests {
         t.allow_model("claude-opus");
         d.add_tenant("memorithm", "acme", t);
         d.assign("operator", "reader");
-        let skills = SkillRegistry::new(ccos_enterprise_skills::SkillConfig::default()).unwrap();
-        let trials =
-            SkillTrialRegistry::new(ccos_enterprise_skills::SkillTrialConfig::default()).unwrap();
+        let root = std::env::temp_dir()
+            .join(format!("ccos-skill-audit-unit-{}", std::process::id()))
+            .join("acme");
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+        let skill_store = SkillStore::open(&root).unwrap();
+        let trial_store = SkillTrialStore::open(&root).unwrap();
         // The deployment role book lacks audit.provenance, so this must be a
         // permission refusal before any ledger material is read.
-        let err = skill_audit_result(&d, "operator", "acme", &skills, &trials, &json!({}))
-            .expect_err("permission is deny by default");
+        let err = skill_audit_result(
+            &d,
+            "operator",
+            "acme",
+            &skill_store,
+            &trial_store,
+            &json!({}),
+        )
+        .expect_err("permission is deny by default");
         assert!(err.contains("refused"), "{err}");
         // Grant the audit permission and the same call reports the empty
         // tenant as a fact.
         d.add_role("auditor", &["audit.provenance"]);
         d.assign("operator", "auditor");
-        let report = skill_audit_result(&d, "operator", "acme", &skills, &trials, &json!({}))
-            .expect("granted audit reports");
+        let report = skill_audit_result(
+            &d,
+            "operator",
+            "acme",
+            &skill_store,
+            &trial_store,
+            &json!({}),
+        )
+        .expect("granted audit reports");
         assert_eq!(report["structuredContent"]["empty"], true);
         assert_eq!(report["structuredContent"]["tenant"], "acme");
     }

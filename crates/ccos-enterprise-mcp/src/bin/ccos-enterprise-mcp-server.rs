@@ -793,8 +793,10 @@ impl Server {
 
         let marker_path = effect_path(&config.state_dir);
         if let Some(mut effect) = read_effect(&marker_path)? {
+            let settled_operator_audit =
+                effect.tool == SKILL_AUDIT_TOOL && effect.state == EffectState::Settled;
             if effect.tenant != config.tenant
-                || effect.actor != actor
+                || (effect.actor != actor && !settled_operator_audit)
                 || effect.model != config.model
                 || effect.cost_tokens != config.call_cost_tokens
             {
@@ -1287,25 +1289,15 @@ impl Server {
                     .state_dir
                     .join(SKILLS_DIR)
                     .join(&self.config.tenant);
-                let result = self
-                    .skill_store
-                    .load_registry(SkillConfig::default())
-                    .map_err(|error| format!("cannot load Enterprise skill registry: {error}"))
-                    .and_then(|registry| {
-                        let trials = SkillTrialStore::open(&skills_root).map_err(|error| {
-                            format!("cannot open Enterprise skill trial store: {error}")
-                        })?;
-                        let trial_registry = trials
-                            .load_registry(SkillTrialConfig::default())
-                            .map_err(|error| {
-                                format!("cannot load Enterprise skill trial registry: {error}")
-                            })?;
+                let result = SkillTrialStore::open(&skills_root)
+                    .map_err(|error| format!("cannot open Enterprise skill trial store: {error}"))
+                    .and_then(|trials| {
                         skill_audit_result(
                             self.front_door.deployment(),
-                            &self.actor,
+                            &request.actor,
                             &self.config.tenant,
-                            &registry,
-                            &trial_registry,
+                            &self.skill_store,
+                            &trials,
                             arguments,
                         )
                     });
@@ -1416,11 +1408,17 @@ impl Server {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let operator_token = params
+            .get("operator_identity_token")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty() && token.len() <= 8192)
+            .ok_or_else(|| (-32001, "operator credential required".to_string()))?;
         let meta = parse_meta(params).map_err(|_| (-32602, "invalid params".to_string()))?;
         let identity = self
             .authenticator
             .authenticate(
-                &self.config.identity_token,
+                operator_token,
                 now().map_err(|_| (-32000, "server time unavailable".to_string()))?,
             )
             .map_err(|error| {
@@ -1428,9 +1426,9 @@ impl Server {
                 (-32001, error.client_message().to_string())
             })?;
         if identity.org().0.as_str() != self.org.as_str()
-            || identity.actor().0.as_str() != self.actor.as_str()
+            || identity.actor().0.as_str() == self.actor.as_str()
             || meta.tenant != self.config.tenant
-            || meta.actor != self.actor
+            || meta.actor != identity.actor().0.as_str()
             || meta.host != OPERATOR_HOST_KIND
             || meta.model != self.config.model
         {
@@ -1861,12 +1859,29 @@ mod tests {
         })
     }
 
+    fn operator_token(actor: &str) -> String {
+        let seed = [7u8; 32];
+        let now = now().unwrap();
+        let claims = IdentityClaims {
+            version: IDENTITY_TOKEN_VERSION,
+            jti: format!("operator-{actor}"),
+            org: "memorithm".into(),
+            actor: actor.into(),
+            audience: "ccos-test".into(),
+            issued_at: now,
+            expires_at: now + 600,
+            not_before: None,
+        };
+        issue_identity_token(&seed, "test-key", &claims).unwrap()
+    }
+
     fn operator_audit(id: u64, actor: &str, request_id: &str, arguments: Value) -> Value {
         json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": OPERATOR_AUDIT_METHOD,
             "params": {
+                "operator_identity_token": operator_token(actor),
                 "arguments": arguments,
                 "_meta": { "ccos": {
                     "tenant_id": "acme",
@@ -2007,6 +2022,7 @@ mod tests {
             let mut admin = d.as_admin("root", "grant operator audit");
             admin.add_role("auditor", &["audit.provenance"]);
             admin.assign("alice", "auditor");
+            admin.assign("operator", "auditor");
         }
         let guessed_from_model = server
             .handle(&call(
@@ -2019,11 +2035,21 @@ mod tests {
             .unwrap();
         assert_eq!(guessed_from_model["result"]["isError"], true);
         assert_eq!(server.front_door.deployment().spent("acme"), Some(0));
+        let dsh_credential_on_operator_rpc = server
+            .handle(&operator_audit(
+                21,
+                "alice",
+                "audit-dsh-credential",
+                json!({"limit": 4}),
+            ))
+            .unwrap();
+        assert_eq!(dsh_credential_on_operator_rpc["error"]["code"], -32001);
+        assert_eq!(server.front_door.deployment().spent("acme"), Some(0));
 
         let admitted = server
             .handle(&operator_audit(
                 2,
-                "alice",
+                "operator",
                 "audit-request-2",
                 json!({"limit": 4}),
             ))
@@ -2052,12 +2078,12 @@ mod tests {
                 let d = server.front_door.deployment_mut();
                 let mut admin = d.as_admin("root", "grant operator audit");
                 admin.add_role("auditor", &["audit.provenance"]);
-                admin.assign("alice", "auditor");
+                admin.assign("operator", "auditor");
             }
             let first = server
                 .handle(&operator_audit(
                     1,
-                    "alice",
+                    "operator",
                     "audit-replay-request",
                     json!({"limit": 4}),
                 ))
@@ -2074,7 +2100,7 @@ mod tests {
             let replay = restarted
                 .handle(&operator_audit(
                     2,
-                    "alice",
+                    "operator",
                     "audit-replay-request",
                     json!({"limit": 99}),
                 ))

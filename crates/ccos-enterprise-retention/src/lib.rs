@@ -215,7 +215,11 @@ impl std::fmt::Display for RetentionError {
         match self {
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Corrupt { path, detail } => {
-                write!(f, "{}: retention state is corrupt: {detail}", path.display())
+                write!(
+                    f,
+                    "{}: retention state is corrupt: {detail}",
+                    path.display()
+                )
             }
             Self::UnsupportedSchema { found } => write!(f, "unsupported retention schema {found}"),
             Self::UnknownTenant { tenant } => write!(f, "unknown tenant {tenant:?}"),
@@ -224,7 +228,9 @@ impl std::fmt::Display for RetentionError {
             Self::LimitOutOfRange { found, max } => {
                 write!(f, "retention limit {found} is outside 1..={max}")
             }
-            Self::ApprovalRequired { detail } => write!(f, "retention policy approval denied: {detail}"),
+            Self::ApprovalRequired { detail } => {
+                write!(f, "retention policy approval denied: {detail}")
+            }
         }
     }
 }
@@ -238,25 +244,22 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> RetentionError + '_ {
     }
 }
 
-/// SHA-256 for the small canonical policy artifact. Kept local so the crate's
-/// dependency surface does not grow merely to derive the approval identity.
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     const H0: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     let bit_len = (bytes.len() as u64).wrapping_mul(8);
@@ -328,7 +331,6 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Canonical SHA-256 identity used by the human-approval ledger.
 pub fn policy_artifact_hash(policy: &RetentionPolicy) -> Result<String, RetentionError> {
     policy.validate()?;
     let bytes = serde_json::to_vec(policy).map_err(|error| RetentionError::InvalidPolicy {
@@ -388,9 +390,10 @@ impl RetentionStore {
     }
 
     fn persist_policy(&self, policy: &RetentionPolicy) -> Result<(), RetentionError> {
-        let bytes = serde_json::to_vec_pretty(policy).map_err(|error| RetentionError::InvalidPolicy {
-            detail: format!("cannot serialize retention policy: {error}"),
-        })?;
+        let bytes =
+            serde_json::to_vec_pretty(policy).map_err(|error| RetentionError::InvalidPolicy {
+                detail: format!("cannot serialize retention policy: {error}"),
+            })?;
         let temporary = self.root.join(TEMP_FILE);
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -410,9 +413,6 @@ impl RetentionStore {
         Ok(())
     }
 
-    /// Persist a sensitive policy only after the supplied product approval gate
-    /// authorizes the exact tenant/action/artifact tuple. There is deliberately
-    /// no public unchecked writer.
     pub fn save_policy_with_approval<F>(
         &self,
         policy: &RetentionPolicy,
@@ -726,7 +726,8 @@ mod tests {
 
     #[test]
     fn ledger_rejects_cross_tenant_records() {
-        let dir = std::env::temp_dir().join(format!("ccos-retention-tenant-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("ccos-retention-tenant-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = RetentionStore::open(&dir).unwrap();
         let policy = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
@@ -750,7 +751,8 @@ mod tests {
 
     #[test]
     fn policy_writer_fails_closed_when_approval_callback_denies() {
-        let dir = std::env::temp_dir().join(format!("ccos-retention-approval-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("ccos-retention-approval-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = RetentionStore::open(&dir).unwrap();
         let policy = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
@@ -760,14 +762,18 @@ mod tests {
             assert_eq!(hash.len(), 64);
             Err("runtime approval gate denied".into())
         });
-        assert!(matches!(result, Err(RetentionError::ApprovalRequired { .. })));
+        assert!(matches!(
+            result,
+            Err(RetentionError::ApprovalRequired { .. })
+        ));
         assert!(store.load_policy().unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn append_is_idempotent_and_repairs_torn_tail() {
-        let dir = std::env::temp_dir().join(format!("ccos-retention-replay-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("ccos-retention-replay-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = RetentionStore::open(&dir).unwrap();
         let policy = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
@@ -782,7 +788,9 @@ mod tests {
             action: EnforcementAction::Invalidate,
             at_unix: 100,
         };
-        store.append_records(&[record.clone(), record.clone()]).unwrap();
+        store
+            .append_records(&[record.clone(), record.clone()])
+            .unwrap();
         store.append_records(&[record]).unwrap();
         assert_eq!(store.load_ledger().unwrap().len(), 1);
 

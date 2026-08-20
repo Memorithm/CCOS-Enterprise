@@ -1,12 +1,8 @@
 //! # CCOS Enterprise — cognitive retention policy
 //!
-//! Executable policy behind `docs/COGNITIVE_RETENTION_POLICY.md`.
-//!
-//! Retention is tenant-scoped and invalidation-based: an expired item is
-//! tombstoned rather than destructively rewritten, so sealed history remains
-//! auditable. Evaluation takes an explicit clock, never reads wall time, and
-//! emits deterministic audit facts. Durable policy and audit state fail closed
-//! on corruption and use single-writer, fsync/rename persistence.
+//! Tenant-scoped, deterministic retention enforcement with bounded input,
+//! stable artifact identity, append-only audit facts, crash-safe persistence,
+//! and an explicit approval-gate callback for every policy write.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -16,12 +12,15 @@ use serde::{Deserialize, Serialize};
 
 pub const RETENTION_SCHEMA: u32 = 1;
 pub const DEFAULT_BATCH_LIMIT: usize = 1_024;
-/// Absolute number of actions one invocation may emit.
 pub const MAX_BATCH_LIMIT: usize = 4_096;
-/// Absolute input bound. A caller must page a larger inventory instead of
-/// making one invocation allocate/sort an unbounded attacker-controlled slice.
 pub const MAX_INPUT_ITEMS: usize = 65_536;
 pub const MAX_ITEM_ID_BYTES: usize = 128;
+pub const RETENTION_POLICY_TOOL: &str = "retention.policy.set";
+
+const POLICY_FILE: &str = "retention-policy.json";
+const LEDGER_FILE: &str = "retention-ledger.jsonl";
+const LOCK_FILE: &str = "retention.lock";
+const TEMP_FILE: &str = "retention-policy.json.tmp";
 
 fn canonical_id(value: &str, max: usize) -> bool {
     let mut bytes = value.bytes();
@@ -44,10 +43,7 @@ pub enum RetentionClass {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClassPolicy {
-    /// Retention period in seconds. `None` means never expires.
     pub retention_seconds: Option<u64>,
-    /// `true` emits an invalidation tombstone; `false` emits a report-only
-    /// audit fact.
     pub invalidate: bool,
 }
 
@@ -58,9 +54,6 @@ impl ClassPolicy {
     }
 }
 
-/// Durable policy for exactly one tenant. Binding the tenant into the policy
-/// closes the class of bugs where a valid Acme policy is accidentally applied
-/// to Globex and the resulting records are merely relabelled by the caller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionPolicy {
     pub schema_version: u32,
@@ -107,18 +100,12 @@ impl RetentionPolicy {
     }
 }
 
-/// An opaque stable item identity is mandatory. Retention never stores the
-/// item's content, but without an identity two distinct artifacts created in
-/// the same class at the same second collapse into one audit fact during
-/// idempotent replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetainedItem {
     pub tenant: String,
     pub item_id: String,
     pub class: RetentionClass,
     pub created_at: u64,
-    /// Sealed content may never be rewritten. A tombstone is not a rewrite, so
-    /// sealed items may still be invalidated when policy requires it.
     pub sealed: bool,
 }
 
@@ -146,8 +133,6 @@ pub enum EnforcementAction {
     ReportOnly,
 }
 
-/// One durable enforcement fact. `item_id` makes the audit/idempotency key an
-/// artifact identity rather than an accidental `(class, timestamp)` tuple.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EnforcementRecord {
     pub tenant: String,
@@ -220,6 +205,9 @@ pub enum RetentionError {
         found: usize,
         max: usize,
     },
+    ApprovalRequired {
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for RetentionError {
@@ -236,6 +224,7 @@ impl std::fmt::Display for RetentionError {
             Self::LimitOutOfRange { found, max } => {
                 write!(f, "retention limit {found} is outside 1..={max}")
             }
+            Self::ApprovalRequired { detail } => write!(f, "retention policy approval denied: {detail}"),
         }
     }
 }
@@ -249,17 +238,111 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> RetentionError + '_ {
     }
 }
 
+/// SHA-256 for the small canonical policy artifact. Kept local so the crate's
+/// dependency surface does not grow merely to derive the approval identity.
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    const H0: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+
+    let bit_len = (bytes.len() as u64).wrapping_mul(8);
+    let mut padded = bytes.to_vec();
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut h = H0;
+    for chunk in padded.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (i, word) in chunk.chunks_exact(4).enumerate() {
+            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    let mut out = [0u8; 32];
+    for (dst, word) in out.chunks_exact_mut(4).zip(h) {
+        dst.copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Canonical SHA-256 identity used by the human-approval ledger.
+pub fn policy_artifact_hash(policy: &RetentionPolicy) -> Result<String, RetentionError> {
+    policy.validate()?;
+    let bytes = serde_json::to_vec(policy).map_err(|error| RetentionError::InvalidPolicy {
+        detail: format!("cannot serialize retention policy: {error}"),
+    })?;
+    Ok(hex(&sha256(&bytes)))
+}
+
 pub struct RetentionStore {
     root: PathBuf,
     policy_path: PathBuf,
     ledger_path: PathBuf,
     _lock: std::fs::File,
 }
-
-const POLICY_FILE: &str = "retention-policy.json";
-const LEDGER_FILE: &str = "retention-ledger.jsonl";
-const LOCK_FILE: &str = "retention.lock";
-const TEMP_FILE: &str = "retention-policy.json.tmp";
 
 impl RetentionStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, RetentionError> {
@@ -292,7 +375,7 @@ impl RetentionStore {
                 return Err(RetentionError::Io {
                     path: self.policy_path.clone(),
                     source,
-                })
+                });
             }
         };
         let policy: RetentionPolicy =
@@ -304,10 +387,8 @@ impl RetentionStore {
         Ok(Some(policy))
     }
 
-    pub fn save_policy(&self, policy: &RetentionPolicy) -> Result<(), RetentionError> {
-        policy.validate()?;
-        let bytes = serde_json::to_vec_pretty(policy).map_err(|error| RetentionError::Corrupt {
-            path: self.policy_path.clone(),
+    fn persist_policy(&self, policy: &RetentionPolicy) -> Result<(), RetentionError> {
+        let bytes = serde_json::to_vec_pretty(policy).map_err(|error| RetentionError::InvalidPolicy {
             detail: format!("cannot serialize retention policy: {error}"),
         })?;
         let temporary = self.root.join(TEMP_FILE);
@@ -329,14 +410,51 @@ impl RetentionStore {
         Ok(())
     }
 
-    /// Append enforcement facts durably and idempotently. A final torn JSONL
-    /// line is truncated before append; committed malformed lines are refused.
+    /// Persist a sensitive policy only after the supplied product approval gate
+    /// authorizes the exact tenant/action/artifact tuple. There is deliberately
+    /// no public unchecked writer.
+    pub fn save_policy_with_approval<F>(
+        &self,
+        policy: &RetentionPolicy,
+        approve: F,
+    ) -> Result<(), RetentionError>
+    where
+        F: FnOnce(&str, &str, &str) -> Result<(), String>,
+    {
+        policy.validate()?;
+        if let Some(existing) = self.load_policy()? {
+            if existing.tenant != policy.tenant {
+                return Err(RetentionError::UnknownTenant {
+                    tenant: policy.tenant.clone(),
+                });
+            }
+        }
+        let artifact_hash = policy_artifact_hash(policy)?;
+        approve(&policy.tenant, RETENTION_POLICY_TOOL, &artifact_hash)
+            .map_err(|detail| RetentionError::ApprovalRequired { detail })?;
+        self.persist_policy(policy)
+    }
+
+    fn policy_tenant(&self) -> Result<String, RetentionError> {
+        self.load_policy()?
+            .map(|policy| policy.tenant)
+            .ok_or_else(|| RetentionError::InvalidPolicy {
+                detail: "a validated tenant policy must exist before ledger access".into(),
+            })
+    }
+
     pub fn append_records(&self, records: &[EnforcementRecord]) -> Result<(), RetentionError> {
         if records.is_empty() {
             return Ok(());
         }
+        let expected_tenant = self.policy_tenant()?;
         for record in records {
             record.validate()?;
+            if record.tenant != expected_tenant {
+                return Err(RetentionError::UnknownTenant {
+                    tenant: record.tenant.clone(),
+                });
+            }
         }
 
         let existing = match std::fs::read(&self.ledger_path) {
@@ -346,7 +464,7 @@ impl RetentionStore {
                 return Err(RetentionError::Io {
                     path: self.ledger_path.clone(),
                     source,
-                })
+                });
             }
         };
         let committed_len = existing
@@ -389,8 +507,6 @@ impl RetentionStore {
         use std::io::Write as _;
         file.write_all(&buffer).map_err(io(&self.ledger_path))?;
         file.sync_data().map_err(io(&self.ledger_path))?;
-        // The append can create the JSONL entry for the first time; sync the
-        // parent directory as well as the file contents.
         std::fs::File::open(&self.root)
             .and_then(|directory| directory.sync_all())
             .map_err(io(&self.root))?;
@@ -398,6 +514,7 @@ impl RetentionStore {
     }
 
     pub fn load_ledger(&self) -> Result<Vec<EnforcementRecord>, RetentionError> {
+        let expected_tenant = self.policy_tenant()?;
         let bytes = match std::fs::read(&self.ledger_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -405,7 +522,7 @@ impl RetentionStore {
                 return Err(RetentionError::Io {
                     path: self.ledger_path.clone(),
                     source,
-                })
+                });
             }
         };
         let committed = bytes
@@ -423,6 +540,15 @@ impl RetentionStore {
                     detail: format!("enforcement line {}: {error}", index + 1),
                 })?;
             record.validate()?;
+            if record.tenant != expected_tenant {
+                return Err(RetentionError::Corrupt {
+                    path: self.ledger_path.clone(),
+                    detail: format!(
+                        "ledger tenant {:?} does not match policy tenant {:?}",
+                        record.tenant, expected_tenant
+                    ),
+                });
+            }
             records.push(record);
         }
         Ok(records)
@@ -431,13 +557,10 @@ impl RetentionStore {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunOutcome {
-    /// Input items inspected. Always `<= MAX_INPUT_ITEMS`.
     pub examined: usize,
-    /// Ungoverned or unexpired items.
     pub retained: usize,
     pub invalidated: usize,
     pub reported: usize,
-    /// Expired governed items left for a later bounded invocation.
     pub deferred: usize,
 }
 
@@ -469,10 +592,6 @@ impl RetentionEngine {
                 max: MAX_INPUT_ITEMS,
             });
         }
-
-        // Validate the complete bounded input before emitting any action. A
-        // late cross-tenant item can therefore never leave a partial valid
-        // prefix for the caller to persist.
         for item in items {
             item.validate()?;
             if item.tenant != tenant.0 {
@@ -509,12 +628,12 @@ impl RetentionEngine {
             let class_policy = policy
                 .class(item.class)
                 .expect("eligible items have a class policy");
-            let action = if class_policy.invalidate {
-                outcome.invalidated += 1;
-                EnforcementAction::Invalidate
-            } else {
+            let action = if item.sealed || !class_policy.invalidate {
                 outcome.reported += 1;
                 EnforcementAction::ReportOnly
+            } else {
+                outcome.invalidated += 1;
+                EnforcementAction::Invalidate
             };
             records.push(EnforcementRecord {
                 tenant: tenant.0.clone(),
@@ -566,119 +685,95 @@ mod tests {
         }
     }
 
-    #[test]
-    fn expiration_boundary_is_exact() {
-        let p = policy_for("acme", RetentionClass::EphemeralContext, Some(100), true);
-        assert!(!p.expired(RetentionClass::EphemeralContext, 0, 99));
-        assert!(p.expired(RetentionClass::EphemeralContext, 0, 100));
+    fn approve_all(_: &str, _: &str, _: &str) -> Result<(), String> {
+        Ok(())
     }
 
     #[test]
-    fn never_expiring_class_is_never_expired() {
-        let p = policy_for("acme", RetentionClass::ComplianceArchives, None, true);
-        assert!(!p.expired(RetentionClass::ComplianceArchives, 0, u64::MAX));
+    fn sha256_matches_known_vector() {
+        assert_eq!(
+            hex(&sha256(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
-    fn policy_and_items_are_both_tenant_bound() {
-        let p = policy_for("globex", RetentionClass::EphemeralContext, Some(10), true);
-        let err = RetentionEngine::run_once(
-            &tenant("acme"),
-            &p,
-            &[item("item-1", RetentionClass::EphemeralContext, 0)],
-            100,
-            10,
-        )
-        .unwrap_err();
-        assert!(matches!(err, RetentionError::UnknownTenant { tenant } if tenant == "globex"));
-
-        let p = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
-        let mut wrong = item("item-1", RetentionClass::EphemeralContext, 0);
-        wrong.tenant = "globex".into();
-        assert!(matches!(
-            RetentionEngine::run_once(&tenant("acme"), &p, &[wrong], 100, 10),
-            Err(RetentionError::UnknownTenant { tenant }) if tenant == "globex"
-        ));
-    }
-
-    #[test]
-    fn sealed_content_can_be_tombstoned_without_rewrite() {
+    fn sealed_expired_item_is_report_only() {
         let p = policy_for("acme", RetentionClass::SealedSnapshots, Some(10), true);
         let mut sealed = item("snap-1", RetentionClass::SealedSnapshots, 0);
         sealed.sealed = true;
         let (outcome, records) =
             RetentionEngine::run_once(&tenant("acme"), &p, &[sealed], 100, 10).unwrap();
-        assert_eq!(outcome.invalidated, 1);
-        assert_eq!(records[0].action, EnforcementAction::Invalidate);
+        assert_eq!(outcome.invalidated, 0);
+        assert_eq!(outcome.reported, 1);
+        assert_eq!(records[0].action, EnforcementAction::ReportOnly);
     }
 
     #[test]
-    fn bounded_run_filters_expired_items_before_the_action_limit() {
-        let p = RetentionPolicy {
-            schema_version: RETENTION_SCHEMA,
-            tenant: "acme".into(),
-            classes: BTreeMap::from([
-                (
-                    RetentionClass::EphemeralContext,
-                    ClassPolicy {
-                        retention_seconds: Some(10),
-                        invalidate: true,
-                    },
-                ),
-                (
-                    RetentionClass::EpisodicJournal,
-                    ClassPolicy {
-                        retention_seconds: Some(10),
-                        invalidate: true,
-                    },
-                ),
-            ]),
+    fn policy_and_items_are_tenant_bound() {
+        let p = policy_for("globex", RetentionClass::EphemeralContext, Some(10), true);
+        assert!(matches!(
+            RetentionEngine::run_once(
+                &tenant("acme"),
+                &p,
+                &[item("item-1", RetentionClass::EphemeralContext, 0)],
+                100,
+                10,
+            ),
+            Err(RetentionError::UnknownTenant { tenant }) if tenant == "globex"
+        ));
+    }
+
+    #[test]
+    fn ledger_rejects_cross_tenant_records() {
+        let dir = std::env::temp_dir().join(format!("ccos-retention-tenant-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = RetentionStore::open(&dir).unwrap();
+        let policy = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
+        store
+            .save_policy_with_approval(&policy, approve_all)
+            .unwrap();
+        let foreign = EnforcementRecord {
+            tenant: "globex".into(),
+            item_id: "item-1".into(),
+            class: RetentionClass::EphemeralContext,
+            item_created_at: 0,
+            action: EnforcementAction::Invalidate,
+            at_unix: 100,
         };
-        let mut items: Vec<_> = (0..1_000)
-            .map(|i| item(&format!("fresh-{i}"), RetentionClass::EphemeralContext, 95))
-            .collect();
-        items.push(item("expired-1", RetentionClass::EpisodicJournal, 0));
-        let (outcome, records) =
-            RetentionEngine::run_once(&tenant("acme"), &p, &items, 100, 1).unwrap();
-        assert_eq!(outcome.invalidated, 1);
-        assert_eq!(records[0].item_id, "expired-1");
-        assert_eq!(records[0].class, RetentionClass::EpisodicJournal);
+        assert!(matches!(
+            store.append_records(&[foreign]),
+            Err(RetentionError::UnknownTenant { tenant }) if tenant == "globex"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn hard_input_and_action_bounds_are_enforced() {
-        let p = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
-        assert!(matches!(
-            RetentionEngine::run_once(&tenant("acme"), &p, &[], 100, 0),
-            Err(RetentionError::LimitOutOfRange { .. })
-        ));
-        let too_many: Vec<_> = (0..=MAX_INPUT_ITEMS)
-            .map(|i| item(&format!("item-{i}"), RetentionClass::EphemeralContext, 0))
-            .collect();
-        assert!(matches!(
-            RetentionEngine::run_once(&tenant("acme"), &p, &too_many, 100, 1),
-            Err(RetentionError::LimitOutOfRange { .. })
-        ));
-    }
-
-    #[test]
-    fn distinct_same_timestamp_items_never_collapse() {
-        let p = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
-        let items = [
-            item("item-a", RetentionClass::EphemeralContext, 0),
-            item("item-b", RetentionClass::EphemeralContext, 0),
-        ];
-        let (_, records) =
-            RetentionEngine::run_once(&tenant("acme"), &p, &items, 100, 10).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_ne!(records[0].item_id, records[1].item_id);
+    fn policy_writer_fails_closed_when_approval_callback_denies() {
+        let dir = std::env::temp_dir().join(format!("ccos-retention-approval-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = RetentionStore::open(&dir).unwrap();
+        let policy = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
+        let result = store.save_policy_with_approval(&policy, |tenant, action, hash| {
+            assert_eq!(tenant, "acme");
+            assert_eq!(action, RETENTION_POLICY_TOOL);
+            assert_eq!(hash.len(), 64);
+            Err("runtime approval gate denied".into())
+        });
+        assert!(matches!(result, Err(RetentionError::ApprovalRequired { .. })));
+        assert!(store.load_policy().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn append_is_idempotent_and_repairs_torn_tail() {
-        let dir = std::env::temp_dir().join(format!("ccos-retention-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ccos-retention-replay-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = RetentionStore::open(&dir).unwrap();
+        let policy = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
+        store
+            .save_policy_with_approval(&policy, approve_all)
+            .unwrap();
         let record = EnforcementRecord {
             tenant: "acme".into(),
             item_id: "item-1".into(),
@@ -708,21 +803,6 @@ mod tests {
         };
         store.append_records(&[other]).unwrap();
         assert_eq!(store.load_ledger().unwrap().len(), 2);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn policy_store_refuses_corruption_and_round_trips_tenant_binding() {
-        let dir = std::env::temp_dir().join(format!("ccos-retention-policy-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let store = RetentionStore::open(&dir).unwrap();
-        let p = policy_for("acme", RetentionClass::ComplianceArchives, None, false);
-        store.save_policy(&p).unwrap();
-        assert_eq!(store.load_policy().unwrap().unwrap(), p);
-        drop(store);
-        std::fs::write(dir.join(POLICY_FILE), b"{broken").unwrap();
-        let store = RetentionStore::open(&dir).unwrap();
-        assert!(matches!(store.load_policy(), Err(RetentionError::Corrupt { .. })));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

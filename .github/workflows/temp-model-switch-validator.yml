@@ -26,12 +26,14 @@ jobs:
           cp .ci/model-switch-hardening.py "$RUNNER_TEMP/model-switch-hardening.py"
           cp .ci/model-switch-conformance.py "$RUNNER_TEMP/model-switch-conformance.py"
           cp .ci/model-switch-isolation.py "$RUNNER_TEMP/model-switch-isolation.py"
+          cp .ci/model-switch-stress.py "$RUNNER_TEMP/model-switch-stress.py"
           git fetch origin fix/model-switch-replacement
           git checkout --detach origin/fix/model-switch-replacement
           test "$(git rev-parse HEAD)" = "1ca496c3d88670e5362e0464fe41b3c440929056"
           python3 "$RUNNER_TEMP/model-switch-hardening.py"
           python3 "$RUNNER_TEMP/model-switch-conformance.py"
           python3 "$RUNNER_TEMP/model-switch-isolation.py"
+          python3 "$RUNNER_TEMP/model-switch-stress.py"
           cargo fmt --all
           cargo fmt --all -- --check
           cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
@@ -42,10 +44,11 @@ jobs:
           test ! -e .ci/model-switch-hardening.py
           test ! -e .ci/model-switch-conformance.py
           test ! -e .ci/model-switch-isolation.py
+          test ! -e .ci/model-switch-stress.py
           git status --short
-          git add crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-runtime/src/model_switch.rs tests/ccos-enterprise-conformance/tests/governed_path.rs tests/ccos-enterprise-conformance/tests/isolation.rs
+          git add crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-runtime/src/model_switch.rs tests/ccos-enterprise-conformance/tests/governed_path.rs tests/ccos-enterprise-conformance/tests/isolation.rs tests/ccos-enterprise-conformance/tests/stress_budget_property.rs
           test -n "$(git diff --cached --name-only)"
-          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = "crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-runtime/src/model_switch.rs tests/ccos-enterprise-conformance/tests/governed_path.rs tests/ccos-enterprise-conformance/tests/isolation.rs "
+          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = "crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-runtime/src/model_switch.rs tests/ccos-enterprise-conformance/tests/governed_path.rs tests/ccos-enterprise-conformance/tests/isolation.rs tests/ccos-enterprise-conformance/tests/stress_budget_property.rs "
           git config user.name "MEMOPERF"
           git config user.email "contact@checkupauto.fr"
           git commit -m "fix(runtime): harden governed model switch"

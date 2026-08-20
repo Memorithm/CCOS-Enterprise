@@ -178,7 +178,6 @@ mod tests {
         assert!(err.contains("refused"), "{err}");
         // Grant the audit permission and the same call reports the empty
         // tenant as a fact.
-        let mut d = d;
         d.add_role("auditor", &["audit.provenance"]);
         d.assign("operator", "auditor");
         let report = skill_audit_result(&d, "operator", "acme", &skills, &trials, &json!({}))

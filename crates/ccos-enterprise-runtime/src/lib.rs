@@ -2601,7 +2601,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        assert!(recorded.starts_with("approval-v1-"));
+        assert!(recorded.starts_with("approval-v2-"));
         let alice = actor("memorithm", "alice", AuthStrength::Token);
         let req = request("acme", "alice", "policy.set", "r-approved");
         let call = Call {

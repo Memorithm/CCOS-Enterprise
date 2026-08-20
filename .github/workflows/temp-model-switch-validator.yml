@@ -50,6 +50,7 @@ jobs:
           cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
           cargo test -p ccos-enterprise-runtime --all-features
           cargo test -p ccos-enterprise-conformance --test stress_concurrency_chaos --release -- --nocapture
+          cargo test -p ccos-enterprise-conformance --test stress_rbac_scale --release role_grants_are_deployment_global_not_tenant_scoped -- --exact
           cargo test -p ccos-enterprise-conformance --all-features --release
           git diff --check
           test ! -e .ci/model-switch-hardening.py
@@ -58,9 +59,9 @@ jobs:
           test ! -e .ci/model-switch-stress.py
           test ! -e .ci/model-switch-chaos.py
           git status --short
-          git add crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-runtime/src/model_switch.rs tests/ccos-enterprise-conformance/tests/governed_path.rs tests/ccos-enterprise-conformance/tests/isolation.rs tests/ccos-enterprise-conformance/tests/stress_budget_property.rs tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs
+          git add crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-runtime/src/model_switch.rs tests/ccos-enterprise-conformance/tests/governed_path.rs tests/ccos-enterprise-conformance/tests/isolation.rs tests/ccos-enterprise-conformance/tests/stress_budget_property.rs tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs tests/ccos-enterprise-conformance/tests/stress_rbac_scale.rs
           test -n "$(git diff --cached --name-only)"
-          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = "crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-runtime/src/model_switch.rs tests/ccos-enterprise-conformance/tests/governed_path.rs tests/ccos-enterprise-conformance/tests/isolation.rs tests/ccos-enterprise-conformance/tests/stress_budget_property.rs tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs "
+          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = "crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-runtime/src/model_switch.rs tests/ccos-enterprise-conformance/tests/governed_path.rs tests/ccos-enterprise-conformance/tests/isolation.rs tests/ccos-enterprise-conformance/tests/stress_budget_property.rs tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs tests/ccos-enterprise-conformance/tests/stress_rbac_scale.rs "
           git config user.name "MEMOPERF"
           git config user.email "contact@checkupauto.fr"
           git commit -m "fix(runtime): harden governed model switch"

@@ -28,6 +28,8 @@
 
 use std::collections::BTreeMap;
 
+pub mod prometheus;
+
 /// The out-of-band gauge names, in export order. Every one starts with `_`,
 /// which [`CounterRegistry::is_valid_name`] refuses, so `inc` can never mint
 /// or collide with them.

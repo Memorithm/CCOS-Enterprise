@@ -807,10 +807,11 @@ mod tests {
         let mut registry = ApprovalRegistry::new();
         let id = registry.record(request(100, Some(200))).unwrap();
         let tenant = TenantId("acme".into());
+        let artifact_hash = artifact(1);
         let query = |now| ApprovalQuery {
             tenant: &tenant,
             action: "tenant.delete",
-            artifact_hash: &artifact(1),
+            artifact_hash: &artifact_hash,
             now,
         };
         assert_eq!(registry.evaluate(&query(199)), GateOutcome::Approved);

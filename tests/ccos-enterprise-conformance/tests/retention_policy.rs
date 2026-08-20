@@ -1,14 +1,18 @@
 //! The composed cognitive-retention contract: tenant-scoped policy,
-//! deterministic enforcement with an explicit clock, invalidation rather than
-//! destructive rewriting, stable artifact identity, bounded processing, audit
-//! completeness, and crash-safe continuation.
+//! deterministic enforcement with an explicit clock, report-only handling for
+//! sealed history, stable artifact identity, bounded processing, runtime human
+//! approval for policy writes, audit completeness, and crash-safe continuation.
 
 use std::collections::BTreeMap;
 
+use ccos_enterprise_approval::{ApprovalDecision, ApprovalRequest};
+use ccos_enterprise_auth::AuthStrength;
 use ccos_enterprise_retention::{
-    EnforcementAction, EnforcementRecord, RetainedItem, RetentionClass, RetentionEngine,
-    RetentionError, RetentionPolicy, RetentionStore, MAX_INPUT_ITEMS, RETENTION_SCHEMA,
+    policy_artifact_hash, EnforcementAction, EnforcementRecord, RetainedItem, RetentionClass,
+    RetentionEngine, RetentionError, RetentionPolicy, RetentionStore, MAX_INPUT_ITEMS,
+    RETENTION_POLICY_TOOL, RETENTION_SCHEMA,
 };
+use ccos_enterprise_runtime::{actor, request, two_tenant_deployment, Call};
 use ccos_enterprise_tenancy::TenantId;
 
 fn policy_for(
@@ -65,16 +69,16 @@ fn enforcement_is_deterministic_replayable_and_audited() {
 }
 
 #[test]
-fn sealed_history_is_invalidated_without_rewriting_content() {
+fn sealed_history_is_reported_and_left_in_place() {
     let tenant = TenantId("acme".into());
     let policy = policy_for("acme", RetentionClass::SealedSnapshots, Some(30), true);
     let mut sealed = item("snapshot-1", RetentionClass::SealedSnapshots, 0);
     sealed.sealed = true;
     let (outcome, records) =
         RetentionEngine::run_once(&tenant, &policy, &[sealed], 100, 100).unwrap();
-    assert_eq!(outcome.invalidated, 1);
-    assert_eq!(outcome.reported, 0);
-    assert_eq!(records[0].action, EnforcementAction::Invalidate);
+    assert_eq!(outcome.invalidated, 0);
+    assert_eq!(outcome.reported, 1);
+    assert_eq!(records[0].action, EnforcementAction::ReportOnly);
     assert_eq!(records[0].item_id, "snapshot-1");
 }
 
@@ -153,42 +157,123 @@ fn bounded_processing_enforces_action_and_input_caps() {
 }
 
 #[test]
-fn store_round_trip_preserves_tenant_policy_and_audit_identity() {
-    let dir =
-        std::env::temp_dir().join(format!("ccos-retention-conformance-{}", std::process::id()));
+fn runtime_approval_gate_denies_policy_write_before_disk_mutation() {
+    let dir = std::env::temp_dir().join(format!(
+        "ccos-retention-conformance-denied-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
-    {
-        let store = RetentionStore::open(&dir).unwrap();
-        store
-            .save_policy(&policy_for(
-                "acme",
-                RetentionClass::EpisodicJournal,
-                Some(30),
-                true,
-            ))
-            .unwrap();
-        store
-            .append_records(&[EnforcementRecord {
-                tenant: "acme".into(),
-                item_id: "episode-0".into(),
-                class: RetentionClass::EpisodicJournal,
-                item_created_at: 0,
-                action: EnforcementAction::Invalidate,
-                at_unix: 100,
-            }])
-            .unwrap();
-    }
-    {
-        let store = RetentionStore::open(&dir).unwrap();
-        let loaded = store.load_policy().unwrap().unwrap();
-        assert_eq!(loaded.tenant, "acme");
-        assert!(loaded.expired(RetentionClass::EpisodicJournal, 0, 30));
-        assert!(!loaded.expired(RetentionClass::EpisodicJournal, 0, 29));
-        let ledger = store.load_ledger().unwrap();
-        assert_eq!(ledger.len(), 1);
-        assert_eq!(ledger[0].action, EnforcementAction::Invalidate);
-        assert_eq!(ledger[0].item_id, "episode-0");
-    }
+    let store = RetentionStore::open(&dir).unwrap();
+    let policy = policy_for("acme", RetentionClass::EpisodicJournal, Some(30), true);
+
+    let mut deployment = two_tenant_deployment();
+    deployment
+        .govern_tool(RETENTION_POLICY_TOOL, "policy.admin")
+        .require_approval(RETENTION_POLICY_TOOL);
+    let verified = actor("memorithm", "alice", AuthStrength::Token);
+    let gateway_request = request("acme", "alice", RETENTION_POLICY_TOOL, "retention-denied");
+    let call = Call {
+        actor: &verified,
+        request: &gateway_request,
+        model: "claude-opus",
+        cost_tokens: 0,
+        variant: None,
+        justification: Some("change tenant retention policy"),
+    };
+
+    let result = store.save_policy_with_approval(&policy, |tenant, action, artifact_hash| {
+        assert_eq!(tenant, "acme");
+        assert_eq!(action, RETENTION_POLICY_TOOL);
+        deployment
+            .approval_gate(&call, artifact_hash)
+            .map_err(|refusal| format!("{refusal:?}"))
+    });
+    assert!(matches!(result, Err(RetentionError::ApprovalRequired { .. })));
+    assert!(store.load_policy().unwrap().is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn approved_policy_write_binds_runtime_ledger_to_exact_artifact() {
+    let dir = std::env::temp_dir().join(format!(
+        "ccos-retention-conformance-approved-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = RetentionStore::open(&dir).unwrap();
+    let policy = policy_for("acme", RetentionClass::EpisodicJournal, Some(30), true);
+    let artifact_hash = policy_artifact_hash(&policy).unwrap();
+
+    let mut deployment = two_tenant_deployment();
+    deployment
+        .govern_tool(RETENTION_POLICY_TOOL, "policy.admin")
+        .require_approval(RETENTION_POLICY_TOOL);
+    deployment
+        .record_approval(
+            ApprovalRequest::new(
+                TenantId("acme".into()),
+                RETENTION_POLICY_TOOL,
+                &artifact_hash,
+                "operator@example.test",
+                ApprovalDecision::Approved,
+                0,
+                None,
+                "approved retention policy change",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let verified = actor("memorithm", "alice", AuthStrength::Token);
+    let gateway_request = request("acme", "alice", RETENTION_POLICY_TOOL, "retention-approved");
+    let call = Call {
+        actor: &verified,
+        request: &gateway_request,
+        model: "claude-opus",
+        cost_tokens: 0,
+        variant: None,
+        justification: Some("change tenant retention policy"),
+    };
+
+    store
+        .save_policy_with_approval(&policy, |tenant, action, candidate_hash| {
+            assert_eq!(tenant, "acme");
+            assert_eq!(action, RETENTION_POLICY_TOOL);
+            assert_eq!(candidate_hash, artifact_hash);
+            deployment
+                .approval_gate(&call, candidate_hash)
+                .map_err(|refusal| format!("{refusal:?}"))
+        })
+        .unwrap();
+    assert_eq!(store.load_policy().unwrap().unwrap(), policy);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ledger_rejects_cross_tenant_records_against_stored_policy() {
+    let dir = std::env::temp_dir().join(format!(
+        "ccos-retention-conformance-tenant-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = RetentionStore::open(&dir).unwrap();
+    let policy = policy_for("acme", RetentionClass::EpisodicJournal, Some(30), true);
+    store
+        .save_policy_with_approval(&policy, |_, _, _| Ok(()))
+        .unwrap();
+
+    let foreign = EnforcementRecord {
+        tenant: "globex".into(),
+        item_id: "episode-0".into(),
+        class: RetentionClass::EpisodicJournal,
+        item_created_at: 0,
+        action: EnforcementAction::Invalidate,
+        at_unix: 100,
+    };
+    assert!(matches!(
+        store.append_records(&[foreign]),
+        Err(RetentionError::UnknownTenant { tenant }) if tenant == "globex"
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -209,12 +294,17 @@ fn crash_continuation_replays_without_duplicate_audit_facts() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     let store = RetentionStore::open(&dir).unwrap();
+    store
+        .save_policy_with_approval(&policy, |_, _, _| Ok(()))
+        .unwrap();
     store.append_records(&first_records).unwrap();
     store.append_records(&replay_records).unwrap();
     let committed = store.load_ledger().unwrap();
     assert_eq!(committed.len(), 4, "replayed prefix was not duplicated");
-    let ids: std::collections::BTreeSet<_> =
-        committed.iter().map(|record| record.item_id.as_str()).collect();
+    let ids: std::collections::BTreeSet<_> = committed
+        .iter()
+        .map(|record| record.item_id.as_str())
+        .collect();
     assert_eq!(ids.len(), 4);
     let _ = std::fs::remove_dir_all(&dir);
 }

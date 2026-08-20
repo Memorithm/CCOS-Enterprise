@@ -63,7 +63,8 @@ pub fn skill_audit_result(
     arguments: &Value,
 ) -> Result<Value, String> {
     let limit = skill_audit_limit(arguments)?;
-    let scope = TenantScope::new(TenantId(tenant.to_string()), ());
+    let tenant_id = TenantId(tenant.to_string());
+    let scope = TenantScope::new(tenant_id.clone(), ());
     // The tenant set is the deployment's own tenant map; an unknown tenant is
     // refused before any ledger material is touched.
     let known: std::collections::BTreeMap<TenantId, ()> =
@@ -77,7 +78,11 @@ pub fn skill_audit_result(
                 max_evidence_per_skill: limit,
                 max_skills: limit,
             },
-            sources: AuditSources { skills, trials },
+            sources: AuditSources {
+                tenant: tenant_id,
+                skills,
+                trials,
+            },
             roles: deployment.roles(),
         },
         &known,

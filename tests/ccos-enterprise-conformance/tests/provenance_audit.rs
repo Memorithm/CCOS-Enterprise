@@ -97,6 +97,7 @@ fn operator_audit_is_tenant_scoped_and_newest_first() {
             scope: &scope,
             limits: AuditLimits::default(),
             sources: AuditSources {
+                tenant: TenantId("acme".into()),
                 skills: &skills,
                 trials: &trials,
             },
@@ -122,7 +123,10 @@ fn operator_audit_is_tenant_scoped_and_newest_first() {
 #[test]
 fn cross_tenant_audit_is_refused() {
     let (_d, skills, trials, roles, _scope) = composed_fixture();
-    let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId("acme".into()), ())]);
+    let known: BTreeMap<TenantId, ()> = BTreeMap::from([
+        (TenantId("acme".into()), ()),
+        (TenantId("globex".into()), ()),
+    ]);
     let foreign = TenantScope::new(TenantId("globex".into()), ());
     let err = audit_provenance(
         AuditQuery {
@@ -130,6 +134,7 @@ fn cross_tenant_audit_is_refused() {
             scope: &foreign,
             limits: AuditLimits::default(),
             sources: AuditSources {
+                tenant: TenantId("acme".into()),
                 skills: &skills,
                 trials: &trials,
             },
@@ -140,7 +145,7 @@ fn cross_tenant_audit_is_refused() {
     .expect_err("cross-tenant must be refused");
     assert!(matches!(
         err,
-        ccos_enterprise_skills_audit::AuditError::UnknownTenant
+        ccos_enterprise_skills_audit::AuditError::SourceTenantMismatch { .. }
     ));
 }
 
@@ -155,6 +160,7 @@ fn audit_denied_without_the_permission() {
             scope: &scope,
             limits: AuditLimits::default(),
             sources: AuditSources {
+                tenant: TenantId("acme".into()),
                 skills: &skills,
                 trials: &trials,
             },
@@ -181,6 +187,7 @@ fn audit_refuses_a_forged_actor_without_the_role() {
             scope: &scope,
             limits: AuditLimits::default(),
             sources: AuditSources {
+                tenant: TenantId("acme".into()),
                 skills: &skills,
                 trials: &trials,
             },
@@ -229,6 +236,7 @@ fn bounded_audit_reports_truncation_without_hiding_counters() {
                 max_skills: 16,
             },
             sources: AuditSources {
+                tenant: TenantId("acme".into()),
                 skills: &skills,
                 trials: &trials,
             },
@@ -256,6 +264,7 @@ fn report_serializes_schema_versioned_without_raw_material() {
             scope: &scope,
             limits: AuditLimits::default(),
             sources: AuditSources {
+                tenant: TenantId("acme".into()),
                 skills: &skills,
                 trials: &trials,
             },
@@ -273,4 +282,39 @@ fn report_serializes_schema_versioned_without_raw_material() {
     );
     assert!(!text.contains("call-"), "raw call ids leaked");
     assert!(!text.contains("RAW"), "raw material leaked");
+}
+
+#[test]
+fn report_level_skill_cap_is_explicit() {
+    let (_d, skills, trials, roles, scope) = composed_fixture();
+    // Clone the validated registry and add a second distinct active sequence.
+    let mut skills = skills;
+    for (turn, evidence) in [(20, 'd'), (21, 'e'), (22, 'f')] {
+        let mut ep = episode("second-sequence", turn, evidence);
+        ep.tools[0].name = "memory.timeline".into();
+        skills.observe(&ep).unwrap();
+    }
+    let known = BTreeMap::from([(TenantId("acme".into()), ())]);
+    let report = audit_provenance(
+        AuditQuery {
+            caller: "operator",
+            scope: &scope,
+            limits: AuditLimits {
+                max_trials_per_skill: 8,
+                max_evidence_per_skill: 8,
+                max_skills: 1,
+            },
+            sources: AuditSources {
+                tenant: TenantId("acme".into()),
+                skills: &skills,
+                trials: &trials,
+            },
+            roles: &roles,
+        },
+        &known,
+    )
+    .unwrap();
+    assert!(report.total_skills >= 2);
+    assert_eq!(report.skills.len(), 1);
+    assert!(report.truncated);
 }

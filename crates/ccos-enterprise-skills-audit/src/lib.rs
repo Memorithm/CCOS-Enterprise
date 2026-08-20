@@ -101,6 +101,9 @@ pub enum AuditError {
     PermissionDenied,
     /// The named tenant does not exist in this deployment.
     UnknownTenant,
+    /// The validated source bundle belongs to a different tenant than the
+    /// requested scope. Source identity is checked before any ledger row is read.
+    SourceTenantMismatch { requested: String, source: String },
     /// The limits were invalid (all must be non-zero).
     InvalidLimits,
     /// The query limit is not within `1..=MAX_QUERY_LIMIT`.
@@ -114,6 +117,10 @@ impl std::fmt::Display for AuditError {
         match self {
             Self::PermissionDenied => write!(f, "permission denied: audit.provenance required"),
             Self::UnknownTenant => write!(f, "unknown tenant"),
+            Self::SourceTenantMismatch { requested, source } => write!(
+                f,
+                "audit source tenant {source:?} does not match requested tenant {requested:?}"
+            ),
             Self::InvalidLimits => write!(f, "audit limits must all be non-zero"),
             Self::LimitOutOfRange { found } => {
                 write!(f, "query limit {found} is outside 1..={MAX_QUERY_LIMIT}")
@@ -206,7 +213,12 @@ pub struct ObservationalCounters {
 pub struct ProvenanceReport {
     pub schema: String,
     pub tenant: String,
+    /// Total skills in the validated source before the report-level cap.
+    pub total_skills: usize,
     pub skills: Vec<SkillProvenanceReport>,
+    /// Whether `max_skills` omitted one or more skill rows. Per-skill
+    /// `truncated` remains about trial/evidence row caps only.
+    pub truncated: bool,
     /// The tenant holds no skills at all.
     pub empty: bool,
 }
@@ -217,6 +229,9 @@ pub struct ProvenanceReport {
 /// corrupt or schema-unknown state — so the audit boundary is the same one
 /// the ledgers themselves enforce.
 pub struct AuditSources<'a> {
+    /// Tenant identity of the store from which both validated registries were
+    /// loaded. The audit query refuses a mismatch with its requested scope.
+    pub tenant: TenantId,
     pub skills: &'a SkillRegistry,
     pub trials: &'a SkillTrialRegistry,
 }
@@ -267,9 +282,16 @@ pub fn audit_provenance(
     if !known_tenants.contains_key(&query.scope.tenant) {
         return Err(AuditError::UnknownTenant);
     }
+    if query.sources.tenant != query.scope.tenant {
+        return Err(AuditError::SourceTenantMismatch {
+            requested: query.scope.tenant.0.clone(),
+            source: query.sources.tenant.0.clone(),
+        });
+    }
 
     let provenance = index_skill_trial_provenance(query.sources.trials);
     let summaries = summarize_observational_trials(query.sources.trials);
+    let total_skills = query.sources.skills.snapshot().skills.len();
     let mut skills = Vec::new();
 
     for record in query.sources.skills.snapshot().skills.values() {
@@ -334,8 +356,10 @@ pub fn audit_provenance(
     Ok(ProvenanceReport {
         schema: SKILL_AUDIT_SCHEMA.to_string(),
         tenant: query.scope.tenant.0.clone(),
+        total_skills,
+        truncated: skills.len() < total_skills,
         skills,
-        empty: query.sources.skills.snapshot().skills.is_empty(),
+        empty: total_skills == 0,
     })
 }
 
@@ -414,6 +438,7 @@ mod tests {
                 scope: &scope,
                 limits: AuditLimits::default(),
                 sources: AuditSources {
+                    tenant: scope.tenant.clone(),
                     skills: &skills,
                     trials: &trials,
                 },
@@ -441,6 +466,7 @@ mod tests {
                     scope: &foreign,
                     limits: AuditLimits::default(),
                     sources: AuditSources {
+                        tenant: scope.tenant.clone(),
                         skills: &skills,
                         trials: &trials,
                     },
@@ -465,6 +491,7 @@ mod tests {
                     scope: &scope,
                     limits: AuditLimits::default(),
                     sources: AuditSources {
+                        tenant: scope.tenant.clone(),
                         skills: &skills,
                         trials: &trials,
                     },
@@ -483,6 +510,7 @@ mod tests {
                     scope: &scope,
                     limits: AuditLimits::default(),
                     sources: AuditSources {
+                        tenant: scope.tenant.clone(),
                         skills: &skills,
                         trials: &trials,
                     },
@@ -521,6 +549,7 @@ mod tests {
                 scope: &scope,
                 limits: AuditLimits::default(),
                 sources: AuditSources {
+                    tenant: scope.tenant.clone(),
                     skills: &skills,
                     trials: &trials,
                 },
@@ -586,6 +615,7 @@ mod tests {
                 scope: &scope,
                 limits,
                 sources: AuditSources {
+                    tenant: scope.tenant.clone(),
                     skills: &skills,
                     trials: &trials,
                 },
@@ -642,6 +672,7 @@ mod tests {
                 scope: &scope,
                 limits: AuditLimits::default(),
                 sources: AuditSources {
+                    tenant: scope.tenant.clone(),
                     skills: &skills,
                     trials: &trials,
                 },

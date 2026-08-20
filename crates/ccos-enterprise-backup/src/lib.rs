@@ -795,8 +795,9 @@ pub struct RecoveryOutcome {
 
 /// Recovery owns the ordering and freeze state. The replay callback performs
 /// the actual deterministic journal-tail replay and returns the number of
-/// records applied; the verification callback runs against the atomically
-/// switched live path. Any error leaves `policy.writes_frozen == true`.
+/// records applied; the verification callback validates the fully replayed,
+/// resealed private staging candidate before any public live-pointer switch.
+/// Any error leaves `policy.writes_frozen == true`.
 #[allow(clippy::too_many_arguments)]
 pub fn run_disaster_recovery(
     tenant: &str,
@@ -806,7 +807,7 @@ pub fn run_disaster_recovery(
     live: &Path,
     now: u64,
     replay_tail: &dyn Fn(&Path) -> Result<u64, String>,
-    verify_live: &dyn Fn(&Path) -> Result<(), String>,
+    verify_recovered: &dyn Fn(&Path) -> Result<(), String>,
 ) -> RecoveryOutcome {
     let mut stages = vec![RecoveryStage::Detect];
     let failed = |stages: Vec<RecoveryStage>| RecoveryOutcome {
@@ -879,14 +880,12 @@ pub fn run_disaster_recovery(
         });
         return failed(stages);
     }
-    if let Err(error) = promote_staged(staging, live) {
-        stages.push(RecoveryStage::FailClosed {
-            detail: format!("promotion failed: {error}"),
-        });
-        return failed(stages);
-    }
-
-    match verify_live(live) {
+    // The recovered state is not public until end-to-end verification has
+    // accepted the exact replayed/resealed candidate. A failed verifier must
+    // therefore leave the existing `live` pointer untouched (or absent on a
+    // first recovery), rather than publishing state the transaction reports
+    // as failed.
+    match verify_recovered(staging) {
         Ok(()) => stages.push(RecoveryStage::VerifyEndToEnd { ok: true }),
         Err(error) => {
             stages.push(RecoveryStage::VerifyEndToEnd { ok: false });
@@ -895,6 +894,13 @@ pub fn run_disaster_recovery(
             });
             return failed(stages);
         }
+    }
+
+    if let Err(error) = promote_staged(staging, live) {
+        stages.push(RecoveryStage::FailClosed {
+            detail: format!("promotion failed: {error}"),
+        });
+        return failed(stages);
     }
 
     policy.writes_frozen = false;
@@ -1162,6 +1168,54 @@ mod tests {
                 RecoveryStage::Unfreeze,
             ]
         );
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_end_to_end_verification_does_not_publish_live() {
+        let root = scratch("dr-verify-fail");
+        let target = FsBackupTarget::new(&root);
+        create_backup(&target, "acme", &segments(1), 1).unwrap();
+        let parent = scratch("dr-verify-fail-parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let staging = parent.join("stage");
+        let live = parent.join("live");
+        let mut policy = BackupPolicy {
+            tenant: "acme".into(),
+            rpo_seconds: 300,
+            rto_seconds: 600,
+            writes_frozen: false,
+        };
+        let outcome = run_disaster_recovery(
+            "acme",
+            &mut policy,
+            &target,
+            &staging,
+            &live,
+            100,
+            &|path| {
+                std::fs::write(path.join(SEGMENTS_DIR).join("ledger"), b"ledger-replayed")
+                    .map_err(|error| error.to_string())?;
+                Ok(1)
+            },
+            &|path| {
+                assert_eq!(
+                    path,
+                    staging.as_path(),
+                    "verification must inspect private staging"
+                );
+                Err("candidate rejected".into())
+            },
+        );
+        assert!(!outcome.recovered);
+        assert!(policy.writes_frozen);
+        assert!(!live.exists(), "failed verification must not publish live");
+        assert!(outcome
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, RecoveryStage::VerifyEndToEnd { ok: false })));
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(parent);
     }

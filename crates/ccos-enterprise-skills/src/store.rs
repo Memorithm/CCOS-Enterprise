@@ -45,6 +45,12 @@ impl SkillStore {
         })
     }
 
+    /// Canonical root backing this validated store. Audit code uses this
+    /// identity to bind loaded registries to their actual tenant-scoped store.
+    pub fn canonical_root(&self) -> Result<PathBuf, SkillError> {
+        std::fs::canonicalize(&self.root).map_err(io(&self.root))
+    }
+
     pub fn load(&self) -> Result<Option<SkillSnapshot>, SkillError> {
         let bytes = match std::fs::read(&self.snapshot_path) {
             Ok(bytes) => bytes,

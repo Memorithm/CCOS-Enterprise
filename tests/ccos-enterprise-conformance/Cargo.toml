@@ -21,6 +21,8 @@ ccos-enterprise-runtime = { path = "../../crates/ccos-enterprise-runtime" }
 ccos-enterprise-mcp = { path = "../../crates/ccos-enterprise-mcp" }
 ccos-enterprise-skills = { path = "../../crates/ccos-enterprise-skills" }
 ccos-enterprise-skills-audit = { path = "../../crates/ccos-enterprise-skills-audit" }
+ccos-enterprise-approval = { path = "../../crates/ccos-enterprise-approval" }
+ccos-enterprise-retention = { path = "../../crates/ccos-enterprise-retention" }
 ccos-enterprise-decision-service = { path = "../../crates/ccos-enterprise-decision-service" }
 ccos-enterprise-knowledge = { path = "../../crates/ccos-enterprise-knowledge" }
 ccos-enterprise-knowledge-model = { path = "../../crates/ccos-enterprise-knowledge-model" }

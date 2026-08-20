@@ -458,6 +458,7 @@ enum Kind {
     BudgetExhausted,
     JustificationRequired,
     StorageExhausted,
+    RequiresApproval,
 }
 
 /// Every refusal the composed path can produce. Kept exhaustive on purpose: a
@@ -485,9 +486,15 @@ const ALL_KINDS: &[Kind] = &[
 /// globally unique, so replay suppression must never fire in this harness.
 /// [`Refusal::StorageExhausted`] comes from the governed **cell** path
 /// (`put_cell`), which runs `admit` first and then its own effect; this storm
-/// drives `admit` directly. Both remain classified in `kind_of` so future
-/// harnesses cannot silently forget either outcome.
-const NOT_REACHABLE_IN_STORM: &[Kind] = &[Kind::Replayed, Kind::StorageExhausted];
+/// drives `admit` directly. [`Refusal::RequiresApproval`] comes from
+/// [`Deployment::approval_gate`], an explicit second gate the storm never
+/// arms (no scripted tool is approval-gated). All three remain classified in
+/// `kind_of` so future harnesses cannot silently forget either outcome.
+const NOT_REACHABLE_IN_STORM: &[Kind] = &[
+    Kind::Replayed,
+    Kind::StorageExhausted,
+    Kind::RequiresApproval,
+];
 
 fn kind_of(o: &Outcome) -> Kind {
     match o {
@@ -506,6 +513,7 @@ fn kind_of(o: &Outcome) -> Kind {
         Outcome::Refused(Refusal::BudgetExhausted) => Kind::BudgetExhausted,
         Outcome::Refused(Refusal::JustificationRequired) => Kind::JustificationRequired,
         Outcome::Refused(Refusal::StorageExhausted) => Kind::StorageExhausted,
+        Outcome::Refused(Refusal::RequiresApproval) => Kind::RequiresApproval,
     }
 }
 

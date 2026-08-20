@@ -147,6 +147,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-approval"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-rbac",
+ "ccos-enterprise-tenancy",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ccos-enterprise-auth"
 version = "0.1.0-pre"
 dependencies = [
@@ -171,6 +182,7 @@ name = "ccos-enterprise-conformance"
 version = "0.1.0-pre"
 dependencies = [
  "ccos-enterprise-admin",
+ "ccos-enterprise-approval",
  "ccos-enterprise-auth",
  "ccos-enterprise-backup",
  "ccos-enterprise-decision-service",
@@ -183,6 +195,7 @@ dependencies = [
  "ccos-enterprise-policy",
  "ccos-enterprise-qpages",
  "ccos-enterprise-rbac",
+ "ccos-enterprise-retention",
  "ccos-enterprise-runtime",
  "ccos-enterprise-skills",
  "ccos-enterprise-skills-audit",
@@ -437,10 +450,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-retention"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-tenancy",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ccos-enterprise-runtime"
 version = "0.1.0-pre"
 dependencies = [
  "ccos-enterprise-admin",
+ "ccos-enterprise-approval",
  "ccos-enterprise-auth",
  "ccos-enterprise-gateway",
  "ccos-enterprise-observability",

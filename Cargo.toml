@@ -36,6 +36,8 @@ members = [
     "crates/ccos-enterprise-store",
     "crates/ccos-enterprise-octasoma",
     "crates/ccos-enterprise-execution",
+    "crates/ccos-enterprise-approval",
+    "crates/ccos-enterprise-retention",
     "crates/ccos-enterprise-skills",
     "crates/ccos-enterprise-skills-audit",
     "crates/ccos-enterprise-mcp",

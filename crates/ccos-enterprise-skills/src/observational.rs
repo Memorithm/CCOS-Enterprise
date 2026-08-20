@@ -8,7 +8,7 @@ use crate::{SkillTrialRegistry, SkillTrialStatus};
 /// `trials_attempted`, `trials_passed`, and `eta`. They describe only trials created
 /// after a governed skill exposure. No score, causal attribution, lifecycle decision,
 /// correlation key, trial id, or evidence id is derived or exposed here.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SkillObservationalSummary {
     pub total: u64,
     pub pending: u64,

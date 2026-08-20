@@ -28,3 +28,22 @@ ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime", features = ["te
 if c.count(old_dep) != 1:
     raise SystemExit(f'expected one skills-audit dependency anchor, found {c.count(old_dep)}')
 cargo.write_text(c.replace(old_dep, new_dep, 1))
+
+# The validator runs clippy over all targets with warnings denied. Keep the
+# existing tamper test semantically identical while initializing the lone
+# non-default field in the struct initializer instead of reassigning it.
+trials = Path('crates/ccos-enterprise-skills/src/trials.rs')
+t = trials.read_text()
+old_trial = '''        let mut snapshot = SkillTrialSnapshot::default();
+        snapshot.next_ordinal = 1;
+        snapshot.trials.insert(
+'''
+new_trial = '''        let mut snapshot = SkillTrialSnapshot {
+            next_ordinal: 1,
+            ..Default::default()
+        };
+        snapshot.trials.insert(
+'''
+if t.count(old_trial) != 1:
+    raise SystemExit(f'expected one trial snapshot initializer anchor, found {t.count(old_trial)}')
+trials.write_text(t.replace(old_trial, new_trial, 1))

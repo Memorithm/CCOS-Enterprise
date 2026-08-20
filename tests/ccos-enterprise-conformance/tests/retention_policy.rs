@@ -188,7 +188,10 @@ fn runtime_approval_gate_denies_policy_write_before_disk_mutation() {
             .approval_gate(&call, artifact_hash)
             .map_err(|refusal| format!("{refusal:?}"))
     });
-    assert!(matches!(result, Err(RetentionError::ApprovalRequired { .. })));
+    assert!(matches!(
+        result,
+        Err(RetentionError::ApprovalRequired { .. })
+    ));
     assert!(store.load_policy().unwrap().is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }

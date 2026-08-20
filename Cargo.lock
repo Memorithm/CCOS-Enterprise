@@ -193,6 +193,7 @@ dependencies = [
  "ccos-enterprise-policy",
  "ccos-enterprise-qpages",
  "ccos-enterprise-rbac",
+ "ccos-enterprise-retention",
  "ccos-enterprise-runtime",
  "ccos-enterprise-skills",
  "ccos-enterprise-skills-audit",
@@ -444,6 +445,15 @@ dependencies = [
  "ccos-enterprise-ingest",
  "ccos-enterprise-knowledge-model",
  "sha2",
+]
+
+[[package]]
+name = "ccos-enterprise-retention"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-tenancy",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

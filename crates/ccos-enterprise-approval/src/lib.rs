@@ -84,15 +84,31 @@ impl Default for ApprovalSnapshot {
 
 #[derive(Debug)]
 pub enum ApprovalError {
-    Invalid { detail: String },
-    UnsupportedSchema { found: u32 },
-    AlreadyExists { id: String },
-    Unknown { id: String },
-    AlreadyRevoked { id: String },
+    Invalid {
+        detail: String,
+    },
+    UnsupportedSchema {
+        found: u32,
+    },
+    AlreadyExists {
+        id: String,
+    },
+    Unknown {
+        id: String,
+    },
+    AlreadyRevoked {
+        id: String,
+    },
     /// Runtime requested a usable approval but cannot guarantee an audit fact.
     AuditUnavailable,
-    Io { path: PathBuf, source: std::io::Error },
-    Corrupt { path: PathBuf, detail: String },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Corrupt {
+        path: PathBuf,
+        detail: String,
+    },
 }
 
 impl PartialEq for ApprovalError {
@@ -104,9 +120,16 @@ impl PartialEq for ApprovalError {
             (Self::Unknown { id: a }, Self::Unknown { id: b }) => a == b,
             (Self::AlreadyRevoked { id: a }, Self::AlreadyRevoked { id: b }) => a == b,
             (Self::AuditUnavailable, Self::AuditUnavailable) => true,
-            (Self::Corrupt { path: a, detail: ad }, Self::Corrupt { path: b, detail: bd }) => {
-                a == b && ad == bd
-            }
+            (
+                Self::Corrupt {
+                    path: a,
+                    detail: ad,
+                },
+                Self::Corrupt {
+                    path: b,
+                    detail: bd,
+                },
+            ) => a == b && ad == bd,
             _ => false,
         }
     }
@@ -159,9 +182,9 @@ fn canonical_action(action: &str) -> bool {
 }
 
 const ZERO_WIDTH: &[char] = &[
-    '\u{00AD}', '\u{061C}', '\u{180E}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}',
-    '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2060}',
-    '\u{2061}', '\u{2800}', '\u{3164}', '\u{FEFF}', '\u{FFA0}',
+    '\u{00AD}', '\u{061C}', '\u{180E}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}',
+    '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2060}', '\u{2061}', '\u{2800}',
+    '\u{3164}', '\u{FEFF}', '\u{FFA0}',
 ];
 
 fn renders_blank(value: &str) -> bool {
@@ -214,9 +237,10 @@ impl ApprovalRequest {
     ) -> Result<Self, ApprovalError> {
         if tenant.0.is_empty()
             || tenant.0.len() > 128
-            || !tenant.0.bytes().all(|b| {
-                b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-')
-            })
+            || !tenant
+                .0
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
         {
             return Err(ApprovalError::Invalid {
                 detail: "tenant must be a canonical identifier".into(),
@@ -359,12 +383,13 @@ fn validate_revocation(
             detail: "revocation map key does not match approval id".into(),
         });
     }
-    let approval = snapshot
-        .approvals
-        .get(&record.approval_id)
-        .ok_or_else(|| ApprovalError::Unknown {
-            id: record.approval_id.clone(),
-        })?;
+    let approval =
+        snapshot
+            .approvals
+            .get(&record.approval_id)
+            .ok_or_else(|| ApprovalError::Unknown {
+                id: record.approval_id.clone(),
+            })?;
     if approval.decision != ApprovalDecision::Approved {
         return Err(ApprovalError::Invalid {
             detail: "a denied approval cannot be revoked".into(),
@@ -503,13 +528,13 @@ impl ApprovalRegistry {
                 id: approval_id.to_string(),
             });
         }
-        let approval = self
-            .snapshot
-            .approvals
-            .get(approval_id)
-            .ok_or_else(|| ApprovalError::Unknown {
-                id: approval_id.to_string(),
-            })?;
+        let approval =
+            self.snapshot
+                .approvals
+                .get(approval_id)
+                .ok_or_else(|| ApprovalError::Unknown {
+                    id: approval_id.to_string(),
+                })?;
         if approval.decision != ApprovalDecision::Approved {
             return Err(ApprovalError::Invalid {
                 detail: "a denied approval cannot be revoked".into(),
@@ -612,10 +637,11 @@ impl ApprovalStore {
 
     pub fn save(&self, snapshot: &ApprovalSnapshot) -> Result<(), ApprovalError> {
         ApprovalRegistry::from_snapshot(snapshot.clone())?;
-        let bytes = serde_json::to_vec_pretty(snapshot).map_err(|error| ApprovalError::Corrupt {
-            path: self.snapshot_path.clone(),
-            detail: format!("cannot serialize approval ledger: {error}"),
-        })?;
+        let bytes =
+            serde_json::to_vec_pretty(snapshot).map_err(|error| ApprovalError::Corrupt {
+                path: self.snapshot_path.clone(),
+                detail: format!("cannot serialize approval ledger: {error}"),
+            })?;
         let temporary = self.root.join(TEMP_FILE);
         let mut file = OpenOptions::new()
             .create(true)
@@ -719,11 +745,7 @@ impl ApprovalStore {
                     })
                 }
                 None => {
-                    validate_revocation(
-                        &registry.snapshot,
-                        &revocation.approval_id,
-                        &revocation,
-                    )?;
+                    validate_revocation(&registry.snapshot, &revocation.approval_id, &revocation)?;
                     registry
                         .snapshot
                         .revocations
@@ -814,9 +836,7 @@ mod tests {
     fn revocation_survives_snapshot_restore() {
         let mut registry = ApprovalRegistry::new();
         let id = registry.record(request(100, None)).unwrap();
-        registry
-            .revoke(&id, "operator", 150, "withdrawn")
-            .unwrap();
+        registry.revoke(&id, "operator", 150, "withdrawn").unwrap();
         let restored = ApprovalRegistry::from_snapshot(registry.snapshot().clone()).unwrap();
         assert!(restored.is_revoked(&id));
         let tenant = TenantId("acme".into());
@@ -898,12 +918,7 @@ mod tests {
         let mut registry = ApprovalRegistry::new();
         registry.record(request(100, None)).unwrap();
         let mut snapshot = registry.snapshot().clone();
-        snapshot
-            .approvals
-            .values_mut()
-            .next()
-            .unwrap()
-            .expires_at = Some(999);
+        snapshot.approvals.values_mut().next().unwrap().expires_at = Some(999);
         assert!(matches!(
             ApprovalRegistry::from_snapshot(snapshot),
             Err(ApprovalError::Invalid { .. })

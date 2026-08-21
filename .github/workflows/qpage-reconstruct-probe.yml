@@ -38,8 +38,150 @@ jobs:
           if [ "$apply_rc" -ne 0 ]; then
             cp crates/ccos-enterprise-runtime/Cargo.toml /tmp/qpage-conflict-Cargo.toml || true
             cp crates/ccos-enterprise-runtime/src/lib.rs /tmp/qpage-conflict-lib.rs || true
-            git status --short
-            exit "$apply_rc"
+            python3 - <<'PY'
+          from pathlib import Path
+
+          cargo = Path('crates/ccos-enterprise-runtime/Cargo.toml')
+          c = cargo.read_text()
+          c = c.replace('''<<<<<<< ours
+serde_json.workspace = true
+=======
+>>>>>>> theirs
+sha2.workspace = true
+''', '''serde_json.workspace = true
+sha2.workspace = true
+''')
+          if '<<<<<<<' in c or '>>>>>>>' in c or '\n=======\n' in c:
+              raise SystemExit('unresolved Cargo conflict')
+          cargo.write_text(c)
+
+          p = Path('crates/ccos-enterprise-runtime/src/lib.rs')
+          s = p.read_text()
+          replacements = [
+              ('''<<<<<<< ours
+    active_model: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModelSwitchCheckpoint {
+    state: TenantState,
+    cells: Option<BTreeMap<String, String>>,
+=======
+    /// The per-tenant variant activation policy: which advanced variants may
+    /// be activated, and whether the experimental bridge demands approval.
+    variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
+>>>>>>> theirs
+}
+''', '''    active_model: Option<String>,
+    /// The per-tenant variant activation policy: which advanced variants may
+    /// be activated, and whether the experimental bridge demands approval.
+    variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModelSwitchCheckpoint {
+    state: TenantState,
+    cells: Option<BTreeMap<String, String>>,
+}
+'''),
+              ('''<<<<<<< ours
+            active_model: None,
+=======
+            variant_policy: ccos_enterprise_qpages::policy::VariantPolicy::default(),
+>>>>>>> theirs
+''', '''            active_model: None,
+            variant_policy: ccos_enterprise_qpages::policy::VariantPolicy::default(),
+'''),
+              ('''<<<<<<< ours
+    #[serde(default)]
+    pub active_model: Option<String>,
+=======
+    /// The variant activation policy. Empty by default so older snapshots
+    /// load; a policy with an unsupported schema is refused on restore.
+    #[serde(default)]
+    pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
+>>>>>>> theirs
+''', '''    #[serde(default)]
+    pub active_model: Option<String>,
+    /// The variant activation policy. Empty by default so older snapshots
+    /// load; a policy with an unsupported schema is refused on restore.
+    #[serde(default)]
+    pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
+'''),
+              ('''<<<<<<< ours
+    /// The selected model is missing, ambiguous, or not in the tenant's
+    /// allowlist. Restore refuses rather than guessing a provider.
+    ActiveModelInvalid {
+        tenant: String,
+        active_model: Option<String>,
+    },
+=======
+    /// A tenant's variant activation policy has an unsupported schema.
+    /// Refused: a policy the build cannot interpret must not be carried
+    /// silently.
+    VariantPolicyCorrupt { tenant: String, detail: String },
+>>>>>>> theirs
+''', '''    /// The selected model is missing, ambiguous, or not in the tenant's
+    /// allowlist. Restore refuses rather than guessing a provider.
+    ActiveModelInvalid {
+        tenant: String,
+        active_model: Option<String>,
+    },
+    /// A tenant's variant activation policy has an unsupported schema.
+    /// Refused: a policy the build cannot interpret must not be carried
+    /// silently.
+    VariantPolicyCorrupt { tenant: String, detail: String },
+'''),
+              ('''<<<<<<< ours
+            Self::ActiveModelInvalid {
+                tenant,
+                active_model,
+            } => write!(
+                f,
+                "tenant {tenant:?} has invalid or ambiguous active model {active_model:?}"
+            ),
+=======
+            Self::VariantPolicyCorrupt { tenant, detail } => {
+                write!(f, "tenant {tenant:?} variant policy is corrupt: {detail}")
+            }
+>>>>>>> theirs
+''', '''            Self::ActiveModelInvalid {
+                tenant,
+                active_model,
+            } => write!(
+                f,
+                "tenant {tenant:?} has invalid or ambiguous active model {active_model:?}"
+            ),
+            Self::VariantPolicyCorrupt { tenant, detail } => {
+                write!(f, "tenant {tenant:?} variant policy is corrupt: {detail}")
+            }
+'''),
+              ('''<<<<<<< ours
+                            active_model: state.active_model.clone(),
+=======
+                            variant_policy: state.variant_policy.clone(),
+>>>>>>> theirs
+''', '''                            active_model: state.active_model.clone(),
+                            variant_policy: state.variant_policy.clone(),
+'''),
+              ('''<<<<<<< ours
+                    active_model,
+=======
+                    variant_policy: t.variant_policy,
+>>>>>>> theirs
+''', '''                    active_model,
+                    variant_policy: t.variant_policy,
+'''),
+          ]
+          for old, new in replacements:
+              if s.count(old) != 1:
+                  raise SystemExit(f'expected one runtime conflict anchor, found {s.count(old)}')
+              s = s.replace(old, new, 1)
+          if '<<<<<<<' in s or '>>>>>>>' in s or '\n=======\n' in s:
+              raise SystemExit('unresolved runtime conflict')
+          p.write_text(s)
+          PY
+            git add crates/ccos-enterprise-runtime/Cargo.toml crates/ccos-enterprise-runtime/src/lib.rs
           fi
           mkdir -p .ci
           git show 27cb6663c6b25841603e916c83c821c149e94dc8:.ci/autonomous-patch.sh > .ci/autonomous-patch.sh

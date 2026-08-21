@@ -17,28 +17,31 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
-      - name: Three-way reconstruct historical Q-Page product diff
+      - name: Apply historical Q-Page transformation without delivery commands
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'CCOS CI Probe'
-          git config user.email 'noreply@github.com'
           git fetch origin 27cb6663c6b25841603e916c83c821c149e94dc8
-          set +e
-          git merge --no-commit --no-ff 27cb6663c6b25841603e916c83c821c149e94dc8
-          rc=$?
-          set -e
-          echo "merge_rc=$rc"
-          echo '--- STATUS ---'
+          mkdir -p .ci
+          git show 27cb6663c6b25841603e916c83c821c149e94dc8:.ci/autonomous-patch.sh > .ci/autonomous-patch.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.ci/autonomous-patch.sh')
+          s = p.read_text()
+          marker = "git config user.name 'MEMOPERF'"
+          if marker not in s:
+              raise SystemExit('delivery marker missing')
+          s = s.split(marker, 1)[0]
+          if 'git push ' in s or 'git commit ' in s:
+              raise SystemExit('delivery command remained in executable validator')
+          p.write_text(s)
+          PY
+          chmod +x .ci/autonomous-patch.sh
+          .ci/autonomous-patch.sh
+          test ! -e .ci/autonomous-patch.sh
+          echo '--- PRODUCT DIFF ---'
           git status --short
-          echo '--- CONFLICT FILES ---'
-          git diff --name-only --diff-filter=U || true
-          echo '--- RUNTIME CONFLICT MARKERS ---'
-          if git diff --name-only --diff-filter=U | grep -qx 'crates/ccos-enterprise-runtime/src/lib.rs'; then
-            grep -n -B12 -A24 -E '^(<<<<<<<|=======|>>>>>>>)' crates/ccos-enterprise-runtime/src/lib.rs || true
+          if git status --short | grep -E '(^| )\.ci/|(^| )\.github/workflows/'; then
+            echo 'temporary validator artifact leaked into product diff' >&2
+            exit 1
           fi
-          echo '--- CARGO CONFLICT MARKERS ---'
-          if git diff --name-only --diff-filter=U | grep -qx 'crates/ccos-enterprise-runtime/Cargo.toml'; then
-            cat crates/ccos-enterprise-runtime/Cargo.toml
-          fi
-          exit "$rc"

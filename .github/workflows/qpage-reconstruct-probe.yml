@@ -25,11 +25,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "d23ab26da837207e269b0379c1e1f890b2c9caa0"
-
           git show 92ac0d53af130d482e8bdd7af6c94bee909596ff:.github/workflows/qpage-final-probe.yml > /tmp/previous.yml
           python3 - <<'PY'
           from pathlib import Path
-
           text = Path('/tmp/previous.yml').read_text()
           start_marker = "          python3 - <<'PY'\n"
           end_marker = "          PY\n\n          cargo fmt --all\n"
@@ -37,22 +35,13 @@ jobs:
           end = text.index(end_marker, start)
           lines = text[start:end].splitlines()
           program = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
-
-          old = '''    let mut policy = ccos_enterprise_qpages::policy::VariantPolicy::default();
-    policy.schema_version = 0;
-    policy
-'''
-          new = '''    ccos_enterprise_qpages::policy::VariantPolicy {
-        schema_version: 0,
-        ..Default::default()
-    }
-'''
+          old = "    let mut policy = ccos_enterprise_qpages::policy::VariantPolicy::default();\n    policy.schema_version = 0;\n    policy\n"
+          new = "    ccos_enterprise_qpages::policy::VariantPolicy {\n        schema_version: 0,\n        ..Default::default()\n    }\n"
           if program.count(old) != 1:
               raise SystemExit(f'legacy initializer anchor count={program.count(old)}')
           Path('/tmp/qpage_patch.py').write_text(program.replace(old, new, 1))
           PY
           python3 /tmp/qpage_patch.py
-
           cargo fmt --all
           cargo fmt --all -- --check
           cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
@@ -61,12 +50,9 @@ jobs:
           cargo test -p ccos-enterprise-runtime
           cargo test -p ccos-enterprise-conformance --test stress_endurance --release
           cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
-
           git status --short
           test "$(git status --porcelain=v1 | wc -l)" -eq 3
-          git add crates/ccos-enterprise-qpages/src/policy.rs \
-                  crates/ccos-enterprise-runtime/src/lib.rs \
-                  tests/ccos-enterprise-conformance/tests/stress_endurance.rs
+          git add crates/ccos-enterprise-qpages/src/policy.rs crates/ccos-enterprise-runtime/src/lib.rs tests/ccos-enterprise-conformance/tests/stress_endurance.rs
           git config user.name 'MEMOPERF'
           git config user.email 'contact@checkupauto.fr'
           git commit -m 'fix(qpages): close final CI and approval policy gaps'

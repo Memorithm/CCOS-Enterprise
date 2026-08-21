@@ -28,6 +28,9 @@ jobs:
           from pathlib import Path
           p = Path('.ci/autonomous-patch.sh')
           s = p.read_text()
+          # Historical validator typo: repair only the malformed Python label;
+          # this does not alter the intended product transformation.
+          s = s.replace("\ndrop after policy')", "\n'drop after policy')")
           marker = "git config user.name 'MEMOPERF'"
           if marker not in s:
               raise SystemExit('delivery marker missing')

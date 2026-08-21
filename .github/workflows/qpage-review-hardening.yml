@@ -1,8 +1,8 @@
 name: QPage review hardening validator
 
 on:
-  pull_request:
-    branches: [fix/qpage-replacement]
+  push:
+    branches: [ci/qpage-review-hardening-v1]
     paths:
       - '.github/workflows/qpage-review-hardening.yml'
 

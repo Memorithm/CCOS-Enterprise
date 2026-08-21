@@ -53,7 +53,7 @@ jobs:
           cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
           cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
           cargo test -p ccos-enterprise-qpages
-          cargo test -p ccos-enterprise-runtime
+          cargo test -p ccos-enterprise-runtime --features test-fixtures
           cargo test -p ccos-enterprise-conformance --test stress_endurance --release
           cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
           git status --short

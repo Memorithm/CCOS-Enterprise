@@ -61,7 +61,12 @@ jobs:
           new2 = "            Op::Activate { tenant, variant } => {\n                let mut d = guard(deployment);\n                let present = if let Some(mut rules) = d.tenant_mut(tenant) {\n                    rules.permit_variant(*variant);\n                    true\n                } else {\n                    false\n                };\n                if present {\n                    if let Err(err) = d.activate_variant_governed(\n                        &TenantId(tenant.to_string()),\n                        *variant,\n                        None,\n                        0,\n                    ) {\n                        report.problems.push(format!(\n                            \"tenant {tenant} governed activation of {variant:?} failed: {err:?}\"\n                        ));\n                    }\n                } else {\n                    report.problems.push(format!(\"tenant {tenant} vanished\"));\n                }\n            }\n"
           if s.count(old2) != 1:
               raise SystemExit(f'chaos activation anchor count={s.count(old2)}')
-          p.write_text(s.replace(old2, new2, 1))
+          s = s.replace(old2, new2, 1)
+          old3 = "                GovernanceChange::RoleAssigned { .. } | GovernanceChange::TenantRulesChanged { .. }\n"
+          new3 = "                GovernanceChange::RoleAssigned { .. }\n                    | GovernanceChange::TenantRulesChanged { .. }\n                    | GovernanceChange::QPagePolicyChanged { .. }\n"
+          if s.count(old3) != 1:
+              raise SystemExit(f'chaos governance invariant anchor count={s.count(old3)}')
+          p.write_text(s.replace(old3, new3, 1))
           PY
           cargo fmt --all
           cargo fmt --all -- --check

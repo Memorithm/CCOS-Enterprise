@@ -120,6 +120,7 @@ use ccos_enterprise_policy::{ModelAllowlist, PolicyDecision, TokenBudget};
 use ccos_enterprise_qpages::{AdvancedQPageVariant, QPageRegistry};
 use ccos_enterprise_rbac::{Permission, Role, RoleBook};
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
+use sha2::{Digest, Sha256};
 
 /// Governed model switch transaction (docs/MODEL_SWITCHING_POLICY.md).
 pub mod model_switch;
@@ -345,6 +346,13 @@ pub enum GovernanceChange {
         variants_activated: Vec<String>,
         variants_deactivated: Vec<String>,
     },
+    /// The tenant's Q-Page policy changed. The full deterministic after-state
+    /// is recorded so an auditor can explain a later activation decision.
+    QPagePolicyChanged {
+        tenant: String,
+        permitted: Vec<String>,
+        experimental_bridge_opted_in: bool,
+    },
     /// A tool became governed, or the permission it requires changed.
     ToolGoverned {
         tool: String,
@@ -459,6 +467,13 @@ pub struct TenantState {
     models: ModelAllowlist,
     qpages: QPageRegistry,
     active_model: Option<String>,
+    /// The per-tenant variant activation policy: which advanced variants may
+    /// be activated, and whether the experimental bridge demands approval.
+    variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
+    /// Approval id that authorized an activation requiring approval. Variants
+    /// allowed without approval have no entry. This is durable so restart can
+    /// revalidate expiry/revocation instead of trusting a bare active bit.
+    variant_approvals: BTreeMap<AdvancedQPageVariant, String>,
 }
 
 #[derive(Clone)]
@@ -474,6 +489,8 @@ impl TenantState {
             models: ModelAllowlist::default(),
             qpages: QPageRegistry::default(),
             active_model: None,
+            variant_policy: ccos_enterprise_qpages::policy::VariantPolicy::default(),
+            variant_approvals: BTreeMap::new(),
         }
     }
 
@@ -485,9 +502,36 @@ impl TenantState {
         self
     }
 
-    pub fn activate(&mut self, variant: AdvancedQPageVariant) -> &mut Self {
+    pub(crate) fn activate_raw(&mut self, variant: AdvancedQPageVariant) {
         self.qpages.activate(variant);
-        self
+    }
+
+    pub(crate) fn deactivate_raw(&mut self, variant: AdvancedQPageVariant) {
+        self.qpages.deactivate(variant);
+        self.variant_approvals.remove(&variant);
+    }
+
+    /// The tenant's variant policy (validated state only).
+    pub fn variant_policy(&self) -> &ccos_enterprise_qpages::policy::VariantPolicy {
+        &self.variant_policy
+    }
+
+    /// Permit a variant in the tenant's policy. Refused for the experimental
+    /// bridge (see [`VariantPolicy::permit`]).
+    pub(crate) fn permit_variant_raw(&mut self, variant: AdvancedQPageVariant) -> bool {
+        self.variant_policy.permit(variant)
+    }
+
+    pub(crate) fn revoke_variant_raw(&mut self, variant: AdvancedQPageVariant) -> bool {
+        let changed = self.variant_policy.revoke(variant);
+        if changed {
+            self.deactivate_raw(variant);
+        }
+        changed
+    }
+
+    pub(crate) fn opt_in_experimental_bridge_raw(&mut self) {
+        self.variant_policy.opt_in_experimental_bridge();
     }
 
     /// Tokens charged to this tenant so far.
@@ -773,6 +817,7 @@ impl Deployment {
         let before_models = state.models.0.clone();
         let before_variants: BTreeSet<AdvancedQPageVariant> =
             state.qpages.active().into_iter().collect();
+        let before_variant_policy = state.variant_policy.clone();
         Some(TenantRules {
             actor: by.map(str::to_string),
             justification: why.map(str::to_string),
@@ -780,6 +825,7 @@ impl Deployment {
             tenant: id,
             before_models,
             before_variants,
+            before_variant_policy,
         })
     }
 
@@ -1006,6 +1052,119 @@ impl Deployment {
     /// Whether a tool is an administrative act in this deployment.
     pub fn requires_justification(&self, tool: &str) -> bool {
         self.justification_required.contains(tool)
+    }
+
+    /// Canonical approval artifact for one tenant/variant activation.
+    pub fn qpage_activation_artifact_hash(
+        tenant: &TenantId,
+        variant: AdvancedQPageVariant,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        for field in [
+            b"ccos-enterprise-qpage-activation-v1".as_slice(),
+            tenant.0.as_bytes(),
+            format!("{variant:?}").as_bytes(),
+        ] {
+            hasher.update((field.len() as u64).to_be_bytes());
+            hasher.update(field);
+        }
+        let mut out = String::with_capacity(64);
+        use std::fmt::Write as _;
+        for byte in hasher.finalize() {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    }
+
+    /// Live activation path. Policy is evaluated first; approval-required
+    /// variants require the exact live approval record, not a caller string.
+    pub fn activate_variant_governed(
+        &mut self,
+        tenant: &TenantId,
+        variant: AdvancedQPageVariant,
+        approval_id: Option<&str>,
+        now: u64,
+    ) -> Result<(), String> {
+        let decision = self
+            .tenants
+            .get(tenant)
+            .ok_or_else(|| format!("unknown tenant {:?}", tenant.0))?
+            .variant_policy
+            .evaluate(variant);
+        let validated_approval = match decision {
+            ccos_enterprise_qpages::policy::ActivationDecision::Allowed => None,
+            ccos_enterprise_qpages::policy::ActivationDecision::Denied => {
+                return Err(format!(
+                    "{variant:?} is not permitted by the tenant variant policy"
+                ))
+            }
+            ccos_enterprise_qpages::policy::ActivationDecision::RequiresApproval => {
+                let id = approval_id
+                    .ok_or_else(|| format!("{variant:?} requires a recorded human approval"))?;
+                let artifact = Self::qpage_activation_artifact_hash(tenant, variant);
+                let record = self
+                    .approvals
+                    .registry()
+                    .snapshot()
+                    .approvals
+                    .get(id)
+                    .ok_or_else(|| "supplied Q-Page approval id is not recorded".to_string())?;
+                if record.tenant != tenant.0
+                    || record.action != "qpage.activate"
+                    || record.artifact_hash != artifact
+                    || record.decision != ccos_enterprise_approval::ApprovalDecision::Approved
+                {
+                    return Err("supplied approval is not bound to this Q-Page activation".into());
+                }
+                let query = ccos_enterprise_approval::ApprovalQuery {
+                    tenant,
+                    action: "qpage.activate",
+                    artifact_hash: &artifact,
+                    now,
+                };
+                if self.approvals.evaluate(&query)
+                    != ccos_enterprise_approval::GateOutcome::Approved
+                {
+                    return Err("Q-Page approval is expired, revoked, legacy, or invalid".into());
+                }
+                Some(id.to_string())
+            }
+        };
+        let rules = self
+            .tenant_mut(&tenant.0)
+            .ok_or_else(|| format!("unknown tenant {:?}", tenant.0))?;
+        let state = rules
+            .deployment
+            .tenants
+            .get_mut(&rules.tenant)
+            .expect("tenant guard remains valid");
+        state.activate_raw(variant);
+        match validated_approval {
+            Some(id) => {
+                state.variant_approvals.insert(variant, id);
+            }
+            None => {
+                state.variant_approvals.remove(&variant);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn deactivate_variant_governed(
+        &mut self,
+        tenant: &TenantId,
+        variant: AdvancedQPageVariant,
+    ) -> Result<(), String> {
+        let rules = self
+            .tenant_mut(&tenant.0)
+            .ok_or_else(|| format!("unknown tenant {:?}", tenant.0))?;
+        rules
+            .deployment
+            .tenants
+            .get_mut(&rules.tenant)
+            .expect("tenant guard remains valid")
+            .deactivate_raw(variant);
+        Ok(())
     }
 
     // ── Human approval gates (docs/HUMAN_APPROVAL_POLICIES.md) ──────────
@@ -1449,9 +1608,41 @@ impl Deployment {
         {
             return refuse(Refusal::ModelNotAllowed);
         }
-        if let Some(variant) = call.variant {
-            if !state.qpages.is_active(variant) {
+        if let Some(v) = call.variant {
+            if !state.qpages.is_active(v) {
                 return refuse(Refusal::VariantNotActivated);
+            }
+            match state.variant_policy.evaluate(v) {
+                ccos_enterprise_qpages::policy::ActivationDecision::Denied => {
+                    return refuse(Refusal::VariantNotActivated);
+                }
+                ccos_enterprise_qpages::policy::ActivationDecision::Allowed => {}
+                ccos_enterprise_qpages::policy::ActivationDecision::RequiresApproval => {
+                    let Some(id) = state.variant_approvals.get(&v) else {
+                        return refuse(Refusal::RequiresApproval);
+                    };
+                    let artifact = Self::qpage_activation_artifact_hash(&tenant_id, v);
+                    let Some(record) = self.approvals.registry().snapshot().approvals.get(id)
+                    else {
+                        return refuse(Refusal::RequiresApproval);
+                    };
+                    if record.tenant != tenant_id.0
+                        || record.action != "qpage.activate"
+                        || record.artifact_hash != artifact
+                        || record.decision != ccos_enterprise_approval::ApprovalDecision::Approved
+                        || self
+                            .approvals
+                            .evaluate(&ccos_enterprise_approval::ApprovalQuery {
+                                tenant: &tenant_id,
+                                action: "qpage.activate",
+                                artifact_hash: &artifact,
+                                now: now_unix(),
+                            })
+                            != ccos_enterprise_approval::GateOutcome::Approved
+                    {
+                        return refuse(Refusal::RequiresApproval);
+                    }
+                }
             }
         }
 
@@ -1751,6 +1942,7 @@ pub struct TenantRules<'a> {
     tenant: TenantId,
     before_models: BTreeSet<String>,
     before_variants: BTreeSet<AdvancedQPageVariant>,
+    before_variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
     actor: Option<String>,
     justification: Option<String>,
 }
@@ -1766,6 +1958,32 @@ impl std::ops::Deref for TenantRules<'_> {
     }
 }
 
+impl TenantRules<'_> {
+    pub fn permit_variant(&mut self, variant: AdvancedQPageVariant) -> bool {
+        self.deployment
+            .tenants
+            .get_mut(&self.tenant)
+            .expect("tenant guard remains valid")
+            .permit_variant_raw(variant)
+    }
+
+    pub fn revoke_variant(&mut self, variant: AdvancedQPageVariant) -> bool {
+        self.deployment
+            .tenants
+            .get_mut(&self.tenant)
+            .expect("tenant guard remains valid")
+            .revoke_variant_raw(variant)
+    }
+
+    pub fn opt_in_experimental_bridge(&mut self) {
+        self.deployment
+            .tenants
+            .get_mut(&self.tenant)
+            .expect("tenant guard remains valid")
+            .opt_in_experimental_bridge_raw();
+    }
+}
+
 impl std::ops::DerefMut for TenantRules<'_> {
     fn deref_mut(&mut self) -> &mut TenantState {
         self.deployment.tenants.get_mut(&self.tenant).expect(
@@ -1777,34 +1995,51 @@ impl std::ops::DerefMut for TenantRules<'_> {
 
 impl Drop for TenantRules<'_> {
     fn drop(&mut self) {
-        let (after_models, after_variants) = {
+        let (after_models, after_variants, after_variant_policy) = {
             let state = &self.deployment.tenants[&self.tenant];
             (
                 state.models.0.clone(),
                 state.qpages.active().into_iter().collect::<BTreeSet<_>>(),
+                state.variant_policy.clone(),
             )
         };
         let models_allowed = owned_diff(&after_models, &self.before_models);
         let models_revoked = owned_diff(&self.before_models, &after_models);
         let variants_activated = variant_diff(&after_variants, &self.before_variants);
         let variants_deactivated = variant_diff(&self.before_variants, &after_variants);
-        if models_allowed.is_empty()
-            && models_revoked.is_empty()
-            && variants_activated.is_empty()
-            && variants_deactivated.is_empty()
-        {
-            return;
-        }
-        let change = GovernanceChange::TenantRulesChanged {
-            tenant: self.tenant.0.clone(),
-            models_allowed,
-            models_revoked,
-            variants_activated,
-            variants_deactivated,
-        };
         let (by, why) = (self.actor.clone(), self.justification.clone());
-        self.deployment
-            .record(change, by.as_deref(), why.as_deref());
+        if !models_allowed.is_empty()
+            || !models_revoked.is_empty()
+            || !variants_activated.is_empty()
+            || !variants_deactivated.is_empty()
+        {
+            self.deployment.record(
+                GovernanceChange::TenantRulesChanged {
+                    tenant: self.tenant.0.clone(),
+                    models_allowed,
+                    models_revoked,
+                    variants_activated,
+                    variants_deactivated,
+                },
+                by.as_deref(),
+                why.as_deref(),
+            );
+        }
+        if after_variant_policy != self.before_variant_policy {
+            self.deployment.record(
+                GovernanceChange::QPagePolicyChanged {
+                    tenant: self.tenant.0.clone(),
+                    permitted: after_variant_policy
+                        .permitted
+                        .iter()
+                        .map(|variant| format!("{variant:?}"))
+                        .collect(),
+                    experimental_bridge_opted_in: after_variant_policy.experimental_bridge_opted_in,
+                },
+                by.as_deref(),
+                why.as_deref(),
+            );
+        }
     }
 }
 
@@ -1874,6 +2109,13 @@ pub struct TenantSnapshot {
     pub qpages: QPageRegistry,
     #[serde(default)]
     pub active_model: Option<String>,
+    /// The variant activation policy. Empty by default so older snapshots
+    /// load; a policy with an unsupported schema is refused on restore.
+    #[serde(default)]
+    pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
+    /// Approval evidence for approval-required active variants.
+    #[serde(default)]
+    pub variant_approvals: BTreeMap<AdvancedQPageVariant, String>,
 }
 
 /// The deployment's durable human approval ledger.
@@ -2004,6 +2246,10 @@ pub enum RestoreError {
         tenant: String,
         active_model: Option<String>,
     },
+    /// A tenant's variant activation policy has an unsupported schema.
+    /// Refused: a policy the build cannot interpret must not be carried
+    /// silently.
+    VariantPolicyCorrupt { tenant: String, detail: String },
     /// The journal does not continue the snapshot: replaying it would either
     /// skip decisions or double-count them.
     JournalDiscontinuity { expected: u64, found: u64 },
@@ -2044,6 +2290,9 @@ impl std::fmt::Display for RestoreError {
                 f,
                 "tenant {tenant:?} has invalid or ambiguous active model {active_model:?}"
             ),
+            Self::VariantPolicyCorrupt { tenant, detail } => {
+                write!(f, "tenant {tenant:?} variant policy is corrupt: {detail}")
+            }
             Self::JournalDiscontinuity { expected, found } => write!(
                 f,
                 "journal resumes at sequence {found}, snapshot expects {expected}"
@@ -2092,6 +2341,8 @@ impl Deployment {
                             models: state.models.clone(),
                             qpages: state.qpages.clone(),
                             active_model: state.active_model.clone(),
+                            variant_policy: state.variant_policy.clone(),
+                            variant_approvals: state.variant_approvals.clone(),
                         },
                     )
                 })
@@ -2184,6 +2435,59 @@ impl Deployment {
             };
             let id = TenantId(name);
             d.tenant_owner.insert(id.clone(), OrgId(t.owner));
+            // The variant policy must be schema-valid, or the restore is
+            // refused: a policy with an unsupported schema is corrupt state.
+            t.variant_policy
+                .validate()
+                .map_err(|detail| RestoreError::VariantPolicyCorrupt {
+                    tenant: id.0.clone(),
+                    detail,
+                })?;
+            for variant in t.qpages.active() {
+                match t.variant_policy.evaluate(variant) {
+                    ccos_enterprise_qpages::policy::ActivationDecision::Denied => {
+                        return Err(RestoreError::VariantPolicyCorrupt {
+                            tenant: id.0.clone(),
+                            detail: format!(
+                                "active variant {variant:?} is denied by restored policy"
+                            ),
+                        });
+                    }
+                    ccos_enterprise_qpages::policy::ActivationDecision::Allowed => {}
+                    ccos_enterprise_qpages::policy::ActivationDecision::RequiresApproval => {
+                        let Some(approval_id) = t.variant_approvals.get(&variant) else {
+                            return Err(RestoreError::VariantPolicyCorrupt {
+                                tenant: id.0.clone(),
+                                detail: format!(
+                                    "active variant {variant:?} has no persisted approval identity"
+                                ),
+                            });
+                        };
+                        let Some(record) =
+                            d.approvals.registry().snapshot().approvals.get(approval_id)
+                        else {
+                            return Err(RestoreError::VariantPolicyCorrupt {
+                                tenant: id.0.clone(),
+                                detail: format!("unknown activation approval {approval_id:?}"),
+                            });
+                        };
+                        let artifact = Self::qpage_activation_artifact_hash(&id, variant);
+                        if record.tenant != id.0
+                            || record.action != "qpage.activate"
+                            || record.artifact_hash != artifact
+                            || record.decision
+                                != ccos_enterprise_approval::ApprovalDecision::Approved
+                        {
+                            return Err(RestoreError::VariantPolicyCorrupt {
+                                tenant: id.0.clone(),
+                                detail: format!(
+                                    "activation approval {approval_id:?} is not bound to {variant:?}"
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
             d.tenants.insert(
                 id,
                 TenantState {
@@ -2191,6 +2495,8 @@ impl Deployment {
                     models: t.models,
                     qpages: t.qpages,
                     active_model,
+                    variant_policy: t.variant_policy,
+                    variant_approvals: t.variant_approvals,
                 },
             );
         }
@@ -2361,7 +2667,8 @@ pub fn two_tenant_deployment() -> Deployment {
 
     let mut acme = TenantState::new(1_000);
     acme.allow_model("claude-opus")
-        .activate(AdvancedQPageVariant::Hierarchical);
+        .permit_variant_raw(AdvancedQPageVariant::Hierarchical);
+    acme.activate_raw(AdvancedQPageVariant::Hierarchical);
     d.add_tenant("memorithm", "acme", acme);
 
     let mut globex = TenantState::new(500);
@@ -2875,5 +3182,148 @@ mod tests {
             matches!(err, RestoreError::ApprovalLedgerCorrupt { .. }),
             "{err}"
         );
+    }
+
+    #[test]
+    fn live_raw_activation_is_not_public_and_governed_activation_obeys_policy() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        assert!(d
+            .activate_variant_governed(&tenant, AdvancedQPageVariant::CausalChain, None, 100)
+            .is_err());
+        d.tenant_mut("acme")
+            .unwrap()
+            .permit_variant(AdvancedQPageVariant::CausalChain);
+        d.activate_variant_governed(&tenant, AdvancedQPageVariant::CausalChain, None, 100)
+            .unwrap();
+        assert!(d
+            .tenants
+            .get(&tenant)
+            .unwrap()
+            .qpages
+            .is_active(AdvancedQPageVariant::CausalChain));
+    }
+
+    #[test]
+    fn experimental_bridge_rejects_fabricated_and_wrong_artifact_approval() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        d.tenant_mut("acme").unwrap().opt_in_experimental_bridge();
+        assert!(d
+            .activate_variant_governed(
+                &tenant,
+                AdvancedQPageVariant::ExperimentalBridge,
+                Some("fabricated"),
+                100,
+            )
+            .is_err());
+        let wrong = ccos_enterprise_approval::ApprovalRequest::new(
+            tenant.clone(),
+            "qpage.activate",
+            &"11".repeat(32),
+            "operator",
+            ccos_enterprise_approval::ApprovalDecision::Approved,
+            10,
+            None,
+            "wrong artifact",
+        )
+        .unwrap();
+        let wrong_id = d.record_approval(wrong).unwrap();
+        assert!(d
+            .activate_variant_governed(
+                &tenant,
+                AdvancedQPageVariant::ExperimentalBridge,
+                Some(&wrong_id),
+                100,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn exact_bridge_approval_is_persisted_and_revalidated_on_admission() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        d.tenant_mut("acme").unwrap().opt_in_experimental_bridge();
+        let artifact = Deployment::qpage_activation_artifact_hash(
+            &tenant,
+            AdvancedQPageVariant::ExperimentalBridge,
+        );
+        let approval = ccos_enterprise_approval::ApprovalRequest::new(
+            tenant.clone(),
+            "qpage.activate",
+            &artifact,
+            "operator",
+            ccos_enterprise_approval::ApprovalDecision::Approved,
+            10,
+            None,
+            "approve exact experimental bridge activation",
+        )
+        .unwrap();
+        let id = d.record_approval(approval).unwrap();
+        d.activate_variant_governed(
+            &tenant,
+            AdvancedQPageVariant::ExperimentalBridge,
+            Some(&id),
+            100,
+        )
+        .unwrap();
+        let snap = d.snapshot();
+        assert_eq!(
+            snap.tenants["acme"]
+                .variant_approvals
+                .get(&AdvancedQPageVariant::ExperimentalBridge),
+            Some(&id)
+        );
+        let restored = Deployment::restore(
+            snap,
+            &[],
+            d.governance().cloned().collect::<Vec<_>>().as_slice(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.tenants[&tenant]
+                .variant_approvals
+                .get(&AdvancedQPageVariant::ExperimentalBridge),
+            Some(&id)
+        );
+    }
+
+    #[test]
+    fn restored_active_variant_denied_by_default_policy_is_refused() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        d.tenants
+            .get_mut(&tenant)
+            .unwrap()
+            .activate_raw(AdvancedQPageVariant::CausalChain);
+        let mut snap = d.snapshot();
+        snap.tenants.get_mut("acme").unwrap().variant_policy =
+            ccos_enterprise_qpages::policy::VariantPolicy::default();
+        assert!(matches!(
+            Deployment::restore(snap, &[], &[]),
+            Err(RestoreError::VariantPolicyCorrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn qpage_policy_changes_are_governance_visible_after_serving() {
+        let mut d = two_tenant_deployment();
+        // Create one decision so subsequent rule changes are journaled.
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+        let req = request("acme", "alice", "memory.recall", "qpage-policy-anchor");
+        let _ = d.admit(Call {
+            actor: &alice,
+            request: &req,
+            model: "claude-opus",
+            cost_tokens: 1,
+            variant: None,
+            justification: None,
+        });
+        d.tenant_mut("acme")
+            .unwrap()
+            .permit_variant(AdvancedQPageVariant::CausalChain);
+        assert!(d
+            .governance()
+            .any(|row| matches!(row.change, GovernanceChange::QPagePolicyChanged { .. })));
     }
 }

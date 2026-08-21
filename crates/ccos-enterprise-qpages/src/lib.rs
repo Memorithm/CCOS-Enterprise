@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod policy;
+
 /// The ten advanced Q-Page variants planned for the product line.
 /// Standard primitives are in `ccos-core`; anything here is additive and
 /// policy-gated.

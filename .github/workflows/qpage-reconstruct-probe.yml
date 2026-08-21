@@ -35,13 +35,19 @@ jobs:
           end = text.index(end_marker, start)
           lines = text[start:end].splitlines()
           program = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
-          old = "    let mut policy = ccos_enterprise_qpages::policy::VariantPolicy::default();\n    policy.schema_version = 0;\n    policy\n"
-          new = "    ccos_enterprise_qpages::policy::VariantPolicy {\n        schema_version: 0,\n        ..Default::default()\n    }\n"
-          if program.count(old) != 1:
-              raise SystemExit(f'legacy initializer anchor count={program.count(old)}')
-          Path('/tmp/qpage_patch.py').write_text(program.replace(old, new, 1))
+          Path('/tmp/qpage_patch.py').write_text(program)
           PY
           python3 /tmp/qpage_patch.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/ccos-enterprise-runtime/src/lib.rs')
+          s = p.read_text()
+          old = "    let mut policy = ccos_enterprise_qpages::policy::VariantPolicy::default();\n    policy.schema_version = 0;\n    policy\n"
+          new = "    ccos_enterprise_qpages::policy::VariantPolicy {\n        schema_version: 0,\n        ..Default::default()\n    }\n"
+          if s.count(old) != 1:
+              raise SystemExit(f'generated legacy initializer anchor count={s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
           cargo fmt --all
           cargo fmt --all -- --check
           cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features

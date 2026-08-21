@@ -76,6 +76,20 @@ jobs:
           if s.count(historical) < 1:
               raise SystemExit('historical admission anchor missing from hardening script')
           s = s.replace(historical, current, 1)
+          snap_old = "qpages: state.qpages.clone(),\\n                            variant_policy: state.variant_policy.clone(),\\n''',"
+          snap_old_current = "qpages: state.qpages.clone(),\\n                            active_model: state.active_model.clone(),\\n                            variant_policy: state.variant_policy.clone(),\\n''',"
+          snap_new = "qpages: state.qpages.clone(),\\n                            variant_policy: state.variant_policy.clone(),\\n                            variant_approvals: state.variant_approvals.clone(),\\n''',"
+          snap_new_current = "qpages: state.qpages.clone(),\\n                            active_model: state.active_model.clone(),\\n                            variant_policy: state.variant_policy.clone(),\\n                            variant_approvals: state.variant_approvals.clone(),\\n''',"
+          if s.count(snap_old) != 1 or s.count(snap_new) != 1:
+              raise SystemExit('historical snapshot anchors missing')
+          s = s.replace(snap_old, snap_old_current, 1).replace(snap_new, snap_new_current, 1)
+          restore_old = "qpages: t.qpages,\\n                    variant_policy: t.variant_policy,\\n                },\\n            );\\n'''"
+          restore_old_current = "qpages: t.qpages,\\n                    active_model,\\n                    variant_policy: t.variant_policy,\\n                },\\n            );\\n'''"
+          restore_new = "qpages: t.qpages,\\n                    variant_policy: t.variant_policy,\\n                    variant_approvals: t.variant_approvals,\\n                },\\n            );\\n'''"
+          restore_new_current = "qpages: t.qpages,\\n                    active_model,\\n                    variant_policy: t.variant_policy,\\n                    variant_approvals: t.variant_approvals,\\n                },\\n            );\\n'''"
+          if s.count(restore_old) != 1 or s.count(restore_new) != 1:
+              raise SystemExit('historical restore anchors missing')
+          s = s.replace(restore_old, restore_old_current, 1).replace(restore_new, restore_new_current, 1)
           marker = "git config user.name 'MEMOPERF'"
           if marker not in s:
               raise SystemExit('delivery marker missing')

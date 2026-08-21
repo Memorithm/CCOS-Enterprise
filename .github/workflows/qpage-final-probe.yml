@@ -40,7 +40,19 @@ jobs:
           new = 's = one(s, ".activate(AdvancedQPageVariant::Hierarchical);", ".permit_variant_raw(AdvancedQPageVariant::Hierarchical);\\n    acme.activate_raw(AdvancedQPageVariant::Hierarchical);", \'internal provisioning activation\')'
           if script.count(old) != 1:
               raise SystemExit(f'fixture adaptation anchor count={script.count(old)}')
-          Path('/tmp/reconstruct.sh').write_text(script.replace(old, new, 1))
+          script = script.replace(old, new, 1)
+          anchor = 'marker = "git config user.name \'MEMOPERF\'"\n'
+          insert = (
+              "tests_start = s.index(\"new_tests = r'''\")\n"
+              "tests_end = s.index(\"s = s[:idx] + new_tests\", tests_start)\n"
+              "tests_chunk = s[tests_start:tests_end]\n"
+              "tests_chunk = tests_chunk.replace(\"AdvancedQPageVariant::Hierarchical\", \"AdvancedQPageVariant::CausalChain\")\n"
+              "s = s[:tests_start] + tests_chunk + s[tests_end:]\n"
+          )
+          if script.count(anchor) != 1:
+              raise SystemExit(f'hardening test insertion anchor count={script.count(anchor)}')
+          script = script.replace(anchor, insert + anchor, 1)
+          Path('/tmp/reconstruct.sh').write_text(script)
           PY
           bash /tmp/reconstruct.sh
           mkdir -p /tmp/qpage-final/crates/ccos-enterprise-qpages/src

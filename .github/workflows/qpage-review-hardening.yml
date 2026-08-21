@@ -20,27 +20,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply and validate Q-Page P1/P2 fixes
+      - name: Apply and validate remaining Q-Page P1/P2 runtime fixes
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "c32e9c0d1657000fcfe362ac320e888a2693743f"
+          test "$(git rev-parse HEAD)" = "ca2ac87d018a00eb1d293425f8bcc7234199bef9"
           python3 - <<'PY'
           from pathlib import Path
-
-          policy = Path('crates/ccos-enterprise-qpages/src/policy.rs')
-          s = policy.read_text()
-          old = '''    /// Withdraw permission for a variant.\n    pub fn revoke(&mut self, variant: AdvancedQPageVariant) -> bool {\n        self.permitted.remove(&variant)\n    }\n'''
-          new = '''    /// Withdraw permission for a variant.\n    pub fn revoke(&mut self, variant: AdvancedQPageVariant) -> bool {\n        if variant == EXPERIMENTAL_BRIDGE {\n            return std::mem::replace(&mut self.experimental_bridge_opted_in, false);\n        }\n        self.permitted.remove(&variant)\n    }\n'''
-          if s.count(old) != 1:
-              raise SystemExit(f'policy revoke anchor count={s.count(old)}')
-          s = s.replace(old, new, 1)
-          test_anchor = '''    #[test]\n    fn unsupported_schema_is_refused() {\n'''
-          test_insert = '''    #[test]\n    fn experimental_bridge_opt_in_is_revocable() {\n        let mut policy = VariantPolicy::default();\n        policy.opt_in_experimental_bridge();\n        assert_eq!(\n            policy.evaluate(EXPERIMENTAL_BRIDGE),\n            ActivationDecision::RequiresApproval\n        );\n        assert!(policy.revoke(EXPERIMENTAL_BRIDGE));\n        assert_eq!(policy.evaluate(EXPERIMENTAL_BRIDGE), ActivationDecision::Denied);\n        assert!(!policy.revoke(EXPERIMENTAL_BRIDGE));\n    }\n\n'''
-          if s.count(test_anchor) != 1:
-              raise SystemExit(f'policy test anchor count={s.count(test_anchor)}')
-          s = s.replace(test_anchor, test_insert + test_anchor, 1)
-          policy.write_text(s)
 
           runtime = Path('crates/ccos-enterprise-runtime/src/lib.rs')
           s = runtime.read_text()
@@ -177,43 +163,6 @@ jobs:
             .is_err());
     }
 
-    #[test]
-    fn revoking_bridge_policy_deactivates_an_active_bridge() {
-        let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
-        d.tenant_mut("acme").unwrap().opt_in_experimental_bridge();
-        let artifact = Deployment::qpage_activation_artifact_hash(
-            &tenant,
-            AdvancedQPageVariant::ExperimentalBridge,
-        );
-        let approval = ccos_enterprise_approval::ApprovalRequest::new(
-            tenant.clone(),
-            "qpage.activate",
-            &artifact,
-            "operator",
-            ccos_enterprise_approval::ApprovalDecision::Approved,
-            10,
-            None,
-            "bridge approval",
-        )
-        .unwrap();
-        let id = d.record_approval(approval).unwrap();
-        d.activate_variant_governed(
-            &tenant,
-            AdvancedQPageVariant::ExperimentalBridge,
-            Some(&id),
-            10,
-        )
-        .unwrap();
-        assert!(d
-            .tenant_mut("acme")
-            .unwrap()
-            .revoke_variant(AdvancedQPageVariant::ExperimentalBridge));
-        assert!(!d.tenants[&tenant]
-            .qpages
-            .is_active(AdvancedQPageVariant::ExperimentalBridge));
-    }
-
 '''
           if s.count(test_anchor) != 1:
               raise SystemExit(f'runtime test anchor count={s.count(test_anchor)}')
@@ -225,13 +174,12 @@ jobs:
           cargo fmt --all -- --check
           cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
           cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
-          cargo test -p ccos-enterprise-qpages
           cargo test -p ccos-enterprise-runtime --features test-fixtures
           cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
 
           git status --short
-          test "$(git status --porcelain=v1 | wc -l)" -eq 2
-          git add crates/ccos-enterprise-qpages/src/policy.rs crates/ccos-enterprise-runtime/src/lib.rs
+          test "$(git status --porcelain=v1 | wc -l)" -eq 1
+          git add crates/ccos-enterprise-runtime/src/lib.rs
           git config user.name 'MEMOPERF'
           git config user.email 'contact@checkupauto.fr'
           git commit -m 'fix(qpages): resolve approval and legacy policy findings'

@@ -20,13 +20,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply and validate remaining Q-Page P1/P2 runtime fixes
+      - name: Apply and validate remaining Q-Page P1/P2 and conformance fixes
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "ca2ac87d018a00eb1d293425f8bcc7234199bef9"
           python3 - <<'PY'
           from pathlib import Path
+
+          stress = Path('tests/ccos-enterprise-conformance/tests/stress_budget_property.rs')
+          s = stress.read_text()
+          import_anchor = 'use ccos_enterprise_qpages::AdvancedQPageVariant;\n'
+          if s.count(import_anchor) != 1:
+              raise SystemExit(f'TenantId import anchor count={s.count(import_anchor)}')
+          s = s.replace(
+              import_anchor,
+              import_anchor + 'use ccos_enterprise_tenancy::TenantId;\n',
+              1,
+          )
+          old = '''    {\n        let mut t = d.tenant_mut("acme").expect("tenant");\n        assert_eq!(t.spent(), 1_000, "the ledger is readable…");\n        assert_eq!(t.limit(), 1_000, "…and so is the ceiling…");\n        t.allow_model("another-model")\n            .activate(AdvancedQPageVariant::CausalChain);\n        assert_eq!(t.spent(), 1_000, "…but configuration cannot rewind it");\n        assert_eq!(t.limit(), 1_000, "…nor widen it");\n    }\n'''
+          new = '''    {\n        let mut t = d.tenant_mut("acme").expect("tenant");\n        assert_eq!(t.spent(), 1_000, "the ledger is readable…");\n        assert_eq!(t.limit(), 1_000, "…and so is the ceiling…");\n        t.allow_model("another-model");\n        assert!(t.permit_variant(AdvancedQPageVariant::CausalChain));\n        assert_eq!(t.spent(), 1_000, "…but configuration cannot rewind it");\n        assert_eq!(t.limit(), 1_000, "…nor widen it");\n    }\n    d.activate_variant_governed(\n        &TenantId("acme".into()),\n        AdvancedQPageVariant::CausalChain,\n        None,\n        0,\n    )\n    .expect("permitted Q-Page fixture activation");\n'''
+          if s.count(old) != 1:
+              raise SystemExit(f'budget fixture causal anchor count={s.count(old)}')
+          s = s.replace(old, new, 1)
+          old = '''    let mut acme = TenantState::new(4_000_000);\n    acme.allow_model("m")\n        .activate(AdvancedQPageVariant::Hierarchical);\n    assert!(d.add_tenant("o", "acme", acme));\n'''
+          new = '''    let mut acme = TenantState::new(4_000_000);\n    acme.allow_model("m");\n    assert!(d.add_tenant("o", "acme", acme));\n    assert!(d\n        .tenant_mut("acme")\n        .expect("tenant was just provisioned")\n        .permit_variant(AdvancedQPageVariant::Hierarchical));\n    d.activate_variant_governed(\n        &TenantId("acme".into()),\n        AdvancedQPageVariant::Hierarchical,\n        None,\n        0,\n    )\n    .expect("permitted Q-Page fixture activation");\n'''
+          if s.count(old) != 1:
+              raise SystemExit(f'budget fixture hierarchical anchor count={s.count(old)}')
+          stress.write_text(s)
 
           runtime = Path('crates/ccos-enterprise-runtime/src/lib.rs')
           s = runtime.read_text()
@@ -175,12 +196,13 @@ jobs:
           cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
           cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
           cargo test -p ccos-enterprise-runtime --features test-fixtures
+          cargo test -p ccos-enterprise-conformance --test stress_budget_property --release
           cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
 
           git status --short
-          test "$(git status --porcelain=v1 | wc -l)" -eq 1
-          git add crates/ccos-enterprise-runtime/src/lib.rs
+          test "$(git status --porcelain=v1 | wc -l)" -eq 2
+          git add crates/ccos-enterprise-runtime/src/lib.rs tests/ccos-enterprise-conformance/tests/stress_budget_property.rs
           git config user.name 'MEMOPERF'
           git config user.email 'contact@checkupauto.fr'
-          git commit -m 'fix(qpages): resolve approval and legacy policy findings'
+          git commit -m 'fix(qpages): resolve review findings and budget fixtures'
           git push origin HEAD:fix/qpage-replacement

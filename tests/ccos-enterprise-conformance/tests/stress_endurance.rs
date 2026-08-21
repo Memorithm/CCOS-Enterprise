@@ -342,13 +342,24 @@ fn fleet_deployment(names: &[String]) -> Deployment {
         if i % 2 == 0 {
             // Even tenants are the "advanced" ones: second model, activated
             // variant. Odd tenants refuse both, forever.
-            st.allow_model("gpt-5")
-                .activate(AdvancedQPageVariant::Hierarchical);
+            st.allow_model("gpt-5");
         }
         assert!(
             d.add_tenant(FLEET_ORG, name, st),
             "tenant {name} was provisioned twice"
         );
+        if i % 2 == 0 {
+            d.tenant_mut(name)
+                .expect("tenant was just provisioned")
+                .permit_variant(AdvancedQPageVariant::Hierarchical);
+            d.activate_variant_governed(
+                &ccos_enterprise_tenancy::TenantId(name.clone()),
+                AdvancedQPageVariant::Hierarchical,
+                None,
+                0,
+            )
+            .expect("ordinary endurance variant is policy-permitted");
+        }
     }
     assert!(d.assign("alice", "writer"));
     assert!(d.assign("bob", "reader"));

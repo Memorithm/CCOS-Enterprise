@@ -7,7 +7,7 @@ on:
       - '.github/workflows/qpage-final-probe.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   probe:
@@ -17,13 +17,15 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
-      - name: Run proven reconstruction with policy-consistent fixture
+      - name: Reconstruct, validate, and deliver clean Q-Page product
         id: reconstruct
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin ci/qpage-reconstruct-probe
+          git fetch origin ci/qpage-reconstruct-probe fix/qpage-replacement
+          test "$(git rev-parse HEAD)" = "c4e0b0f51a052a96f85c5871472d85792467111e"
+          test "$(git rev-parse origin/fix/qpage-replacement)" = "c4e0b0f51a052a96f85c5871472d85792467111e"
           git show origin/ci/qpage-reconstruct-probe:.github/workflows/qpage-reconstruct-probe.yml > /tmp/source.yml
           python3 - <<'PY'
           from pathlib import Path
@@ -51,26 +53,48 @@ jobs:
           )
           if script.count(anchor) != 1:
               raise SystemExit(f'hardening test insertion anchor count={script.count(anchor)}')
-          script = script.replace(anchor, insert + anchor, 1)
-          Path('/tmp/reconstruct.sh').write_text(script)
+          Path('/tmp/reconstruct.sh').write_text(script.replace(anchor, insert + anchor, 1))
           PY
           bash /tmp/reconstruct.sh
-          mkdir -p /tmp/qpage-final/crates/ccos-enterprise-qpages/src
-          mkdir -p /tmp/qpage-final/crates/ccos-enterprise-runtime/src
-          cp crates/ccos-enterprise-qpages/src/lib.rs /tmp/qpage-final/crates/ccos-enterprise-qpages/src/lib.rs
-          cp crates/ccos-enterprise-qpages/src/policy.rs /tmp/qpage-final/crates/ccos-enterprise-qpages/src/policy.rs
-          cp crates/ccos-enterprise-runtime/Cargo.toml /tmp/qpage-final/crates/ccos-enterprise-runtime/Cargo.toml
-          cp crates/ccos-enterprise-runtime/src/lib.rs /tmp/qpage-final/crates/ccos-enterprise-runtime/src/lib.rs
-          cp /tmp/qpage-result.patch /tmp/qpage-final/qpage-result.patch
-      - name: Upload final Q-Page reconstruction
+
+          git diff HEAD --binary > /tmp/qpage-full-product.patch
+          printf '%s\n' '--- FINAL PRODUCT STATUS ---'
+          git status --short
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              'Cargo.lock',
+              'crates/ccos-enterprise-qpages/src/lib.rs',
+              'crates/ccos-enterprise-qpages/src/policy.rs',
+              'crates/ccos-enterprise-runtime/src/lib.rs',
+          }
+          rows = subprocess.check_output(['git', 'status', '--porcelain=v1'], text=True).splitlines()
+          paths = {row[3:] for row in rows}
+          if paths != allowed:
+              raise SystemExit(f'unexpected product paths: {sorted(paths)}')
+          if any(path.startswith('.ci/') or path.startswith('.github/workflows/') for path in paths):
+              raise SystemExit('validator artifact leaked into product paths')
+          PY
+          git add Cargo.lock \
+            crates/ccos-enterprise-qpages/src/lib.rs \
+            crates/ccos-enterprise-qpages/src/policy.rs \
+            crates/ccos-enterprise-runtime/src/lib.rs
+          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = "$(printf '%s\n' Cargo.lock crates/ccos-enterprise-qpages/src/lib.rs crates/ccos-enterprise-qpages/src/policy.rs crates/ccos-enterprise-runtime/src/lib.rs | sort | tr '\n' ' ')"
+          git config user.name 'MEMOPERF'
+          git config user.email 'contact@checkupauto.fr'
+          git commit -m 'feat(qpages): govern durable variant activation'
+          git push origin HEAD:fix/qpage-replacement
+          git rev-parse HEAD > /tmp/qpage-product-sha.txt
+      - name: Upload delivered Q-Page diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qpage-final-reconstruction
+          name: qpage-delivered-product
           path: |
             /tmp/qpage-probe.log
             /tmp/qpage-result.patch
-            /tmp/qpage-final
+            /tmp/qpage-full-product.patch
+            /tmp/qpage-product-sha.txt
           if-no-files-found: ignore
       - name: Preserve reconstruction failure
         if: steps.reconstruct.outcome == 'failure'

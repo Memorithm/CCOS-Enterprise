@@ -1102,30 +1102,19 @@ impl Deployment {
                 let id = approval_id
                     .ok_or_else(|| format!("{variant:?} requires a recorded human approval"))?;
                 let artifact = Self::qpage_activation_artifact_hash(tenant, variant);
-                let record = self
-                    .approvals
-                    .registry()
-                    .snapshot()
-                    .approvals
-                    .get(id)
-                    .ok_or_else(|| "supplied Q-Page approval id is not recorded".to_string())?;
-                if record.tenant != tenant.0
-                    || record.action != "qpage.activate"
-                    || record.artifact_hash != artifact
-                    || record.decision != ccos_enterprise_approval::ApprovalDecision::Approved
-                {
-                    return Err("supplied approval is not bound to this Q-Page activation".into());
-                }
                 let query = ccos_enterprise_approval::ApprovalQuery {
                     tenant,
                     action: "qpage.activate",
                     artifact_hash: &artifact,
                     now,
                 };
-                if self.approvals.evaluate(&query)
+                if self.approvals.evaluate_id(id, &query)
                     != ccos_enterprise_approval::GateOutcome::Approved
                 {
-                    return Err("Q-Page approval is expired, revoked, legacy, or invalid".into());
+                    return Err(
+                        "supplied Q-Page approval id is expired, revoked, legacy, unbound, or invalid"
+                            .into(),
+                    );
                 }
                 Some(id.to_string())
             }
@@ -1622,23 +1611,14 @@ impl Deployment {
                         return refuse(Refusal::RequiresApproval);
                     };
                     let artifact = Self::qpage_activation_artifact_hash(&tenant_id, v);
-                    let Some(record) = self.approvals.registry().snapshot().approvals.get(id)
-                    else {
-                        return refuse(Refusal::RequiresApproval);
+                    let query = ccos_enterprise_approval::ApprovalQuery {
+                        tenant: &tenant_id,
+                        action: "qpage.activate",
+                        artifact_hash: &artifact,
+                        now: now_unix(),
                     };
-                    if record.tenant != tenant_id.0
-                        || record.action != "qpage.activate"
-                        || record.artifact_hash != artifact
-                        || record.decision != ccos_enterprise_approval::ApprovalDecision::Approved
-                        || self
-                            .approvals
-                            .evaluate(&ccos_enterprise_approval::ApprovalQuery {
-                                tenant: &tenant_id,
-                                action: "qpage.activate",
-                                artifact_hash: &artifact,
-                                now: now_unix(),
-                            })
-                            != ccos_enterprise_approval::GateOutcome::Approved
+                    if self.approvals.evaluate_id(id, &query)
+                        != ccos_enterprise_approval::GateOutcome::Approved
                     {
                         return refuse(Refusal::RequiresApproval);
                     }
@@ -2100,6 +2080,46 @@ fn tag(r: &Refusal) -> &'static str {
 /// under the wrong shape is worse than no ledger at all.
 pub const SNAPSHOT_SCHEMA: &str = "ccos.enterprise.deployment/v1";
 
+/// Internal sentinel used only while deserializing a pre-policy v1 snapshot.
+///
+/// A present policy may never use this value: the custom deserializer below
+/// rejects it. That distinction lets restore migrate a genuinely absent legacy
+/// field without mistaking an explicitly persisted deny-all policy for legacy
+/// state and silently widening it.
+const LEGACY_MISSING_VARIANT_POLICY_SCHEMA: u32 = u32::MAX;
+
+fn legacy_missing_variant_policy() -> ccos_enterprise_qpages::policy::VariantPolicy {
+    ccos_enterprise_qpages::policy::VariantPolicy {
+        schema_version: LEGACY_MISSING_VARIANT_POLICY_SCHEMA,
+        permitted: BTreeSet::new(),
+        experimental_bridge_opted_in: false,
+    }
+}
+
+fn is_legacy_missing_variant_policy(
+    policy: &ccos_enterprise_qpages::policy::VariantPolicy,
+) -> bool {
+    policy.schema_version == LEGACY_MISSING_VARIANT_POLICY_SCHEMA
+}
+
+fn deserialize_present_variant_policy<'de, D>(
+    deserializer: D,
+) -> Result<ccos_enterprise_qpages::policy::VariantPolicy, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let policy =
+        <ccos_enterprise_qpages::policy::VariantPolicy as serde::Deserialize>::deserialize(
+            deserializer,
+        )?;
+    if policy.schema_version == LEGACY_MISSING_VARIANT_POLICY_SCHEMA {
+        return Err(<D::Error as serde::de::Error>::custom(
+            "reserved legacy-missing variant policy schema marker",
+        ));
+    }
+    Ok(policy)
+}
+
 /// One tenant's governed state, as plain data.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TenantSnapshot {
@@ -2109,9 +2129,15 @@ pub struct TenantSnapshot {
     pub qpages: QPageRegistry,
     #[serde(default)]
     pub active_model: Option<String>,
-    /// The variant activation policy. Empty by default so older snapshots
-    /// load; a policy with an unsupported schema is refused on restore.
-    #[serde(default)]
+    /// The variant activation policy. When the field is genuinely absent in
+    /// a pre-policy v1 snapshot, deserialization uses an internal sentinel so
+    /// restore can migrate already-active ordinary variants. A policy that is
+    /// explicitly present remains authoritative and is never widened.
+    #[serde(
+        default = "legacy_missing_variant_policy",
+        deserialize_with = "deserialize_present_variant_policy",
+        skip_serializing_if = "is_legacy_missing_variant_policy"
+    )]
     pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
     /// Approval evidence for approval-required active variants.
     #[serde(default)]
@@ -2134,6 +2160,16 @@ impl ApprovalLedger {
         query: &ccos_enterprise_approval::ApprovalQuery<'_>,
     ) -> ccos_enterprise_approval::GateOutcome {
         self.registry.evaluate(query)
+    }
+
+    /// Evaluate one exact persisted approval identity without allowing a
+    /// replacement approval for the same artifact to satisfy the gate.
+    pub fn evaluate_id(
+        &self,
+        id: &str,
+        query: &ccos_enterprise_approval::ApprovalQuery<'_>,
+    ) -> ccos_enterprise_approval::GateOutcome {
+        self.registry.evaluate_id(id, query)
     }
 
     pub fn record(
@@ -2403,7 +2439,7 @@ impl Deployment {
             }
         })?;
 
-        for (name, t) in snapshot.tenants {
+        for (name, mut t) in snapshot.tenants {
             check_identifier("tenant", &name)?;
             check_identifier("org", &t.owner)?;
             if t.owner.is_empty() {
@@ -2435,14 +2471,42 @@ impl Deployment {
             };
             let id = TenantId(name);
             d.tenant_owner.insert(id.clone(), OrgId(t.owner));
-            // The variant policy must be schema-valid, or the restore is
-            // refused: a policy with an unsupported schema is corrupt state.
-            t.variant_policy
-                .validate()
-                .map_err(|detail| RestoreError::VariantPolicyCorrupt {
-                    tenant: id.0.clone(),
-                    detail,
+            // A pre-policy v1 snapshot had no `variant_policy` field at all.
+            // Preserve its already-active ordinary variants by migrating them
+            // into an equivalent explicit allow policy. ExperimentalBridge is
+            // intentionally not migrated: old snapshots carried no durable
+            // activation approval identity for this high-risk variant.
+            if t.variant_policy.schema_version == LEGACY_MISSING_VARIANT_POLICY_SCHEMA {
+                let active = t.qpages.active();
+                if active.contains(&AdvancedQPageVariant::ExperimentalBridge) {
+                    return Err(RestoreError::VariantPolicyCorrupt {
+                        tenant: id.0.clone(),
+                        detail: "legacy snapshot has active ExperimentalBridge without durable activation approval evidence"
+                            .into(),
+                    });
+                }
+
+                let mut migrated = ccos_enterprise_qpages::policy::VariantPolicy::default();
+                for variant in active {
+                    let inserted = migrated.permit(variant);
+                    debug_assert!(
+                        inserted,
+                        "ordinary legacy active variant must be migratable"
+                    );
+                }
+                t.variant_policy = migrated;
+            } else {
+                // A policy explicitly present in the snapshot is authoritative.
+                // Unsupported schemas or an explicit deny-all policy are not
+                // treated as legacy and therefore remain fail-closed.
+                t.variant_policy.validate().map_err(|detail| {
+                    RestoreError::VariantPolicyCorrupt {
+                        tenant: id.0.clone(),
+                        detail,
+                    }
                 })?;
+            }
+
             for variant in t.qpages.active() {
                 match t.variant_policy.evaluate(variant) {
                     ccos_enterprise_qpages::policy::ActivationDecision::Denied => {
@@ -3285,6 +3349,180 @@ mod tests {
                 .variant_approvals
                 .get(&AdvancedQPageVariant::ExperimentalBridge),
             Some(&id)
+        );
+    }
+
+    #[test]
+    fn legacy_snapshot_without_variant_policy_migrates_active_ordinary_variants() {
+        let d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+
+        // Serialize first, then remove the fields exactly as a pre-policy v1
+        // snapshot would look on disk. Directly assigning Default here would
+        // test an explicitly persisted deny-all policy, which must remain
+        // fail-closed and is covered separately below.
+        let mut value = serde_json::to_value(d.snapshot()).unwrap();
+        let acme = value
+            .get_mut("tenants")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|tenants| tenants.get_mut("acme"))
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap();
+        assert!(acme.remove("variant_policy").is_some());
+        assert!(acme.remove("variant_approvals").is_some());
+
+        let legacy: DeploymentSnapshot = serde_json::from_value(value).unwrap();
+
+        // A loaded legacy snapshot may be inspected or checkpointed before
+        // restore. The internal absence marker must never become durable wire
+        // state: serializing it keeps the field absent, so another load still
+        // recognizes the snapshot as genuinely pre-policy.
+        let reserialized = serde_json::to_value(&legacy).unwrap();
+        let acme = reserialized
+            .get("tenants")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|tenants| tenants.get("acme"))
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(
+            !acme.contains_key("variant_policy"),
+            "the internal legacy marker must never be serialized"
+        );
+
+        let legacy: DeploymentSnapshot = serde_json::from_value(reserialized).unwrap();
+        let restored = Deployment::restore(legacy, &[], &[]).unwrap();
+        let state = &restored.tenants[&tenant];
+
+        assert!(state.qpages.is_active(AdvancedQPageVariant::Hierarchical));
+        assert_eq!(
+            state
+                .variant_policy
+                .evaluate(AdvancedQPageVariant::Hierarchical),
+            ccos_enterprise_qpages::policy::ActivationDecision::Allowed
+        );
+    }
+
+    #[test]
+    fn legacy_snapshot_with_active_experimental_bridge_remains_fail_closed() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        d.tenants
+            .get_mut(&tenant)
+            .unwrap()
+            .activate_raw(AdvancedQPageVariant::ExperimentalBridge);
+
+        let mut value = serde_json::to_value(d.snapshot()).unwrap();
+        let acme = value
+            .get_mut("tenants")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|tenants| tenants.get_mut("acme"))
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap();
+        assert!(acme.remove("variant_policy").is_some());
+        assert!(acme.remove("variant_approvals").is_some());
+
+        let legacy: DeploymentSnapshot = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            Deployment::restore(legacy, &[], &[]),
+            Err(RestoreError::VariantPolicyCorrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn supplied_approval_id_must_itself_be_live() {
+        let mut d = two_tenant_deployment();
+        let tenant = TenantId("acme".into());
+        let variant = AdvancedQPageVariant::ExperimentalBridge;
+        d.tenant_mut("acme").unwrap().opt_in_experimental_bridge();
+
+        let artifact = Deployment::qpage_activation_artifact_hash(&tenant, variant);
+
+        let id_a = d
+            .record_approval(
+                ccos_enterprise_approval::ApprovalRequest::new(
+                    tenant.clone(),
+                    "qpage.activate",
+                    &artifact,
+                    "operator",
+                    ccos_enterprise_approval::ApprovalDecision::Approved,
+                    10,
+                    None,
+                    "first exact bridge approval",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let id_b = d
+            .record_approval(
+                ccos_enterprise_approval::ApprovalRequest::new(
+                    tenant.clone(),
+                    "qpage.activate",
+                    &artifact,
+                    "operator",
+                    ccos_enterprise_approval::ApprovalDecision::Approved,
+                    20,
+                    None,
+                    "replacement exact bridge approval",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        // ApprovalRegistry::evaluate() iterates the BTreeMap in reverse key
+        // order. Revoke the lower id and leave the higher one live so the old
+        // artifact-wide implementation deterministically returned Approved
+        // even when the caller supplied/persisted the revoked lower id.
+        let (stale_id, live_id) = if id_a < id_b {
+            (id_a, id_b)
+        } else {
+            (id_b, id_a)
+        };
+
+        d.approvals
+            .registry
+            .revoke(
+                &stale_id,
+                "operator",
+                30,
+                "superseded by replacement approval",
+            )
+            .unwrap();
+
+        assert!(
+            d.activate_variant_governed(&tenant, variant, Some(&stale_id), 100)
+                .is_err(),
+            "a revoked supplied id must not borrow liveness from a replacement"
+        );
+
+        d.activate_variant_governed(&tenant, variant, Some(&live_id), 100)
+            .unwrap();
+
+        // Simulate durable state whose activation identity later became stale.
+        // Admission must revalidate that exact persisted identity.
+        d.tenants
+            .get_mut(&tenant)
+            .unwrap()
+            .variant_approvals
+            .insert(variant, stale_id);
+
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+        let req = request(
+            "acme",
+            "alice",
+            "memory.recall",
+            "qpage-exact-persisted-approval",
+        );
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 1,
+                variant: Some(variant),
+                justification: None,
+            }),
+            Outcome::Refused(Refusal::RequiresApproval)
         );
     }
 

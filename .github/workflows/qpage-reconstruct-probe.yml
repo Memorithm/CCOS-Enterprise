@@ -30,8 +30,13 @@ jobs:
           s = p.read_text()
           # Historical validator typos: repair only malformed Python string labels;
           # this does not alter the intended product transformation.
-          s = s.replace("\ndrop after policy')", "\n'drop after policy')")
-          s = s.replace("\nadmission qpage policy')", "\n'admission qpage policy')")
+          for label in (
+              'drop after policy',
+              'admission qpage policy',
+              'snapshot activation approvals',
+              'snapshot write approvals',
+          ):
+              s = s.replace(f"\n{label}')", f"\n'{label}')")
           marker = "git config user.name 'MEMOPERF'"
           if marker not in s:
               raise SystemExit('delivery marker missing')

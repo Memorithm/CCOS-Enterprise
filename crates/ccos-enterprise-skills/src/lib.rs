@@ -45,7 +45,29 @@ pub use trials::{
     SkillTrialSnapshot, SkillTrialStatus, TrialResolution, SKILL_TRIAL_SNAPSHOT_SCHEMA,
 };
 
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+/// Compute a lowercase SHA-256 digest with an explicit domain and framed
+/// payload. The payload length prevents ambiguous concatenation and the domain
+/// keeps unrelated persisted contracts from sharing a digest namespace.
+///
+/// This helper is intentionally data-agnostic: callers remain responsible for
+/// choosing a stable canonical serialization before hashing.
+pub fn framed_sha256_hex(domain: &[u8], payload: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((domain.len() as u64).to_be_bytes());
+    hasher.update(domain);
+    hasher.update((payload.len() as u64).to_be_bytes());
+    hasher.update(payload);
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
 
 #[derive(Debug)]
 pub enum SkillError {

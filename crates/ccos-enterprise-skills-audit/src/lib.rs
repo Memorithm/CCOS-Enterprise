@@ -39,6 +39,8 @@
 //! identifiers; both are Enterprise-local derived state, and both are
 //! validated by their owning registries before this crate sees them.
 
+pub mod export;
+
 use std::collections::BTreeMap;
 
 use ccos_enterprise_rbac::{Permission, RoleBook};
@@ -613,9 +615,6 @@ mod tests {
         let (skills, skill_id) = active_skill();
         let mut trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
         let ids = vec![skill_id.clone()];
-        // The session name is deliberately distinct from anything a skill id
-        // could legitimately contain, so its absence from the serialized
-        // report is a meaningful no-raw-session assertion.
         const RAW_SESSION: &str = "RAW-SESSION-ID-9f8e7d6c5b4a";
         trials.expose(RAW_SESSION, 10, &skills, &ids).unwrap();
         trials
@@ -644,7 +643,6 @@ mod tests {
         assert_eq!(report.tenant, "acme");
         assert!(!report.empty);
         let skill = &report.skills[0];
-        // Newest-first by ordinal: turn 12 resolved, turn 11 pending, turn 10 resolved.
         assert_eq!(skill.trials.len(), 3);
         let ordinals: Vec<u64> = skill.trials.iter().map(|t| t.ordinal).collect();
         let mut sorted = ordinals.clone();
@@ -654,19 +652,14 @@ mod tests {
         assert_eq!(skill.trials[0].status, TrialStatus::Passed);
         assert_eq!(skill.trials[1].status, TrialStatus::Pending);
         assert_eq!(skill.trials[2].status, TrialStatus::Passed);
-        // Pending trial carries no synthetic evidence; the two resolved trials
-        // dedup onto the two distinct evidence hashes.
         assert_eq!(skill.trials[1].evidence_id, None);
         assert_eq!(skill.evidence_ids.len(), 2);
-        // No raw session id anywhere in the serialized report; the turn keys
-        // are the domain-separated hashes the ledger already validated.
         let text = serde_json::to_string(&report).unwrap();
         assert!(!text.contains(RAW_SESSION), "raw session id leaked: {text}");
         for trial in &skill.trials {
             assert_eq!(trial.turn_key.len(), 64, "turn key is a sha256 hash");
             assert!(trial.turn_key.bytes().all(|b| b.is_ascii_hexdigit()));
         }
-        // Observational counters come from the whole validated ledger.
         assert_eq!(skill.observational.total, 3);
         assert_eq!(skill.observational.pending, 1);
         assert_eq!(skill.observational.passed, 2);
@@ -706,14 +699,11 @@ mod tests {
         assert_eq!(skill.trials.len(), 3);
         assert_eq!(skill.evidence_ids.len(), 1);
         assert!(skill.truncated);
-        // Counters still cover the whole ledger — truncation never hides data.
         assert_eq!(skill.observational.total, 10);
     }
 
     #[test]
     fn corrupt_ledger_is_refused_not_guessed() {
-        // A registry constructed from a corrupt snapshot is refused at
-        // construction; the audit itself can only ever see validated state.
         let mut snapshot = ccos_enterprise_skills::SkillTrialSnapshot::default();
         snapshot.trials.insert(
             "not-a-trial-id".into(),
@@ -759,7 +749,6 @@ mod tests {
         assert!(!text.contains("RAW-SESSION"));
         assert!(!text.contains("77"));
         assert!(!text.contains("call-"));
-        // Evidence hashes are 64 lowercase hex — the only content identifiers.
         assert!(text.contains(&"e".repeat(64)));
     }
 }

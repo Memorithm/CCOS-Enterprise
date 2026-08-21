@@ -48,6 +48,21 @@ jobs:
               raise SystemExit(f'generated legacy initializer anchor count={s.count(old)}')
           p.write_text(s.replace(old, new, 1))
           PY
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs')
+          s = p.read_text()
+          old1 = "        let mut st = TenantState::new(limit);\n        st.allow_model(BASE_MODEL)\n            .activate(AdvancedQPageVariant::Hierarchical);\n        // Every tenant is owned by `HOME_ORG`; nothing in the storm can move\n        // one, so the org gate's input is fixed before any thread starts.\n        assert!(\n            d.add_tenant(HOME_ORG, name, st),\n            \"{name} is provisioned exactly once\"\n        );\n"
+          new1 = "        let mut st = TenantState::new(limit);\n        st.allow_model(BASE_MODEL);\n        // Every tenant is owned by `HOME_ORG`; nothing in the storm can move\n        // one, so the org gate's input is fixed before any thread starts.\n        assert!(\n            d.add_tenant(HOME_ORG, name, st),\n            \"{name} is provisioned exactly once\"\n        );\n        {\n            let mut rules = d.tenant_mut(name).expect(\"tenant was just provisioned\");\n            assert!(rules.permit_variant(AdvancedQPageVariant::Hierarchical));\n        }\n        d.activate_variant_governed(\n            &TenantId(name.to_string()),\n            AdvancedQPageVariant::Hierarchical,\n            None,\n            0,\n        )\n        .expect(\"permitted non-approval Q-Page activation\");\n"
+          if s.count(old1) != 1:
+              raise SystemExit(f'storm fixture activation anchor count={s.count(old1)}')
+          s = s.replace(old1, new1, 1)
+          old2 = "            Op::Activate { tenant, variant } => {\n                let mut d = guard(deployment);\n                let rules = d.tenant_mut(tenant);\n                match rules {\n                    Some(mut st) => {\n                        st.activate(*variant);\n                    }\n                    None => report.problems.push(format!(\"tenant {tenant} vanished\")),\n                }\n            }\n"
+          new2 = "            Op::Activate { tenant, variant } => {\n                let mut d = guard(deployment);\n                if let Some(mut rules) = d.tenant_mut(tenant) {\n                    rules.permit_variant(*variant);\n                    drop(rules);\n                    if let Err(err) = d.activate_variant_governed(\n                        &TenantId(tenant.to_string()),\n                        *variant,\n                        None,\n                        0,\n                    ) {\n                        report.problems.push(format!(\n                            \"tenant {tenant} governed activation of {variant:?} failed: {err:?}\"\n                        ));\n                    }\n                } else {\n                    report.problems.push(format!(\"tenant {tenant} vanished\"));\n                }\n            }\n"
+          if s.count(old2) != 1:
+              raise SystemExit(f'chaos activation anchor count={s.count(old2)}')
+          p.write_text(s.replace(old2, new2, 1))
+          PY
           cargo fmt --all
           cargo fmt --all -- --check
           cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
@@ -55,10 +70,11 @@ jobs:
           cargo test -p ccos-enterprise-qpages
           cargo test -p ccos-enterprise-runtime --features test-fixtures
           cargo test -p ccos-enterprise-conformance --test stress_endurance --release
+          cargo test -p ccos-enterprise-conformance --test stress_concurrency_chaos --release
           cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
           git status --short
-          test "$(git status --porcelain=v1 | wc -l)" -eq 3
-          git add crates/ccos-enterprise-qpages/src/policy.rs crates/ccos-enterprise-runtime/src/lib.rs tests/ccos-enterprise-conformance/tests/stress_endurance.rs
+          test "$(git status --porcelain=v1 | wc -l)" -eq 4
+          git add crates/ccos-enterprise-qpages/src/policy.rs crates/ccos-enterprise-runtime/src/lib.rs tests/ccos-enterprise-conformance/tests/stress_endurance.rs tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs
           git config user.name 'MEMOPERF'
           git config user.email 'contact@checkupauto.fr'
           git commit -m 'fix(qpages): close final CI and approval policy gaps'

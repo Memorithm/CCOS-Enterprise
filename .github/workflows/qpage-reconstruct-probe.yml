@@ -40,143 +40,23 @@ jobs:
             cp crates/ccos-enterprise-runtime/src/lib.rs /tmp/qpage-conflict-lib.rs || true
             python3 - <<'PY'
           from pathlib import Path
-
+          def one(text, old, new, label):
+              if text.count(old) != 1:
+                  raise SystemExit(f'{label}: expected one anchor, found {text.count(old)}')
+              return text.replace(old, new, 1)
           cargo = Path('crates/ccos-enterprise-runtime/Cargo.toml')
           c = cargo.read_text()
-          c = c.replace('''<<<<<<< ours
-serde_json.workspace = true
-=======
->>>>>>> theirs
-sha2.workspace = true
-''', '''serde_json.workspace = true
-sha2.workspace = true
-''')
-          if '<<<<<<<' in c or '>>>>>>>' in c or '\n=======\n' in c:
-              raise SystemExit('unresolved Cargo conflict')
+          c = one(c, "<<<<<<< ours\nserde_json.workspace = true\n=======\n>>>>>>> theirs\nsha2.workspace = true\n", "serde_json.workspace = true\nsha2.workspace = true\n", 'Cargo dependencies')
           cargo.write_text(c)
-
           p = Path('crates/ccos-enterprise-runtime/src/lib.rs')
           s = p.read_text()
-          replacements = [
-              ('''<<<<<<< ours
-    active_model: Option<String>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ModelSwitchCheckpoint {
-    state: TenantState,
-    cells: Option<BTreeMap<String, String>>,
-=======
-    /// The per-tenant variant activation policy: which advanced variants may
-    /// be activated, and whether the experimental bridge demands approval.
-    variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
->>>>>>> theirs
-}
-''', '''    active_model: Option<String>,
-    /// The per-tenant variant activation policy: which advanced variants may
-    /// be activated, and whether the experimental bridge demands approval.
-    variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
-}
-
-#[derive(Clone)]
-pub(crate) struct ModelSwitchCheckpoint {
-    state: TenantState,
-    cells: Option<BTreeMap<String, String>>,
-}
-'''),
-              ('''<<<<<<< ours
-            active_model: None,
-=======
-            variant_policy: ccos_enterprise_qpages::policy::VariantPolicy::default(),
->>>>>>> theirs
-''', '''            active_model: None,
-            variant_policy: ccos_enterprise_qpages::policy::VariantPolicy::default(),
-'''),
-              ('''<<<<<<< ours
-    #[serde(default)]
-    pub active_model: Option<String>,
-=======
-    /// The variant activation policy. Empty by default so older snapshots
-    /// load; a policy with an unsupported schema is refused on restore.
-    #[serde(default)]
-    pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
->>>>>>> theirs
-''', '''    #[serde(default)]
-    pub active_model: Option<String>,
-    /// The variant activation policy. Empty by default so older snapshots
-    /// load; a policy with an unsupported schema is refused on restore.
-    #[serde(default)]
-    pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,
-'''),
-              ('''<<<<<<< ours
-    /// The selected model is missing, ambiguous, or not in the tenant's
-    /// allowlist. Restore refuses rather than guessing a provider.
-    ActiveModelInvalid {
-        tenant: String,
-        active_model: Option<String>,
-    },
-=======
-    /// A tenant's variant activation policy has an unsupported schema.
-    /// Refused: a policy the build cannot interpret must not be carried
-    /// silently.
-    VariantPolicyCorrupt { tenant: String, detail: String },
->>>>>>> theirs
-''', '''    /// The selected model is missing, ambiguous, or not in the tenant's
-    /// allowlist. Restore refuses rather than guessing a provider.
-    ActiveModelInvalid {
-        tenant: String,
-        active_model: Option<String>,
-    },
-    /// A tenant's variant activation policy has an unsupported schema.
-    /// Refused: a policy the build cannot interpret must not be carried
-    /// silently.
-    VariantPolicyCorrupt { tenant: String, detail: String },
-'''),
-              ('''<<<<<<< ours
-            Self::ActiveModelInvalid {
-                tenant,
-                active_model,
-            } => write!(
-                f,
-                "tenant {tenant:?} has invalid or ambiguous active model {active_model:?}"
-            ),
-=======
-            Self::VariantPolicyCorrupt { tenant, detail } => {
-                write!(f, "tenant {tenant:?} variant policy is corrupt: {detail}")
-            }
->>>>>>> theirs
-''', '''            Self::ActiveModelInvalid {
-                tenant,
-                active_model,
-            } => write!(
-                f,
-                "tenant {tenant:?} has invalid or ambiguous active model {active_model:?}"
-            ),
-            Self::VariantPolicyCorrupt { tenant, detail } => {
-                write!(f, "tenant {tenant:?} variant policy is corrupt: {detail}")
-            }
-'''),
-              ('''<<<<<<< ours
-                            active_model: state.active_model.clone(),
-=======
-                            variant_policy: state.variant_policy.clone(),
->>>>>>> theirs
-''', '''                            active_model: state.active_model.clone(),
-                            variant_policy: state.variant_policy.clone(),
-'''),
-              ('''<<<<<<< ours
-                    active_model,
-=======
-                    variant_policy: t.variant_policy,
->>>>>>> theirs
-''', '''                    active_model,
-                    variant_policy: t.variant_policy,
-'''),
-          ]
-          for old, new in replacements:
-              if s.count(old) != 1:
-                  raise SystemExit(f'expected one runtime conflict anchor, found {s.count(old)}')
-              s = s.replace(old, new, 1)
+          s = one(s, "<<<<<<< ours\n    active_model: Option<String>,\n}\n\n#[derive(Clone)]\npub(crate) struct ModelSwitchCheckpoint {\n    state: TenantState,\n    cells: Option<BTreeMap<String, String>>,\n=======\n    /// The per-tenant variant activation policy: which advanced variants may\n    /// be activated, and whether the experimental bridge demands approval.\n    variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,\n>>>>>>> theirs\n}\n", "    active_model: Option<String>,\n    /// The per-tenant variant activation policy: which advanced variants may\n    /// be activated, and whether the experimental bridge demands approval.\n    variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,\n}\n\n#[derive(Clone)]\npub(crate) struct ModelSwitchCheckpoint {\n    state: TenantState,\n    cells: Option<BTreeMap<String, String>>,\n}\n", 'TenantState fields')
+          s = one(s, "<<<<<<< ours\n            active_model: None,\n=======\n            variant_policy: ccos_enterprise_qpages::policy::VariantPolicy::default(),\n>>>>>>> theirs\n", "            active_model: None,\n            variant_policy: ccos_enterprise_qpages::policy::VariantPolicy::default(),\n", 'TenantState init')
+          s = one(s, "<<<<<<< ours\n    #[serde(default)]\n    pub active_model: Option<String>,\n=======\n    /// The variant activation policy. Empty by default so older snapshots\n    /// load; a policy with an unsupported schema is refused on restore.\n    #[serde(default)]\n    pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,\n>>>>>>> theirs\n", "    #[serde(default)]\n    pub active_model: Option<String>,\n    /// The variant activation policy. Empty by default so older snapshots\n    /// load; a policy with an unsupported schema is refused on restore.\n    #[serde(default)]\n    pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,\n", 'snapshot fields')
+          s = one(s, "<<<<<<< ours\n    /// The selected model is missing, ambiguous, or not in the tenant's\n    /// allowlist. Restore refuses rather than guessing a provider.\n    ActiveModelInvalid {\n        tenant: String,\n        active_model: Option<String>,\n    },\n=======\n    /// A tenant's variant activation policy has an unsupported schema.\n    /// Refused: a policy the build cannot interpret must not be carried\n    /// silently.\n    VariantPolicyCorrupt { tenant: String, detail: String },\n>>>>>>> theirs\n", "    /// The selected model is missing, ambiguous, or not in the tenant's\n    /// allowlist. Restore refuses rather than guessing a provider.\n    ActiveModelInvalid {\n        tenant: String,\n        active_model: Option<String>,\n    },\n    /// A tenant's variant activation policy has an unsupported schema.\n    /// Refused: a policy the build cannot interpret must not be carried\n    /// silently.\n    VariantPolicyCorrupt { tenant: String, detail: String },\n", 'restore errors')
+          s = one(s, "<<<<<<< ours\n            Self::ActiveModelInvalid {\n                tenant,\n                active_model,\n            } => write!(\n                f,\n                \"tenant {tenant:?} has invalid or ambiguous active model {active_model:?}\"\n            ),\n=======\n            Self::VariantPolicyCorrupt { tenant, detail } => {\n                write!(f, \"tenant {tenant:?} variant policy is corrupt: {detail}\")\n            }\n>>>>>>> theirs\n", "            Self::ActiveModelInvalid {\n                tenant,\n                active_model,\n            } => write!(\n                f,\n                \"tenant {tenant:?} has invalid or ambiguous active model {active_model:?}\"\n            ),\n            Self::VariantPolicyCorrupt { tenant, detail } => {\n                write!(f, \"tenant {tenant:?} variant policy is corrupt: {detail}\")\n            }\n", 'restore display')
+          s = one(s, "<<<<<<< ours\n                            active_model: state.active_model.clone(),\n=======\n                            variant_policy: state.variant_policy.clone(),\n>>>>>>> theirs\n", "                            active_model: state.active_model.clone(),\n                            variant_policy: state.variant_policy.clone(),\n", 'snapshot write')
+          s = one(s, "<<<<<<< ours\n                    active_model,\n=======\n                    variant_policy: t.variant_policy,\n>>>>>>> theirs\n", "                    active_model,\n                    variant_policy: t.variant_policy,\n", 'restore state')
           if '<<<<<<<' in s or '>>>>>>>' in s or '\n=======\n' in s:
               raise SystemExit('unresolved runtime conflict')
           p.write_text(s)
@@ -189,12 +69,7 @@ pub(crate) struct ModelSwitchCheckpoint {
           from pathlib import Path
           p = Path('.ci/autonomous-patch.sh')
           s = p.read_text()
-          for label in (
-              'drop after policy',
-              'admission qpage policy',
-              'snapshot activation approvals',
-              'snapshot write approvals',
-          ):
+          for label in ('drop after policy', 'admission qpage policy', 'snapshot activation approvals', 'snapshot write approvals'):
               s = s.replace(f"\n{label}')", f"\n'{label}')")
           marker = "git config user.name 'MEMOPERF'"
           if marker not in s:

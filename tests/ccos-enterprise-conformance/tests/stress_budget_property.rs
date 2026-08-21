@@ -832,11 +832,18 @@ fn the_ledger_is_private_and_a_live_tenant_is_never_reprovisioned() {
         let mut t = d.tenant_mut("acme").expect("tenant");
         assert_eq!(t.spent(), 1_000, "the ledger is readable…");
         assert_eq!(t.limit(), 1_000, "…and so is the ceiling…");
-        t.allow_model("another-model")
-            .activate(AdvancedQPageVariant::CausalChain);
+        t.allow_model("another-model");
+        t.permit_variant(AdvancedQPageVariant::CausalChain);
         assert_eq!(t.spent(), 1_000, "…but configuration cannot rewind it");
         assert_eq!(t.limit(), 1_000, "…nor widen it");
     }
+    d.activate_variant_governed(
+        &ccos_enterprise_tenancy::TenantId("acme".to_string()),
+        AdvancedQPageVariant::CausalChain,
+        None,
+        0,
+    )
+    .expect("ordinary variant is explicitly policy-permitted");
     assert_eq!(
         d.audit().count(),
         audit_before,
@@ -1003,9 +1010,18 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
         // between "no such tool" and "not for you".
         .govern_tool("policy.set", "policy.admin");
     let mut acme = TenantState::new(4_000_000);
-    acme.allow_model("m")
-        .activate(AdvancedQPageVariant::Hierarchical);
+    acme.allow_model("m");
     assert!(d.add_tenant("o", "acme", acme));
+    d.tenant_mut("acme")
+        .expect("acme was just provisioned")
+        .permit_variant(AdvancedQPageVariant::Hierarchical);
+    d.activate_variant_governed(
+        &ccos_enterprise_tenancy::TenantId("acme".to_string()),
+        AdvancedQPageVariant::Hierarchical,
+        None,
+        0,
+    )
+    .expect("ordinary variant is explicitly policy-permitted");
     // globex activates nothing: the same variant is billable for one tenant
     // and refused for the other.
     let mut globex = TenantState::new(250_000);

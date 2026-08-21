@@ -415,14 +415,23 @@ fn storm_deployment(cfg: &StormConfig) -> Deployment {
 
     for (name, limit) in cfg.tenants() {
         let mut st = TenantState::new(limit);
-        st.allow_model(BASE_MODEL)
-            .activate(AdvancedQPageVariant::Hierarchical);
+        st.allow_model(BASE_MODEL);
         // Every tenant is owned by `HOME_ORG`; nothing in the storm can move
         // one, so the org gate's input is fixed before any thread starts.
         assert!(
             d.add_tenant(HOME_ORG, name, st),
             "{name} is provisioned exactly once"
         );
+        d.tenant_mut(name)
+            .expect("tenant was just provisioned")
+            .permit_variant(AdvancedQPageVariant::Hierarchical);
+        d.activate_variant_governed(
+            &ccos_enterprise_tenancy::TenantId(name.to_string()),
+            AdvancedQPageVariant::Hierarchical,
+            None,
+            0,
+        )
+        .expect("ordinary provisioned variant is policy-permitted");
         // Actors are tenant-qualified: `t-a/alice` belongs to `t-a` and to
         // nothing else. Cross-tenant contamination is then a string prefix
         // away from being visible.
@@ -881,13 +890,20 @@ fn run_thread(deployment: &Mutex<Deployment>, ops: &[Op], start: &Barrier) -> Th
             }
             Op::Activate { tenant, variant } => {
                 let mut d = guard(deployment);
-                let rules = d.tenant_mut(tenant);
-                match rules {
-                    Some(mut st) => {
-                        st.activate(*variant);
-                    }
-                    None => report.problems.push(format!("tenant {tenant} vanished")),
+                if d.tenant_mut(tenant).is_none() {
+                    report.problems.push(format!("tenant {tenant} vanished"));
+                    continue;
                 }
+                d.tenant_mut(tenant)
+                    .expect("tenant existence checked above")
+                    .permit_variant(*variant);
+                d.activate_variant_governed(
+                    &ccos_enterprise_tenancy::TenantId(tenant.to_string()),
+                    *variant,
+                    None,
+                    0,
+                )
+                .expect("CHAOS_VARIANTS contains only ordinary policy-permitted variants");
             }
         }
     }
@@ -963,8 +979,9 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
         .into_inner()
         .unwrap_or_else(|poison| poison.into_inner());
 
-    // ── Invariant 1: one journal record per admission, and only per
-    //    admission. The five *state-changing* op kinds journal nothing. ────
+    // ── Invariant 1: one audit record per admission, and only per
+    //    admission. State-changing operations use the separate governance
+    //    stream. ────────────────────────────────────────────────────────────
     assert_eq!(
         d.audit().count(),
         admits,
@@ -977,13 +994,12 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
         0,
         "the storm's journal is complete: nothing was dropped from the buffer"
     );
-    // The rule changes are journaled too, in their own stream: `assign`,
-    // `allow_model` and `activate` all change what a later admission decides,
-    // and every one of them that took effect left a record. Only the ones that
-    // changed nothing — an `assign` of a role the actor already holds, an
-    // `allow_model` for a model already allowed — are absent, because the
-    // guard journals the difference it measured rather than the fact of a
-    // borrow.
+    // Rule changes are journaled too, in their own stream: `assign`,
+    // `allow_model` and governed `activate` all change what a later admission
+    // decides. Activation now has two observable governance stages when policy
+    // changes: `QPagePolicyChanged` for the permit and `TenantRulesChanged`
+    // for the live activation. Operations that change nothing are absent,
+    // because guards journal measured differences rather than mutable borrows.
     assert!(
         admits < total_ops,
         "the storm really did run non-admission operations"
@@ -1003,9 +1019,11 @@ fn run_storm(cfg: &StormConfig, label: &'static str, watchdog_secs: u64) {
         assert!(
             matches!(
                 record.change,
-                GovernanceChange::RoleAssigned { .. } | GovernanceChange::TenantRulesChanged { .. }
+                GovernanceChange::RoleAssigned { .. }
+                    | GovernanceChange::TenantRulesChanged { .. }
+                    | GovernanceChange::QPagePolicyChanged { .. }
             ),
-            "the storm only runs assign/allow_model/activate: {record:?}"
+            "the storm only runs assign/allow_model/governed-activate: {record:?}"
         );
         // Nothing in the storm attributes its changes, and the trail says so
         // rather than inventing an actor.

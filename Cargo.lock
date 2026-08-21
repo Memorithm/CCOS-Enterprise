@@ -472,6 +472,7 @@ dependencies = [
  "ccos-enterprise-rbac",
  "ccos-enterprise-tenancy",
  "serde",
+ "serde_json",
  "sha2",
 ]
 

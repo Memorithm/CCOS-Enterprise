@@ -57,9 +57,17 @@
 //!   registry document (unknown fields, duplicates, wrong order) could be
 //!   deserialized and installed *wholesale* onto a live tenant, and the
 //!   composed path honoured it. The field is private and there is no setter:
-//!   the only door into a tenant's activation set is the typed builder, one
-//!   variant at a time. Guarded by
+//!   live mutation now goes through typed tenant policy plus the governed
+//!   `Deployment` activation/deactivation API; hostile registry bytes cannot
+//!   be installed onto a live tenant. Guarded by
 //!   `enumeration_goes_through_a_private_field_name_and_hostile_documents_no_longer_install`.
+//!
+//! - **F10 (missing-behaviour, REPAIRED)** — live revocation is now reachable
+//!   through `Deployment::deactivate_variant_governed`; the tenant's live
+//!   registry is changed through the same guarded runtime surface, the
+//!   transition is governance-visible once serving, and the very next
+//!   admission observes the revocation. Guarded by
+//!   `activation_and_revocation_take_effect_on_the_very_next_call`.
 //!
 //! ## What is still open
 //!
@@ -70,10 +78,13 @@
 //!   a forwarded call used; two calls, one on `ExperimentalBridge` and one on
 //!   Core's standard primitives, produce records that differ only in their
 //!   sequence and their request id.
-//! - F3 (spec-violation) — the crate doc calls activation "an explicit,
-//!   auditable tenant decision"; activating all ten leaves **zero** audit
-//!   records, zero metrics, needs no permission, no authenticated actor and no
-//!   approval.
+//! - F3 (spec-violation, REPAIRED IN PART) — activation is now evaluated
+//!   against durable per-tenant variant policy; `ExperimentalBridge` additionally
+//!   requires an exact live approval-v2 bound to tenant + variant, and live
+//!   policy/activation changes are governance-visible. What remains open is the
+//!   management identity boundary: public `tenant_mut()` policy changes still
+//!   require no authenticated actor or permission and their governance rows
+//!   therefore carry no actor/justification.
 //! - F4 (bug) — the serde wire format is not canonical: duplicate and
 //!   out-of-order entries are silently accepted and rewritten, and a struct-as-
 //!   sequence spelling is accepted too, so distinct bytes map to one state.
@@ -85,19 +96,12 @@
 //!   a tool to a variant, so omitting `variant` skips the gate entirely.
 //! - F8 (missing-behaviour, WIDENED) — no `ALL`/iterator/`FromStr`/`Display` on
 //!   the enum, and no way to *list* a tenant's activations. Closing F5 (cont.)
-//!   closed the read path too: `TenantState` now exposes `activate` and nothing
-//!   that reads back, so a tenant's activation set is observable only by
-//!   driving admissions against it and watching which ones are refused. That is
-//!   what several tests below now do, and it is not what an operator dashboard
-//!   can do.
-//! - F10 (missing-behaviour, NEW) — **revocation is unreachable**. `TenantState`
-//!   has `activate` and no `deactivate`, `qpages` is private, and `add_tenant`
-//!   now refuses to replace a live tenant — so once a tenant activates a
-//!   variant, nothing in the shipped API takes it away short of rebuilding the
-//!   whole `Deployment`. `QPageRegistry::deactivate` still exists; no live
-//!   tenant can be reached through it. Pinned by
-//!   `activation_takes_effect_on_the_very_next_call_but_revocation_is_unreachable`.
-//!
+//!   closed the read path too: live mutation is available through
+//!   `TenantRules` / governed `Deployment` methods, but there is still no public
+//!   reader that lists a tenant's active variants. The set is therefore
+//!   observable only by driving admissions against it and watching which ones
+//!   are refused. That is what several tests below now do, and it is not what
+//!   an operator dashboard can do.
 //! Everything here is deterministic: fixed masks, a fixed-seed LCG, no clock,
 //! no threads, no RNG. It passes identically in debug and release.
 
@@ -200,6 +204,51 @@ fn expected_json(mask: u32) -> String {
     format!("{{\"active\":[{}]}}", names.join(","))
 }
 
+/// Activate one live tenant variant through the shipped governed path.
+///
+/// Ordinary variants are first permitted by the tenant's durable variant
+/// policy. `ExperimentalBridge` is explicitly opted in and receives an exact
+/// approval-v2 record bound to this tenant + variant before activation.
+fn governed_activate(d: &mut Deployment, tenant: &str, variant: AdvancedQPageVariant, now: u64) {
+    let tenant_id = TenantId(tenant.to_string());
+
+    if variant == AdvancedQPageVariant::ExperimentalBridge {
+        d.tenant_mut(tenant)
+            .expect("tenant exists")
+            .opt_in_experimental_bridge();
+
+        let artifact = Deployment::qpage_activation_artifact_hash(&tenant_id, variant);
+
+        let approval = ccos_enterprise_approval::ApprovalRequest::new(
+            tenant_id.clone(),
+            "qpage.activate",
+            &artifact,
+            "stress-suite",
+            ccos_enterprise_approval::ApprovalDecision::Approved,
+            1,
+            None,
+            "stress fixture: exact governed Q-Page activation",
+        )
+        .expect("valid Q-Page approval request");
+
+        let approval_id = match d.record_approval(approval) {
+            Ok(id) => id,
+            Err(ccos_enterprise_approval::ApprovalError::AlreadyExists { id }) => id,
+            Err(error) => panic!("approval record must be usable: {error}"),
+        };
+
+        d.activate_variant_governed(&tenant_id, variant, Some(&approval_id), now)
+            .expect("governed ExperimentalBridge activation succeeds");
+    } else {
+        d.tenant_mut(tenant)
+            .expect("tenant exists")
+            .permit_variant(variant);
+
+        d.activate_variant_governed(&tenant_id, variant, None, now)
+            .expect("governed Q-Page activation succeeds");
+    }
+}
+
 // ── The composed path ────────────────────────────────────────────────────
 
 /// A single-tenant deployment whose tenant has activated exactly `mask`.
@@ -222,15 +271,15 @@ fn deployment_activating_capped(mask: u32, audit_capacity: usize) -> Deployment 
         .govern_tool("ccos.qpage.read", "memory.read");
     let mut t = TenantState::new(1_000_000);
     t.allow_model("claude-opus");
-    for (i, v) in ALL.iter().enumerate() {
-        if bit(mask, i) {
-            t.activate(*v);
-        }
-    }
     assert!(
         d.add_tenant(ORG, "acme", t),
         "a fresh deployment must accept its first tenant"
     );
+    for (i, v) in ALL.iter().enumerate() {
+        if bit(mask, i) {
+            governed_activate(&mut d, "acme", *v, 100);
+        }
+    }
     d.assign("alice", "writer");
     d.assign("bob", "reader");
     d
@@ -601,10 +650,13 @@ fn tenant_name(t: u32) -> String {
 /// tenant's registry cannot be cloned); `cloning_a_registry_never_aliases_it`
 /// covers that exhaustively on standalone registries instead.
 ///
-/// FINDING F10 (cont.): the old "clear everything on every 101st tenant" pass
-/// is gone for the same reason — `TenantState` has no `deactivate`. Only the
-/// saturating pass survives, because activation is the only direction the
-/// shipped API offers.
+/// Historical F10 note: this stress case used to omit its clearing pass
+/// because no live-tenant revocation API existed. Revocation is now reachable
+/// through `Deployment::deactivate_variant_governed`; its immediate live
+/// semantics are covered directly by
+/// `activation_and_revocation_take_effect_on_the_very_next_call`. This test
+/// keeps the saturation pass because its purpose here is tenant-set isolation,
+/// not to duplicate that transition test 100_000 times.
 #[test]
 fn ten_thousand_tenants_keep_disjoint_activation_sets() {
     const N: u32 = 10_000;
@@ -620,15 +672,16 @@ fn ten_thousand_tenants_keep_disjoint_activation_sets() {
         let mut state = TenantState::new(100);
         state.allow_model("claude-opus");
         let mask = mask_for_tenant(SEED, t);
-        for (i, v) in ALL.iter().enumerate() {
-            if bit(mask, i) {
-                state.activate(*v);
-            }
-        }
+        let name = tenant_name(t);
         assert!(
-            d.add_tenant(ORG, &tenant_name(t), state),
+            d.add_tenant(ORG, &name, state),
             "t-{t:05} must be provisioned exactly once"
         );
+        for (i, v) in ALL.iter().enumerate() {
+            if bit(mask, i) {
+                governed_activate(&mut d, &name, *v, 100);
+            }
+        }
     }
 
     // Pass 1: every tenant reports exactly its own mask, and nothing else.
@@ -653,9 +706,9 @@ fn ten_thousand_tenants_keep_disjoint_activation_sets() {
     // Pass 2: hammer a strided sample — activate everything on every 97th
     // tenant. (Clearing is unreachable; see F10 above.)
     for t in (0..N).step_by(97) {
-        let mut state = d.tenant_mut(&tenant_name(t)).expect("provisioned above");
+        let name = tenant_name(t);
         for v in ALL {
-            state.activate(v);
+            governed_activate(&mut d, &name, v, 100);
         }
     }
 
@@ -1037,53 +1090,31 @@ fn a_replayed_request_id_is_never_billed_twice() {
     assert_eq!(replayed, Some(4), "and the suppression is observable");
 }
 
-/// FINDING F3 (spec-violation), still open: the crate documents activation as
-/// "an explicit, auditable tenant decision" and the README as
-/// "policy-activated". In fact activating all ten variants requires no
-/// authenticated actor, no permission, no policy evaluation and no approval,
-/// and leaves no audit record and no metric behind. The `policy.set` tool is
-/// governed by `policy.admin`; the API that actually changes policy is not
-/// governed at all.
+/// FINDING F3 (spec-violation), REPAIRED IN PART.
+///
+/// The old activation path bypassed policy entirely and left no durable
+/// decision trail. That part is repaired: ordinary variants are denied until
+/// permitted by the tenant's variant policy, `ExperimentalBridge` additionally
+/// requires an exact live approval-v2, and policy/activation transitions made
+/// after the deployment starts serving are recorded as governance changes.
+///
+/// What remains open is the management identity boundary. `tenant_mut()` is a
+/// public mutation surface that does not require an authenticated actor,
+/// permission, or justification, so its otherwise-correct governance records
+/// necessarily carry `actor = None` and `justification = None`.
 #[test]
-fn activation_needs_no_privilege_and_leaves_no_trace() {
+fn activation_is_policy_gated_and_audited_but_policy_mutation_has_no_actor() {
     let mut d = deployment_activating(0);
+    let tenant = TenantId("acme".to_string());
 
-    // No actor, no permission check, no `PolicyDecision`, no approval. The
-    // borrow is scoped so the guard's record lands before the journal is read.
-    {
-        let mut state = d.tenant_mut("acme").expect("tenant exists");
-        for v in ALL {
-            state.activate(v);
-        }
-    }
-
-    let journaled = d.audit().count();
-    assert_eq!(
-        journaled, 0,
-        "activating ten advanced variants produced {journaled} audit records; \
-         an activation is not a decision",
-    );
-    // Nor a governance record — this deployment has not decided anything yet,
-    // so the activation is *provisioning*: there is no outcome for it to
-    // explain. That is the line the runtime draws, and it is drawn here on
-    // purpose, because the same call on a serving deployment IS journaled.
-    assert_eq!(d.governance().count(), 0, "provisioning leaves no trail");
-    assert!(!d.is_serving());
+    // Fail closed before the tenant permits the ordinary variant.
     assert!(
-        d.metrics()
-            .iter()
-            .all(|(k, v)| k.starts_with('_') && *v == 0),
-        "activation is invisible to observability too — the only rows are the \
-         registry's own gauges, all reading zero: {:?}",
-        d.metrics()
+        d.activate_variant_governed(&tenant, AdvancedQPageVariant::CausalChain, None, 100,)
+            .is_err(),
+        "ordinary activation must be denied before policy permits it"
     );
 
-    // Once the deployment is serving, the same activation IS recorded — with
-    // what it activated, anchored to the decision it followed. What stays
-    // open is the privilege: it still takes no actor and no permission, and
-    // the record says as much by carrying neither.
-    // The probe is a boundary refusal, so it starts the deployment serving
-    // without billing anything and leaves the count below intact.
+    // Enter serving state so subsequent management changes must be journaled.
     let reader = actor("memorithm", "bob", AuthStrength::Token);
     let probe = request("acme", "bob", "shell.exec", "r-serving");
     assert!(!d
@@ -1097,33 +1128,100 @@ fn activation_needs_no_privilege_and_leaves_no_trace() {
         })
         .is_forwarded());
     assert!(d.is_serving());
+
+    // Policy now explicitly permits CausalChain. The change is auditable, but
+    // this public management surface still has no authenticated actor.
+    assert!(d
+        .tenant_mut("acme")
+        .expect("tenant exists")
+        .permit_variant(AdvancedQPageVariant::CausalChain));
+
     {
-        let mut state = d.tenant_mut("acme").expect("tenant exists");
-        state.allow_model("smuggled-model");
+        let policy_change = d
+            .governance()
+            .find(|row| {
+                matches!(
+                    &row.change,
+                    GovernanceChange::QPagePolicyChanged {
+                        tenant,
+                        permitted,
+                        ..
+                    } if tenant.as_str() == "acme"
+                        && permitted.iter().any(|v| v.as_str() == "CausalChain")
+                )
+            })
+            .expect("live policy mutation is governance-visible");
+
+        assert_eq!(
+            policy_change.actor, None,
+            "tenant_mut still supplies no authenticated management actor"
+        );
+        assert_eq!(policy_change.justification, None);
     }
-    let change = d.governance().next().expect("now it is journaled");
-    assert_eq!(change.actor, None, "still no identity is demanded");
-    assert_eq!(change.justification, None);
+
+    d.activate_variant_governed(&tenant, AdvancedQPageVariant::CausalChain, None, 100)
+        .expect("permitted ordinary variant activates");
+
+    {
+        let activation_change = d
+            .governance()
+            .find(|row| {
+                matches!(
+                    &row.change,
+                    GovernanceChange::TenantRulesChanged {
+                        tenant,
+                        variants_activated,
+                        ..
+                    } if tenant.as_str() == "acme"
+                        && variants_activated
+                            .iter()
+                            .any(|v| v.as_str() == "CausalChain")
+                )
+            })
+            .expect("live activation is governance-visible");
+
+        assert_eq!(activation_change.actor, None);
+        assert_eq!(activation_change.justification, None);
+    }
+
+    // ExperimentalBridge is stricter: opt-in alone is insufficient.
+    d.tenant_mut("acme")
+        .expect("tenant exists")
+        .opt_in_experimental_bridge();
+
     assert!(
-        matches!(
-            &change.change,
-            GovernanceChange::TenantRulesChanged { models_allowed, .. }
-                if models_allowed == &["smuggled-model".to_string()]
-        ),
-        "{:?}",
-        change.change
+        d.activate_variant_governed(&tenant, AdvancedQPageVariant::ExperimentalBridge, None, 100,)
+            .is_err(),
+        "ExperimentalBridge must require its exact approval"
     );
 
-    // And a plain `reader` — the least privileged role in the fixture — can
-    // then use every one of them, the experimental bridge included. Variants
-    // are orthogonal to RBAC: there is no `qpage.experimental` permission to
-    // hold or withhold. (Ten forwarded calls is also the only way left to
-    // observe that all ten really did activate — F8.)
-    for (i, v) in ALL.iter().enumerate() {
-        let out = recall(&mut d, "bob", &format!("bob-{i}"), Some(*v), 1);
-        assert!(out.is_forwarded(), "a reader reached {v:?}: {out:?}");
-    }
-    assert_eq!(d.spent("acme"), Some(10));
+    let artifact = Deployment::qpage_activation_artifact_hash(
+        &tenant,
+        AdvancedQPageVariant::ExperimentalBridge,
+    );
+    let approval_id = d
+        .record_approval(
+            ccos_enterprise_approval::ApprovalRequest::new(
+                tenant.clone(),
+                "qpage.activate",
+                &artifact,
+                "stress-suite",
+                ccos_enterprise_approval::ApprovalDecision::Approved,
+                100,
+                None,
+                "F3 regression: exact ExperimentalBridge activation",
+            )
+            .expect("valid exact bridge approval"),
+        )
+        .expect("bridge approval is recorded");
+
+    d.activate_variant_governed(
+        &tenant,
+        AdvancedQPageVariant::ExperimentalBridge,
+        Some(&approval_id),
+        100,
+    )
+    .expect("exact live approval authorizes ExperimentalBridge");
 }
 
 /// FINDING F6 (exhaustion-vector), REPAIRED IN PART — this test is now the
@@ -1294,10 +1392,10 @@ fn no_activation_can_widen_the_boundary_the_allowlist_or_the_budget() {
         .govern_tool("memory.recall", "memory.read");
     let mut t = TenantState::new(5);
     t.allow_model("claude-opus");
-    for v in ALL {
-        t.activate(v);
-    }
     assert!(tight.add_tenant(ORG, "acme", t));
+    for v in ALL {
+        governed_activate(&mut tight, "acme", v, 100);
+    }
     tight.assign("alice", "writer");
     let out = recall(
         &mut tight,
@@ -1428,9 +1526,14 @@ fn multi_tenant_federated_federates_nothing_and_leaks_nothing() {
         .govern_tool("memory.recall", "memory.read");
     for tenant in ["acme", "globex"] {
         let mut t = TenantState::new(100);
-        t.allow_model("claude-opus")
-            .activate(AdvancedQPageVariant::MultiTenantFederated);
+        t.allow_model("claude-opus");
         assert!(d.add_tenant(ORG, tenant, t));
+        governed_activate(
+            &mut d,
+            tenant,
+            AdvancedQPageVariant::MultiTenantFederated,
+            100,
+        );
     }
     d.assign("alice", "writer");
 
@@ -1470,9 +1573,7 @@ fn multi_tenant_federated_federates_nothing_and_leaks_nothing() {
     );
     // Activating Hierarchical on acme does not retroactively satisfy globex's
     // gate either: the registries are per-tenant, and stay that way.
-    d.tenant_mut("acme")
-        .expect("acme exists")
-        .activate(AdvancedQPageVariant::Hierarchical);
+    governed_activate(&mut d, "acme", AdvancedQPageVariant::Hierarchical, 100);
     assert_eq!(
         recall_on(
             &mut d,
@@ -1500,53 +1601,70 @@ fn multi_tenant_federated_federates_nothing_and_leaks_nothing() {
     assert_eq!(d.spent("globex"), Some(1));
 }
 
-/// The gate re-reads the tenant's live registry on every call: there is no
-/// cached admission, so an activation applied between two calls takes effect on
-/// the very next one. Exercised for all ten. (This one holds.)
+/// FINDING F10 (missing-behaviour), REPAIRED.
 ///
-/// FINDING F10 (missing-behaviour, NEW): the *reverse* transition — which this
-/// test used to drive, because `TenantState::qpages` was public — is no longer
-/// expressible. `TenantState` exposes `activate` and no `deactivate`, `qpages`
-/// is private, and `add_tenant` now refuses to replace a live tenant, so once a
-/// tenant has activated a variant nothing in the shipped API takes it away
-/// short of rebuilding the whole `Deployment`. Revocation is a routine operator
-/// action — a trial expires, a variant is withdrawn, a tenant downgrades — and
-/// the product has no way to perform it. The set itself still supports it
-/// (`QPageRegistry::deactivate`, asserted below on a standalone registry); no
-/// live tenant can be reached through it, which is asserted here too.
+/// The gate re-reads the tenant's live registry on every call. Both directions
+/// are now reachable through the shipped runtime API: activation through
+/// `activate_variant_governed`, revocation through
+/// `deactivate_variant_governed`. Each transition must affect the very next
+/// admission; a revoked call is refused for free and therefore cannot increase
+/// tenant spend. Exercised for all ten variants.
 #[test]
-fn activation_takes_effect_on_the_very_next_call_but_revocation_is_unreachable() {
+fn activation_and_revocation_take_effect_on_the_very_next_call() {
     for (i, v) in ALL.iter().enumerate() {
-        // Everything active EXCEPT v, so only v's transition is under test.
+        // Everything active EXCEPT v, so only v's transitions are under test.
         let mut d = deployment_activating((SUBSETS - 1) & !(1u32 << i));
+        let tenant = TenantId("acme".to_string());
+
         assert_eq!(
             recall(&mut d, "alice", "before", Some(*v), 1).refusal(),
             Some(&Refusal::VariantNotActivated),
             "{v:?} was refused before it was activated"
         );
 
-        d.tenant_mut("acme").expect("tenant exists").activate(*v);
+        governed_activate(&mut d, "acme", *v, 100);
+
         assert!(
-            recall(&mut d, "alice", "after", Some(*v), 1).is_forwarded(),
+            recall(&mut d, "alice", "after-activate", Some(*v), 1).is_forwarded(),
             "{v:?} did not take effect on the very next call"
         );
         assert_eq!(
             d.spent("acme"),
             Some(1),
-            "only the one forwarded call was billed"
+            "only the forwarded call was billed"
         );
 
-        // F10: the only `deactivate` the product exposes is on a standalone
-        // registry, which no live tenant can be reached through — revoking a
-        // variant on a copy leaves the tenant using it.
-        let mut standalone = registry_for(1u32 << i);
-        standalone.deactivate(*v);
-        assert!(!standalone.is_active(*v), "the set itself can revoke");
-        assert!(
-            recall(&mut d, "alice", "still-live", Some(*v), 1).is_forwarded(),
-            "{v:?} was revoked on a copy nobody can install, and stayed live"
+        d.deactivate_variant_governed(&tenant, *v)
+            .expect("live governed revocation succeeds");
+
+        assert_eq!(
+            recall(&mut d, "alice", "after-revoke", Some(*v), 1).refusal(),
+            Some(&Refusal::VariantNotActivated),
+            "{v:?} remained reachable after governed revocation"
         );
-        assert_eq!(d.spent("acme"), Some(2));
+        assert_eq!(
+            d.spent("acme"),
+            Some(1),
+            "the refused post-revocation call is free"
+        );
+
+        let variant_name = format!("{v:?}");
+        assert!(
+            d.governance().any(|row| {
+                matches!(
+                    &row.change,
+                    GovernanceChange::TenantRulesChanged {
+                        tenant,
+                        variants_deactivated,
+                        ..
+                    } if tenant.as_str() == "acme"
+                        && variants_deactivated
+                            .iter()
+                            .any(|name| name == &variant_name)
+                )
+            }),
+            "{v:?} revocation must be governance-visible once serving"
+        );
     }
 }
 
@@ -1657,9 +1775,10 @@ fn re_adding_a_live_tenant_is_refused_and_keeps_its_activations_and_ledger() {
 /// `TenantState::qpages` was `pub`, so an attacker-shaped document — unknown
 /// fields, duplicates, wrong order — deserialized and could be installed
 /// *wholesale* onto a live tenant, and the composed path then honoured it. The
-/// field is private and there is no setter: the only door into a tenant's
-/// activation set is `TenantState::activate`, which takes a typed enum, one
-/// variant at a time. The hostile document still decodes — that is F4/F5, and
+/// field is private and there is no registry setter: live activation goes
+/// through tenant policy plus `Deployment::activate_variant_governed`, with a
+/// typed enum and any required approval. The hostile document still decodes —
+/// that is F4/F5, and
 /// it still matters for backup integrity — but decoding it now grants nothing.
 #[test]
 fn enumeration_goes_through_a_private_field_name_and_hostile_documents_no_longer_install() {
@@ -1715,10 +1834,14 @@ fn enumeration_goes_through_a_private_field_name_and_hostile_documents_no_longer
         "a decoded hostile document buys the caller nothing at all"
     );
 
-    // The typed builder is the only door, and it is the one that works.
-    d.tenant_mut("acme")
-        .expect("tenant exists")
-        .activate(AdvancedQPageVariant::ExperimentalBridge);
+    // The governed typed activation path is the only live mutation door,
+    // and it is the one that works.
+    governed_activate(
+        &mut d,
+        "acme",
+        AdvancedQPageVariant::ExperimentalBridge,
+        100,
+    );
     assert!(recall(
         &mut d,
         "alice",

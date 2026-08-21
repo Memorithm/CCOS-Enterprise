@@ -516,6 +516,46 @@ impl ApprovalRegistry {
             .unwrap_or(GateOutcome::Denied)
     }
 
+    /// Evaluate one specific approval identity against the same authorization
+    /// rules as [`Self::evaluate`], without falling back to another matching
+    /// approval for the tenant/action/artifact.
+    ///
+    /// This is required when a caller persists the exact approval identity
+    /// that authorized an action: expiry or revocation of that identity must
+    /// not be masked by a later replacement approval.
+    pub fn evaluate_id(&self, id: &str, query: &ApprovalQuery<'_>) -> GateOutcome {
+        if !canonical_action(query.action) || !is_sha256_hex(query.artifact_hash) {
+            return GateOutcome::Denied;
+        }
+
+        let Some(record) = self.snapshot.approvals.get(id) else {
+            return GateOutcome::Denied;
+        };
+
+        if record.tenant != query.tenant.0 || record.action != query.action {
+            return GateOutcome::Denied;
+        }
+        if record.artifact_hash != query.artifact_hash {
+            return GateOutcome::ArtifactMismatch {
+                found: record.artifact_hash.clone(),
+            };
+        }
+
+        // `from_snapshot`/`record` validate record integrity, including the
+        // digest-to-fields binding. Legacy v1 identities remain audit-only.
+        if !record.id.starts_with("approval-v2-") || record.decision != ApprovalDecision::Approved {
+            return GateOutcome::Denied;
+        }
+        if self.is_revoked(id) {
+            return GateOutcome::Revoked;
+        }
+        if record.expires_at.is_some_and(|expiry| expiry <= query.now) {
+            return GateOutcome::Expired;
+        }
+
+        GateOutcome::Approved
+    }
+
     pub fn revoke(
         &mut self,
         approval_id: &str,
@@ -829,6 +869,53 @@ mod tests {
                 artifact_hash: &artifact(1),
                 now: 160,
             }),
+            GateOutcome::Denied
+        );
+    }
+
+    #[test]
+    fn exact_id_evaluation_cannot_borrow_a_replacement_approval() {
+        let mut registry = ApprovalRegistry::new();
+        let first = registry.record(request(100, None)).unwrap();
+        let replacement = registry.record(request(101, None)).unwrap();
+
+        // Generic evaluate() walks the BTreeMap in reverse key order. Revoke
+        // the lower identity and leave the higher identity live so a generic
+        // artifact-wide lookup deterministically succeeds on the replacement.
+        let (stale_id, live_id) = if first < replacement {
+            (first, replacement)
+        } else {
+            (replacement, first)
+        };
+        registry
+            .revoke(&stale_id, "operator", 150, "superseded")
+            .unwrap();
+
+        let tenant = TenantId("acme".into());
+        let artifact_hash = artifact(1);
+        let query = ApprovalQuery {
+            tenant: &tenant,
+            action: "tenant.delete",
+            artifact_hash: &artifact_hash,
+            now: 160,
+        };
+
+        assert_eq!(
+            registry.evaluate(&query),
+            GateOutcome::Approved,
+            "artifact-wide lookup sees the live replacement"
+        );
+        assert_eq!(
+            registry.evaluate_id(&stale_id, &query),
+            GateOutcome::Revoked,
+            "the exact persisted identity must remain revoked"
+        );
+        assert_eq!(
+            registry.evaluate_id(&live_id, &query),
+            GateOutcome::Approved
+        );
+        assert_eq!(
+            registry.evaluate_id("approval-v2-does-not-exist", &query),
             GateOutcome::Denied
         );
     }

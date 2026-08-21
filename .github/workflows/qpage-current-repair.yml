@@ -28,6 +28,7 @@ jobs:
           git show 40e1a84ec1cfb48363b140facf2548d3fb0e1cae:.github/workflows/qpage-final-probe.yml > /tmp/historical.yml
           python3 - <<'PY'
           from pathlib import Path
+          import textwrap
           text = Path('/tmp/historical.yml').read_text()
           marker = '        run: |\n'
           start = text.index(marker) + len(marker)
@@ -39,17 +40,18 @@ jobs:
               1,
           )
           needle = 'python3 /tmp/qpage_patch.py\n'
-          inject = r'''python3 - <<'PY2'
-from pathlib import Path
-p = Path('/tmp/qpage_patch.py')
-s = p.read_text()
-start = s.index('# P2: ExperimentalBridge must be revocable/opt-out-able.')
-end = s.index("runtime = Path('crates/ccos-enterprise-runtime/src/lib.rs')", start)
-s = s[:start] + s[end:]
-p.write_text(s)
-PY2
-python3 /tmp/qpage_patch.py
-'''
+          inject = textwrap.dedent(r'''\
+          python3 - <<'PY2'
+          from pathlib import Path
+          p = Path('/tmp/qpage_patch.py')
+          s = p.read_text()
+          start = s.index('# P2: ExperimentalBridge must be revocable/opt-out-able.')
+          end = s.index("runtime = Path('crates/ccos-enterprise-runtime/src/lib.rs')", start)
+          s = s[:start] + s[end:]
+          p.write_text(s)
+          PY2
+          python3 /tmp/qpage_patch.py
+          ''')
           if script.count(needle) != 1:
               raise SystemExit('historical patch execution anchor mismatch')
           script = script.replace(needle, inject, 1)

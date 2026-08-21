@@ -72,9 +72,7 @@ struct SignedFields<'a> {
 }
 
 fn valid_auth_label(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_AUTH_LABEL_BYTES
-        && !value.chars().any(char::is_control)
+    !value.is_empty() && value.len() <= MAX_AUTH_LABEL_BYTES && !value.chars().any(char::is_control)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -174,8 +172,8 @@ impl SealedExport {
         if verifier.key_id() != self.signing_key_id {
             return Err("export signing key is not the configured trust anchor".into());
         }
-        let signature =
-            decode_hex(&self.signature).ok_or_else(|| "export signature is not lowercase hex".to_string())?;
+        let signature = decode_hex(&self.signature)
+            .ok_or_else(|| "export signature is not lowercase hex".to_string())?;
         verifier.verify(&self.signed_message()?, &signature)
     }
 }
@@ -330,13 +328,8 @@ mod tests {
         skill_store.save(skills.snapshot()).unwrap();
         let trial_store = SkillTrialStore::open(&root).unwrap();
         trial_store.save(trials.snapshot()).unwrap();
-        let sources = crate::AuditSources::from_stores(
-            &skill_store,
-            &trial_store,
-            skills,
-            trials,
-        )
-        .unwrap();
+        let sources =
+            crate::AuditSources::from_stores(&skill_store, &trial_store, skills, trials).unwrap();
         drop(trial_store);
         drop(skill_store);
         let _ = std::fs::remove_dir_all(root.parent().unwrap());

@@ -16,86 +16,74 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: main
-      - name: Reconstruct, validate, and deliver clean Q-Page product
-        id: reconstruct
-        continue-on-error: true
+          ref: fix/qpage-replacement
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Fix conformance provisioning through governed Q-Page API
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin ci/qpage-reconstruct-probe fix/qpage-replacement
-          test "$(git rev-parse HEAD)" = "c4e0b0f51a052a96f85c5871472d85792467111e"
-          test "$(git rev-parse origin/fix/qpage-replacement)" = "c4e0b0f51a052a96f85c5871472d85792467111e"
-          git show origin/ci/qpage-reconstruct-probe:.github/workflows/qpage-reconstruct-probe.yml > /tmp/source.yml
+          test "$(git rev-parse HEAD)" = "d23ab26da837207e269b0379c1e1f890b2c9caa0"
           python3 - <<'PY'
           from pathlib import Path
-          lines = Path('/tmp/source.yml').read_text().splitlines()
-          start = next(i for i, line in enumerate(lines) if line == '        run: |') + 1
-          end = next(i for i in range(start, len(lines)) if lines[i].startswith('      - name: Upload Q-Page probe diagnostics'))
-          body = []
-          for line in lines[start:end]:
-              if line and not line.startswith('          '):
-                  raise SystemExit(f'unexpected reconstruction indentation: {line!r}')
-              body.append(line[10:] if line else '')
-          script = '\n'.join(body) + '\n'
-          old = 's = one(s, ".activate(AdvancedQPageVariant::Hierarchical);", ".activate_raw(AdvancedQPageVariant::Hierarchical);", \'internal provisioning activation\')'
-          new = 's = one(s, ".activate(AdvancedQPageVariant::Hierarchical);", ".permit_variant_raw(AdvancedQPageVariant::Hierarchical);\\n    acme.activate_raw(AdvancedQPageVariant::Hierarchical);", \'internal provisioning activation\')'
-          if script.count(old) != 1:
-              raise SystemExit(f'fixture adaptation anchor count={script.count(old)}')
-          script = script.replace(old, new, 1)
-          anchor = 'marker = "git config user.name \'MEMOPERF\'"\n'
-          insert = (
-              "tests_start = s.index(\"new_tests = r'''\")\n"
-              "tests_end = s.index(\"s = s[:idx] + new_tests\", tests_start)\n"
-              "tests_chunk = s[tests_start:tests_end]\n"
-              "tests_chunk = tests_chunk.replace(\"AdvancedQPageVariant::Hierarchical\", \"AdvancedQPageVariant::CausalChain\")\n"
-              "s = s[:tests_start] + tests_chunk + s[tests_end:]\n"
-          )
-          if script.count(anchor) != 1:
-              raise SystemExit(f'hardening test insertion anchor count={script.count(anchor)}')
-          Path('/tmp/reconstruct.sh').write_text(script.replace(anchor, insert + anchor, 1))
+          p = Path('tests/ccos-enterprise-conformance/tests/stress_endurance.rs')
+          s = p.read_text()
+          old_import = 'use ccos_enterprise_qpages::AdvancedQPageVariant;\n'
+          new_import = 'use ccos_enterprise_qpages::AdvancedQPageVariant;\nuse ccos_enterprise_tenancy::TenantId;\n'
+          if s.count(old_import) != 1:
+              raise SystemExit('TenantId import anchor mismatch')
+          s = s.replace(old_import, new_import, 1)
+          old = '''        let mut st = TenantState::new(limit_of(i));
+        st.allow_model("claude-opus");
+        if i % 2 == 0 {
+            // Even tenants are the "advanced" ones: second model, activated
+            // variant. Odd tenants refuse both, forever.
+            st.allow_model("gpt-5")
+                .activate(AdvancedQPageVariant::Hierarchical);
+        }
+        assert!(
+            d.add_tenant(FLEET_ORG, name, st),
+            "tenant {name} was provisioned twice"
+        );
+'''
+          new = '''        let mut st = TenantState::new(limit_of(i));
+        st.allow_model("claude-opus");
+        if i % 2 == 0 {
+            // Even tenants are the "advanced" ones: second model, governed
+            // Q-Page policy opt-in and activation. Odd tenants refuse both.
+            st.allow_model("gpt-5");
+        }
+        assert!(
+            d.add_tenant(FLEET_ORG, name, st),
+            "tenant {name} was provisioned twice"
+        );
+        if i % 2 == 0 {
+            let mut rules = d.tenant_mut(name).expect("tenant was just provisioned");
+            assert!(rules.permit_variant(AdvancedQPageVariant::Hierarchical));
+            drop(rules);
+            d.activate_variant_governed(
+                &TenantId(name.clone()),
+                AdvancedQPageVariant::Hierarchical,
+                None,
+                0,
+            )
+            .expect("permitted non-approval Q-Page activation");
+        }
+'''
+          if s.count(old) != 1:
+              raise SystemExit(f'fleet provisioning anchor count={s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
           PY
-          bash /tmp/reconstruct.sh
-
-          git diff HEAD --binary > /tmp/qpage-full-product.patch
-          printf '%s\n' '--- FINAL PRODUCT STATUS ---'
+          cargo fmt --all -- --check
+          cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
+          cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
+          cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
           git status --short
-          python3 - <<'PY'
-          import subprocess
-          allowed = {
-              'Cargo.lock',
-              'crates/ccos-enterprise-qpages/src/lib.rs',
-              'crates/ccos-enterprise-qpages/src/policy.rs',
-              'crates/ccos-enterprise-runtime/src/lib.rs',
-          }
-          rows = subprocess.check_output(['git', 'status', '--porcelain=v1'], text=True).splitlines()
-          paths = {row[3:] for row in rows}
-          if paths != allowed:
-              raise SystemExit(f'unexpected product paths: {sorted(paths)}')
-          if any(path.startswith('.ci/') or path.startswith('.github/workflows/') for path in paths):
-              raise SystemExit('validator artifact leaked into product paths')
-          PY
-          git add Cargo.lock \
-            crates/ccos-enterprise-qpages/src/lib.rs \
-            crates/ccos-enterprise-qpages/src/policy.rs \
-            crates/ccos-enterprise-runtime/src/lib.rs
-          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = "$(printf '%s\n' Cargo.lock crates/ccos-enterprise-qpages/src/lib.rs crates/ccos-enterprise-qpages/src/policy.rs crates/ccos-enterprise-runtime/src/lib.rs | sort | tr '\n' ' ')"
+          test "$(git status --porcelain=v1 | wc -l)" -eq 1
+          test "$(git status --porcelain=v1 | cut -c4-)" = "tests/ccos-enterprise-conformance/tests/stress_endurance.rs"
+          git add tests/ccos-enterprise-conformance/tests/stress_endurance.rs
           git config user.name 'MEMOPERF'
           git config user.email 'contact@checkupauto.fr'
-          git commit -m 'feat(qpages): govern durable variant activation'
+          git commit -m 'test(qpages): use governed activation in endurance fixture'
           git push origin HEAD:fix/qpage-replacement
-          git rev-parse HEAD > /tmp/qpage-product-sha.txt
-      - name: Upload delivered Q-Page diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: qpage-delivered-product
-          path: |
-            /tmp/qpage-probe.log
-            /tmp/qpage-result.patch
-            /tmp/qpage-full-product.patch
-            /tmp/qpage-product-sha.txt
-          if-no-files-found: ignore
-      - name: Preserve reconstruction failure
-        if: steps.reconstruct.outcome == 'failure'
-        run: exit 1

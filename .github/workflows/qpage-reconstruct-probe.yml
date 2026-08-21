@@ -21,6 +21,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git config user.name 'CCOS CI Probe'
+          git config user.email 'noreply@github.com'
           git fetch origin 27cb6663c6b25841603e916c83c821c149e94dc8
           set +e
           git merge --no-commit --no-ff 27cb6663c6b25841603e916c83c821c149e94dc8

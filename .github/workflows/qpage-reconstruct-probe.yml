@@ -16,13 +16,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Apply historical Q-Page hardening patch to current main
+          ref: main
+      - name: Three-way reconstruct historical Q-Page product diff
         shell: bash
         run: |
           set -euo pipefail
           git fetch origin 27cb6663c6b25841603e916c83c821c149e94dc8
-          git show 27cb6663c6b25841603e916c83c821c149e94dc8:.ci/autonomous-patch.sh > /tmp/qpage-patch.sh
-          bash /tmp/qpage-patch.sh
-      - name: Show resulting diff
-        if: always()
-        run: git diff -- crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-qpages/src/lib.rs crates/ccos-enterprise-qpages/src/policy.rs crates/ccos-enterprise-runtime/Cargo.toml
+          set +e
+          git merge --no-commit --no-ff 27cb6663c6b25841603e916c83c821c149e94dc8
+          rc=$?
+          set -e
+          echo "merge_rc=$rc"
+          echo '--- STATUS ---'
+          git status --short
+          echo '--- CONFLICT FILES ---'
+          git diff --name-only --diff-filter=U || true
+          echo '--- RUNTIME CONFLICT MARKERS ---'
+          if git diff --name-only --diff-filter=U | grep -qx 'crates/ccos-enterprise-runtime/src/lib.rs'; then
+            grep -n -B12 -A24 -E '^(<<<<<<<|=======|>>>>>>>)' crates/ccos-enterprise-runtime/src/lib.rs || true
+          fi
+          echo '--- CARGO CONFLICT MARKERS ---'
+          if git diff --name-only --diff-filter=U | grep -qx 'crates/ccos-enterprise-runtime/Cargo.toml'; then
+            cat crates/ccos-enterprise-runtime/Cargo.toml
+          fi
+          exit "$rc"

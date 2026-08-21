@@ -25,105 +25,36 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "d23ab26da837207e269b0379c1e1f890b2c9caa0"
+
+          # Reuse the already-reviewed patch program from the previous validator
+          # revision, changing only the Clippy-rejected legacy-policy initializer.
+          git show 92ac0d53af130d482e8bdd7af6c94bee909596ff:.github/workflows/qpage-final-probe.yml > /tmp/previous.yml
           python3 - <<'PY'
           from pathlib import Path
 
-          def replace_once(path, old, new, label):
-              p = Path(path)
-              s = p.read_text()
-              count = s.count(old)
-              if count != 1:
-                  raise SystemExit(f'{label}: anchor count={count}')
-              p.write_text(s.replace(old, new, 1))
+          text = Path('/tmp/previous.yml').read_text()
+          start_marker = "          python3 - <<'PY'\n"
+          end_marker = "          PY\n\n          cargo fmt --all\n"
+          start = text.index(start_marker) + len(start_marker)
+          end = text.index(end_marker, start)
+          lines = text[start:end].splitlines()
+          program = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
 
-          # P2: ExperimentalBridge must be revocable/opt-out-able.
-          replace_once(
-              'crates/ccos-enterprise-qpages/src/policy.rs',
-              '''    /// Withdraw permission for a variant.\n    pub fn revoke(&mut self, variant: AdvancedQPageVariant) -> bool {\n        self.permitted.remove(&variant)\n    }\n''',
-              '''    /// Withdraw permission for a variant.\n    pub fn revoke(&mut self, variant: AdvancedQPageVariant) -> bool {\n        if variant == EXPERIMENTAL_BRIDGE {\n            return std::mem::take(&mut self.experimental_bridge_opted_in);\n        }\n        self.permitted.remove(&variant)\n    }\n''',
-              'bridge revoke',
-          )
-          replace_once(
-              'crates/ccos-enterprise-qpages/src/policy.rs',
-              '''        assert_eq!(\n            policy.evaluate(EXPERIMENTAL_BRIDGE),\n            ActivationDecision::RequiresApproval,\n            "even opted in, the bridge demands a recorded approval"\n        );\n    }\n''',
-              '''        assert_eq!(\n            policy.evaluate(EXPERIMENTAL_BRIDGE),\n            ActivationDecision::RequiresApproval,\n            "even opted in, the bridge demands a recorded approval"\n        );\n        assert!(policy.revoke(EXPERIMENTAL_BRIDGE));\n        assert_eq!(\n            policy.evaluate(EXPERIMENTAL_BRIDGE),\n            ActivationDecision::Denied,\n            "revocation must return the bridge to the fail-closed default"\n        );\n        assert!(!policy.revoke(EXPERIMENTAL_BRIDGE));\n    }\n''',
-              'bridge revoke test',
-          )
-
-          runtime = Path('crates/ccos-enterprise-runtime/src/lib.rs')
-          s = runtime.read_text()
-
-          # P2: evaluate the exact approval identity persisted for activation.
-          old = '''    pub fn evaluate(\n        &self,\n        query: &ccos_enterprise_approval::ApprovalQuery<'_>,\n    ) -> ccos_enterprise_approval::GateOutcome {\n        self.registry.evaluate(query)\n    }\n\n    pub fn record(\n'''
-          new = '''    pub fn evaluate(\n        &self,\n        query: &ccos_enterprise_approval::ApprovalQuery<'_>,\n    ) -> ccos_enterprise_approval::GateOutcome {\n        self.registry.evaluate(query)\n    }\n\n    pub fn evaluate_id(\n        &self,\n        id: &str,\n        query: &ccos_enterprise_approval::ApprovalQuery<'_>,\n    ) -> ccos_enterprise_approval::GateOutcome {\n        use ccos_enterprise_approval::{ApprovalDecision, GateOutcome};\n        let Some(record) = self.registry.snapshot().approvals.get(id) else {\n            return GateOutcome::Denied;\n        };\n        if record.tenant != query.tenant.0 || record.action != query.action {\n            return GateOutcome::Denied;\n        }\n        if record.artifact_hash != query.artifact_hash {\n            return GateOutcome::ArtifactMismatch {\n                found: record.artifact_hash.clone(),\n            };\n        }\n        if !record.id.starts_with("approval-v2-") || record.decision != ApprovalDecision::Approved {\n            return GateOutcome::Denied;\n        }\n        if self.registry.is_revoked(id) {\n            return GateOutcome::Revoked;\n        }\n        if record.expires_at.is_some_and(|expiry| expiry <= query.now) {\n            return GateOutcome::Expired;\n        }\n        GateOutcome::Approved\n    }\n\n    pub fn record(\n'''
-          if s.count(old) != 1:
-              raise SystemExit(f'evaluate_id anchor count={s.count(old)}')
-          s = s.replace(old, new, 1)
-
-          old = '''                if self.approvals.evaluate(&query)\n                    != ccos_enterprise_approval::GateOutcome::Approved\n                {\n'''
-          new = '''                if self.approvals.evaluate_id(id, &query)\n                    != ccos_enterprise_approval::GateOutcome::Approved\n                {\n'''
-          if s.count(old) != 1:
-              raise SystemExit(f'activation exact-id anchor count={s.count(old)}')
-          s = s.replace(old, new, 1)
-
-          old = '''                        || self\n                            .approvals\n                            .evaluate(&ccos_enterprise_approval::ApprovalQuery {\n                                tenant: &tenant_id,\n                                action: "qpage.activate",\n                                artifact_hash: &artifact,\n                                now: now_unix(),\n                            })\n                            != ccos_enterprise_approval::GateOutcome::Approved\n'''
-          new = '''                        || self\n                            .approvals\n                            .evaluate_id(\n                                id,\n                                &ccos_enterprise_approval::ApprovalQuery {\n                                    tenant: &tenant_id,\n                                    action: "qpage.activate",\n                                    artifact_hash: &artifact,\n                                    now: now_unix(),\n                                },\n                            )\n                            != ccos_enterprise_approval::GateOutcome::Approved\n'''
-          if s.count(old) != 1:
-              raise SystemExit(f'admission exact-id anchor count={s.count(old)}')
-          s = s.replace(old, new, 1)
-
-          # P1: preserve a sentinel when the field is absent in legacy v1 JSON.
-          old = '''/// One tenant's governed state, as plain data.\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]\npub struct TenantSnapshot {\n'''
-          new = '''fn legacy_variant_policy() -> ccos_enterprise_qpages::policy::VariantPolicy {\n    let mut policy = ccos_enterprise_qpages::policy::VariantPolicy::default();\n    policy.schema_version = 0;\n    policy\n}\n\n/// One tenant's governed state, as plain data.\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]\npub struct TenantSnapshot {\n'''
-          if s.count(old) != 1:
-              raise SystemExit(f'legacy policy function anchor count={s.count(old)}')
-          s = s.replace(old, new, 1)
-          old = '''    #[serde(default)]\n    pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,\n'''
-          new = '''    #[serde(default = "legacy_variant_policy")]\n    pub variant_policy: ccos_enterprise_qpages::policy::VariantPolicy,\n'''
-          if s.count(old) != 1:
-              raise SystemExit(f'legacy serde anchor count={s.count(old)}')
-          s = s.replace(old, new, 1)
-
-          old = '''            let id = TenantId(name);\n            d.tenant_owner.insert(id.clone(), OrgId(t.owner));\n            // The variant policy must be schema-valid, or the restore is\n            // refused: a policy with an unsupported schema is corrupt state.\n            t.variant_policy\n                .validate()\n                .map_err(|detail| RestoreError::VariantPolicyCorrupt {\n                    tenant: id.0.clone(),\n                    detail,\n                })?;\n            for variant in t.qpages.active() {\n                match t.variant_policy.evaluate(variant) {\n'''
-          new = '''            let id = TenantId(name);\n            d.tenant_owner.insert(id.clone(), OrgId(t.owner));\n            // A missing policy field is a legacy v1 snapshot, not an explicit\n            // deny-all policy. Migrate the old active set into equivalent\n            // policy for non-approval variants. The ExperimentalBridge cannot\n            // be migrated safely because legacy state carries no approval id.\n            let mut variant_policy = t.variant_policy;\n            if variant_policy.schema_version == 0 {\n                variant_policy.schema_version =\n                    ccos_enterprise_qpages::policy::VARIANT_POLICY_SCHEMA;\n                for variant in t.qpages.active() {\n                    if variant == AdvancedQPageVariant::ExperimentalBridge {\n                        return Err(RestoreError::VariantPolicyCorrupt {\n                            tenant: id.0.clone(),\n                            detail: "legacy ExperimentalBridge activation has no approval evidence"\n                                .into(),\n                        });\n                    }\n                    variant_policy.permit(variant);\n                }\n            }\n            // Explicit persisted policies remain fail-closed.\n            variant_policy\n                .validate()\n                .map_err(|detail| RestoreError::VariantPolicyCorrupt {\n                    tenant: id.0.clone(),\n                    detail,\n                })?;\n            for variant in t.qpages.active() {\n                match variant_policy.evaluate(variant) {\n'''
-          if s.count(old) != 1:
-              raise SystemExit(f'legacy migration anchor count={s.count(old)}')
-          s = s.replace(old, new, 1)
-          old = '''                    variant_policy: t.variant_policy,\n                    variant_approvals: t.variant_approvals,\n'''
-          new = '''                    variant_policy,\n                    variant_approvals: t.variant_approvals,\n'''
-          if s.count(old) != 1:
-              raise SystemExit(f'variant policy install anchor count={s.count(old)}')
-          s = s.replace(old, new, 1)
-
-          # Regression: stale supplied approval must not be rescued by another live one.
-          anchor = '''    #[test]\n    fn exact_bridge_approval_is_persisted_and_revalidated_on_admission() {\n'''
-          test = '''    #[test]\n    fn bridge_activation_revalidates_the_supplied_approval_id() {\n        let mut d = two_tenant_deployment();\n        let tenant = TenantId("acme".into());\n        d.tenant_mut("acme").unwrap().opt_in_experimental_bridge();\n        let artifact = Deployment::qpage_activation_artifact_hash(\n            &tenant,\n            AdvancedQPageVariant::ExperimentalBridge,\n        );\n        let stale = d\n            .record_approval(\n                ccos_enterprise_approval::ApprovalRequest::new(\n                    tenant.clone(),\n                    "qpage.activate",\n                    &artifact,\n                    "operator-a",\n                    ccos_enterprise_approval::ApprovalDecision::Approved,\n                    10,\n                    Some(20),\n                    "short-lived bridge approval",\n                )\n                .unwrap(),\n            )\n            .unwrap();\n        let _live = d\n            .record_approval(\n                ccos_enterprise_approval::ApprovalRequest::new(\n                    tenant.clone(),\n                    "qpage.activate",\n                    &artifact,\n                    "operator-b",\n                    ccos_enterprise_approval::ApprovalDecision::Approved,\n                    11,\n                    None,\n                    "replacement bridge approval",\n                )\n                .unwrap(),\n            )\n            .unwrap();\n        assert!(d\n            .activate_variant_governed(\n                &tenant,\n                AdvancedQPageVariant::ExperimentalBridge,\n                Some(&stale),\n                100,\n            )\n            .is_err());\n    }\n\n'''
-          if s.count(anchor) != 1:
-              raise SystemExit(f'exact-id regression test anchor count={s.count(anchor)}')
-          s = s.replace(anchor, test + anchor, 1)
-
-          # Regression: field absence migrates legacy active variants; explicit deny-all stays corrupt.
-          anchor = '''    #[test]\n    fn restored_active_variant_denied_by_default_policy_is_refused() {\n'''
-          test = '''    #[test]\n    fn legacy_snapshot_without_variant_policy_migrates_active_variants() {\n        let d = two_tenant_deployment();\n        let mut value = serde_json::to_value(d.snapshot()).unwrap();\n        value["tenants"]["acme"]\n            .as_object_mut()\n            .unwrap()\n            .remove("variant_policy");\n        let legacy: DeploymentSnapshot = serde_json::from_value(value).unwrap();\n        let restored = Deployment::restore(legacy, &[], &[]).unwrap();\n        assert!(restored\n            .tenants\n            .get(&TenantId("acme".into()))\n            .unwrap()\n            .qpages\n            .is_active(AdvancedQPageVariant::Hierarchical));\n    }\n\n'''
-          if s.count(anchor) != 1:
-              raise SystemExit(f'legacy regression test anchor count={s.count(anchor)}')
-          s = s.replace(anchor, test + anchor, 1)
-          runtime.write_text(s)
-
-          # Fast CI: old endurance fixture now provisions through the governed API.
-          p = Path('tests/ccos-enterprise-conformance/tests/stress_endurance.rs')
-          s = p.read_text()
-          old_import = 'use ccos_enterprise_qpages::AdvancedQPageVariant;\n'
-          new_import = 'use ccos_enterprise_qpages::AdvancedQPageVariant;\nuse ccos_enterprise_tenancy::TenantId;\n'
-          if s.count(old_import) != 1:
-              raise SystemExit('TenantId import anchor mismatch')
-          s = s.replace(old_import, new_import, 1)
-          old = '''        let mut st = TenantState::new(limit_of(i));\n        st.allow_model("claude-opus");\n        if i % 2 == 0 {\n            // Even tenants are the "advanced" ones: second model, activated\n            // variant. Odd tenants refuse both, forever.\n            st.allow_model("gpt-5")\n                .activate(AdvancedQPageVariant::Hierarchical);\n        }\n        assert!(\n            d.add_tenant(FLEET_ORG, name, st),\n            "tenant {name} was provisioned twice"\n        );\n'''
-          new = '''        let mut st = TenantState::new(limit_of(i));\n        st.allow_model("claude-opus");\n        if i % 2 == 0 {\n            // Even tenants are the "advanced" ones: second model, governed\n            // Q-Page policy opt-in and activation. Odd tenants refuse both.\n            st.allow_model("gpt-5");\n        }\n        assert!(\n            d.add_tenant(FLEET_ORG, name, st),\n            "tenant {name} was provisioned twice"\n        );\n        if i % 2 == 0 {\n            let mut rules = d.tenant_mut(name).expect("tenant was just provisioned");\n            assert!(rules.permit_variant(AdvancedQPageVariant::Hierarchical));\n            drop(rules);\n            d.activate_variant_governed(\n                &TenantId(name.clone()),\n                AdvancedQPageVariant::Hierarchical,\n                None,\n                0,\n            )\n            .expect("permitted non-approval Q-Page activation");\n        }\n'''
-          if s.count(old) != 1:
-              raise SystemExit(f'fleet provisioning anchor count={s.count(old)}')
-          p.write_text(s.replace(old, new, 1))
+          old = '''    let mut policy = ccos_enterprise_qpages::policy::VariantPolicy::default();
+    policy.schema_version = 0;
+    policy
+'''
+          new = '''    ccos_enterprise_qpages::policy::VariantPolicy {
+        schema_version: 0,
+        ..Default::default()
+    }
+'''
+          if program.count(old) != 1:
+              raise SystemExit(f'legacy initializer anchor count={program.count(old)}')
+          program = program.replace(old, new, 1)
+          Path('/tmp/qpage_patch.py').write_text(program)
           PY
+          python3 /tmp/qpage_patch.py
 
           cargo fmt --all
           cargo fmt --all -- --check

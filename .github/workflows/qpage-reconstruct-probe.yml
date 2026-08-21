@@ -71,6 +71,11 @@ jobs:
           s = p.read_text()
           for label in ('drop after policy', 'admission qpage policy', 'snapshot activation approvals', 'snapshot write approvals'):
               s = s.replace(f"\n{label}')", f"\n'{label}')")
+          current = "if let Some(variant) = call.variant {\\n            if !state.qpages.is_active(variant) {"
+          historical = "if let Some(v) = call.variant {\\n            if !state.qpages.is_active(v) {"
+          if s.count(historical) < 1:
+              raise SystemExit('historical admission anchor missing from hardening script')
+          s = s.replace(historical, current, 1)
           marker = "git config user.name 'MEMOPERF'"
           if marker not in s:
               raise SystemExit('delivery marker missing')

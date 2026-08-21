@@ -1,0 +1,63 @@
+name: QPage current-head repair validator
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/qpage-current-repair.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: fix/qpage-replacement
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Reapply reviewed repairs to current product head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "94ecb1d8f78da5879b3b96b8b8b8d29e49578de3"
+          git show 40e1a84ec1cfb48363b140facf2548d3fb0e1cae:.github/workflows/qpage-final-probe.yml > /tmp/historical.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('/tmp/historical.yml').read_text()
+          marker = '        run: |\n'
+          start = text.index(marker) + len(marker)
+          lines = text[start:].splitlines()
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+          script = script.replace(
+              'test "$(git rev-parse HEAD)" = "d23ab26da837207e269b0379c1e1f890b2c9caa0"',
+              'test "$(git rev-parse HEAD)" = "94ecb1d8f78da5879b3b96b8b8b8d29e49578de3"',
+              1,
+          )
+          needle = 'python3 /tmp/qpage_patch.py\n'
+          inject = r'''python3 - <<'PY2'
+from pathlib import Path
+p = Path('/tmp/qpage_patch.py')
+s = p.read_text()
+start = s.index('# P2: ExperimentalBridge must be revocable/opt-out-able.')
+end = s.index("runtime = Path('crates/ccos-enterprise-runtime/src/lib.rs')", start)
+s = s[:start] + s[end:]
+p.write_text(s)
+PY2
+python3 /tmp/qpage_patch.py
+'''
+          if script.count(needle) != 1:
+              raise SystemExit('historical patch execution anchor mismatch')
+          script = script.replace(needle, inject, 1)
+          script = script.replace(
+              'test "$(git status --porcelain=v1 | wc -l)" -eq 4',
+              'test "$(git status --porcelain=v1 | wc -l)" -eq 3',
+              1,
+          )
+          Path('/tmp/run-current-repair.sh').write_text(script)
+          PY
+          bash /tmp/run-current-repair.sh

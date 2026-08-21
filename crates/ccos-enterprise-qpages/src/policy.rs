@@ -84,8 +84,13 @@ impl VariantPolicy {
         self.permitted.insert(variant)
     }
 
-    /// Withdraw permission for a variant.
+    /// Withdraw permission for a variant. Revoking the experimental bridge
+    /// clears its explicit opt-in flag; the runtime couples a successful
+    /// policy revocation to deactivation of any active variant.
     pub fn revoke(&mut self, variant: AdvancedQPageVariant) -> bool {
+        if variant == EXPERIMENTAL_BRIDGE {
+            return std::mem::replace(&mut self.experimental_bridge_opted_in, false);
+        }
         self.permitted.remove(&variant)
     }
 
@@ -173,6 +178,19 @@ mod tests {
             ActivationDecision::RequiresApproval,
             "even opted in, the bridge demands a recorded approval"
         );
+    }
+
+    #[test]
+    fn experimental_bridge_opt_in_is_revocable() {
+        let mut policy = VariantPolicy::default();
+        policy.opt_in_experimental_bridge();
+        assert_eq!(
+            policy.evaluate(EXPERIMENTAL_BRIDGE),
+            ActivationDecision::RequiresApproval
+        );
+        assert!(policy.revoke(EXPERIMENTAL_BRIDGE));
+        assert_eq!(policy.evaluate(EXPERIMENTAL_BRIDGE), ActivationDecision::Denied);
+        assert!(!policy.revoke(EXPERIMENTAL_BRIDGE));
     }
 
     #[test]

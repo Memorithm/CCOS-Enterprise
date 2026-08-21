@@ -56,6 +56,191 @@ jobs:
           PY
           python3 /tmp/qpage_patch.py
 
+          # The exhaustive conformance suite still encoded the removed raw
+          # TenantState/TenantRules::activate API. Migrate those fixtures to the
+          # product's governed activation path. Standalone QPageRegistry::activate
+          # remains untouched because those tests intentionally exercise the set.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('tests/ccos-enterprise-conformance/tests/stress_qpages_exhaustive.rs')
+          s = p.read_text()
+
+          anchor = '''fn deployment_activating(mask: u32) -> Deployment {
+    deployment_activating_capped(mask, DEFAULT_AUDIT_CAPACITY)
+}
+'''
+          helper = '''fn deployment_activating(mask: u32) -> Deployment {
+    deployment_activating_capped(mask, DEFAULT_AUDIT_CAPACITY)
+}
+
+fn activate_tenant_variant(
+    d: &mut Deployment,
+    tenant: &str,
+    variant: AdvancedQPageVariant,
+) {
+    let tenant_id = TenantId(tenant.to_string());
+    if variant == AdvancedQPageVariant::ExperimentalBridge {
+        d.tenant_mut(tenant)
+            .expect("tenant exists")
+            .opt_in_experimental_bridge();
+        let artifact = Deployment::qpage_activation_artifact_hash(&tenant_id, variant);
+        let approval = ccos_enterprise_approval::ApprovalRequest::new(
+            tenant_id.clone(),
+            "qpage.activate",
+            &artifact,
+            "conformance-operator",
+            ccos_enterprise_approval::ApprovalDecision::Approved,
+            0,
+            None,
+            "activate experimental bridge in conformance fixture",
+        )
+        .expect("valid exact Q-Page approval");
+        let approval_id = d.record_approval(approval).expect("record approval");
+        d.activate_variant_governed(&tenant_id, variant, Some(&approval_id), 0)
+            .expect("approved governed Q-Page activation");
+    } else {
+        assert!(
+            d.tenant_mut(tenant)
+                .expect("tenant exists")
+                .permit_variant(variant),
+            "variant policy changes exactly once per fixture activation"
+        );
+        d.activate_variant_governed(&tenant_id, variant, None, 0)
+            .expect("permitted governed Q-Page activation");
+    }
+}
+'''
+          if s.count(anchor) != 1:
+              raise SystemExit(f'helper anchor count={s.count(anchor)}')
+          s = s.replace(anchor, helper, 1)
+
+          replacements = [
+          ('''    let mut t = TenantState::new(1_000_000);
+    t.allow_model("claude-opus");
+    for (i, v) in ALL.iter().enumerate() {
+        if bit(mask, i) {
+            t.activate(*v);
+        }
+    }
+    assert!(
+        d.add_tenant(ORG, "acme", t),
+        "a fresh deployment must accept its first tenant"
+    );
+''', '''    let mut t = TenantState::new(1_000_000);
+    t.allow_model("claude-opus");
+    assert!(
+        d.add_tenant(ORG, "acme", t),
+        "a fresh deployment must accept its first tenant"
+    );
+    for (i, v) in ALL.iter().enumerate() {
+        if bit(mask, i) {
+            activate_tenant_variant(&mut d, "acme", *v);
+        }
+    }
+'''),
+          ('''        let mut state = TenantState::new(100);
+        state.allow_model("claude-opus");
+        let mask = mask_for_tenant(SEED, t);
+        for (i, v) in ALL.iter().enumerate() {
+            if bit(mask, i) {
+                state.activate(*v);
+            }
+        }
+        assert!(
+            d.add_tenant(ORG, &tenant_name(t), state),
+            "t-{t:05} must be provisioned exactly once"
+        );
+''', '''        let mut state = TenantState::new(100);
+        state.allow_model("claude-opus");
+        let mask = mask_for_tenant(SEED, t);
+        let name = tenant_name(t);
+        assert!(
+            d.add_tenant(ORG, &name, state),
+            "t-{t:05} must be provisioned exactly once"
+        );
+        for (i, v) in ALL.iter().enumerate() {
+            if bit(mask, i) {
+                activate_tenant_variant(&mut d, &name, *v);
+            }
+        }
+'''),
+          ('''    for t in (0..N).step_by(97) {
+        let mut state = d.tenant_mut(&tenant_name(t)).expect("provisioned above");
+        for v in ALL {
+            state.activate(v);
+        }
+    }
+''', '''    for t in (0..N).step_by(97) {
+        let name = tenant_name(t);
+        for v in ALL {
+            activate_tenant_variant(&mut d, &name, v);
+        }
+    }
+'''),
+          ('''    {
+        let mut state = d.tenant_mut("acme").expect("tenant exists");
+        for v in ALL {
+            state.activate(v);
+        }
+    }
+''', '''    for v in ALL {
+        activate_tenant_variant(&mut d, "acme", v);
+    }
+'''),
+          ('''    let mut t = TenantState::new(5);
+    t.allow_model("claude-opus");
+    for v in ALL {
+        t.activate(v);
+    }
+    assert!(tight.add_tenant(ORG, "acme", t));
+''', '''    let mut t = TenantState::new(5);
+    t.allow_model("claude-opus");
+    assert!(tight.add_tenant(ORG, "acme", t));
+    for v in ALL {
+        activate_tenant_variant(&mut tight, "acme", v);
+    }
+'''),
+          ('''        let mut t = TenantState::new(100);
+        t.allow_model("claude-opus")
+            .activate(AdvancedQPageVariant::MultiTenantFederated);
+        assert!(d.add_tenant(ORG, tenant, t));
+''', '''        let mut t = TenantState::new(100);
+        t.allow_model("claude-opus");
+        assert!(d.add_tenant(ORG, tenant, t));
+        activate_tenant_variant(
+            &mut d,
+            tenant,
+            AdvancedQPageVariant::MultiTenantFederated,
+        );
+'''),
+          ('''    d.tenant_mut("acme")
+        .expect("acme exists")
+        .activate(AdvancedQPageVariant::Hierarchical);
+''', '''    activate_tenant_variant(&mut d, "acme", AdvancedQPageVariant::Hierarchical);
+'''),
+          ('''        d.tenant_mut("acme").expect("tenant exists").activate(*v);
+''', '''        activate_tenant_variant(&mut d, "acme", *v);
+'''),
+          ('''    d.tenant_mut("acme")
+        .expect("tenant exists")
+        .activate(AdvancedQPageVariant::ExperimentalBridge);
+''', '''    activate_tenant_variant(
+        &mut d,
+        "acme",
+        AdvancedQPageVariant::ExperimentalBridge,
+    );
+'''),
+          ]
+
+          for old, new in replacements:
+              if s.count(old) != 1:
+                  raise SystemExit(f'exhaustive activation anchor count={s.count(old)} for {old[:80]!r}')
+              s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+
           cargo fmt --all
           cargo fmt --all -- --check
           cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
@@ -63,13 +248,15 @@ jobs:
           cargo test -p ccos-enterprise-qpages
           cargo test -p ccos-enterprise-runtime
           cargo test -p ccos-enterprise-conformance --test stress_endurance --release
+          cargo test -p ccos-enterprise-conformance --test stress_qpages_exhaustive --release
           cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
 
           git status --short
-          test "$(git status --porcelain=v1 | wc -l)" -eq 3
+          test "$(git status --porcelain=v1 | wc -l)" -eq 4
           git add crates/ccos-enterprise-qpages/src/policy.rs \
                   crates/ccos-enterprise-runtime/src/lib.rs \
-                  tests/ccos-enterprise-conformance/tests/stress_endurance.rs
+                  tests/ccos-enterprise-conformance/tests/stress_endurance.rs \
+                  tests/ccos-enterprise-conformance/tests/stress_qpages_exhaustive.rs
           git config user.name 'MEMOPERF'
           git config user.email 'contact@checkupauto.fr'
           git commit -m 'fix(qpages): close final CI and approval policy gaps'

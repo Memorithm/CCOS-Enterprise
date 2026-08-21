@@ -90,6 +90,11 @@ jobs:
           if s.count(restore_old) != 1 or s.count(restore_new) != 1:
               raise SystemExit('historical restore anchors missing')
           s = s.replace(restore_old, restore_old_current, 1).replace(restore_new, restore_new_current, 1)
+          old_test_name = 'fn variant_policy_is_durable_and_governs_activation()'
+          actual_test_name = 'fn variant_activation_goes_through_the_policy_gate()'
+          if s.count(old_test_name) != 1:
+              raise SystemExit('historical qpage test marker missing')
+          s = s.replace(old_test_name, actual_test_name, 1)
           marker = "git config user.name 'MEMOPERF'"
           if marker not in s:
               raise SystemExit('delivery marker missing')

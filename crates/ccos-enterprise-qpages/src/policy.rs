@@ -189,7 +189,10 @@ mod tests {
             ActivationDecision::RequiresApproval
         );
         assert!(policy.revoke(EXPERIMENTAL_BRIDGE));
-        assert_eq!(policy.evaluate(EXPERIMENTAL_BRIDGE), ActivationDecision::Denied);
+        assert_eq!(
+            policy.evaluate(EXPERIMENTAL_BRIDGE),
+            ActivationDecision::Denied
+        );
         assert!(!policy.revoke(EXPERIMENTAL_BRIDGE));
     }
 

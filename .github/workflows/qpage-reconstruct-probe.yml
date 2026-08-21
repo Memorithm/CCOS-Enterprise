@@ -17,11 +17,22 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
-      - name: Apply historical Q-Page transformation without delivery commands
+      - name: Reconstruct historical Q-Page product diff on current main
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin 27cb6663c6b25841603e916c83c821c149e94dc8
+          git fetch origin 5caf265945d4d6f9667878796deecd8273e45390 27cb6663c6b25841603e916c83c821c149e94dc8
+          git diff --binary 5caf265945d4d6f9667878796deecd8273e45390 27cb6663c6b25841603e916c83c821c149e94dc8 -- \
+            crates/ccos-enterprise-qpages/src/lib.rs \
+            crates/ccos-enterprise-qpages/src/policy.rs \
+            crates/ccos-enterprise-runtime/Cargo.toml \
+            crates/ccos-enterprise-runtime/src/lib.rs \
+            > /tmp/qpage-product.patch
+          git apply --3way /tmp/qpage-product.patch
+      - name: Apply historical Q-Page hardening without delivery commands
+        shell: bash
+        run: |
+          set -euo pipefail
           mkdir -p .ci
           git show 27cb6663c6b25841603e916c83c821c149e94dc8:.ci/autonomous-patch.sh > .ci/autonomous-patch.sh
           python3 - <<'PY'

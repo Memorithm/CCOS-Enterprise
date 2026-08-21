@@ -1,0 +1,65 @@
+name: QPage final reconstruction probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/qpage-final-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+      - name: Run proven reconstruction with policy-consistent fixture
+        id: reconstruct
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin ci/qpage-reconstruct-probe
+          git show origin/ci/qpage-reconstruct-probe:.github/workflows/qpage-reconstruct-probe.yml > /tmp/source.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path('/tmp/source.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(lines) if line == '        run: |') + 1
+          end = next(i for i in range(start, len(lines)) if lines[i].startswith('      - name: Upload Q-Page probe diagnostics'))
+          body = []
+          for line in lines[start:end]:
+              if line and not line.startswith('          '):
+                  raise SystemExit(f'unexpected reconstruction indentation: {line!r}')
+              body.append(line[10:] if line else '')
+          script = '\n'.join(body) + '\n'
+          old = 's = one(s, ".activate(AdvancedQPageVariant::Hierarchical);", ".activate_raw(AdvancedQPageVariant::Hierarchical);", \'internal provisioning activation\')'
+          new = 's = one(s, ".activate(AdvancedQPageVariant::Hierarchical);", ".permit_variant_raw(AdvancedQPageVariant::Hierarchical);\\n    acme.activate_raw(AdvancedQPageVariant::Hierarchical);", \'internal provisioning activation\')'
+          if script.count(old) != 1:
+              raise SystemExit(f'fixture adaptation anchor count={script.count(old)}')
+          Path('/tmp/reconstruct.sh').write_text(script.replace(old, new, 1))
+          PY
+          bash /tmp/reconstruct.sh
+          mkdir -p /tmp/qpage-final/crates/ccos-enterprise-qpages/src
+          mkdir -p /tmp/qpage-final/crates/ccos-enterprise-runtime/src
+          cp crates/ccos-enterprise-qpages/src/lib.rs /tmp/qpage-final/crates/ccos-enterprise-qpages/src/lib.rs
+          cp crates/ccos-enterprise-qpages/src/policy.rs /tmp/qpage-final/crates/ccos-enterprise-qpages/src/policy.rs
+          cp crates/ccos-enterprise-runtime/Cargo.toml /tmp/qpage-final/crates/ccos-enterprise-runtime/Cargo.toml
+          cp crates/ccos-enterprise-runtime/src/lib.rs /tmp/qpage-final/crates/ccos-enterprise-runtime/src/lib.rs
+          cp /tmp/qpage-result.patch /tmp/qpage-final/qpage-result.patch
+      - name: Upload final Q-Page reconstruction
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qpage-final-reconstruction
+          path: |
+            /tmp/qpage-probe.log
+            /tmp/qpage-result.patch
+            /tmp/qpage-final
+          if-no-files-found: ignore
+      - name: Preserve reconstruction failure
+        if: steps.reconstruct.outcome == 'failure'
+        run: exit 1

@@ -97,6 +97,11 @@ jobs:
               raise SystemExit('historical qpage test marker missing')
           s = s.replace(old_test_name, actual_test_name, 1)
           s = s.replace('let mut rules = self', 'let rules = self')
+          old_clippy = 'cargo clippy -p ccos-enterprise-runtime --all-targets -- -D warnings'
+          new_clippy = 'cargo clippy -p ccos-enterprise-runtime --all-targets --features test-fixtures -- -D warnings'
+          if s.count(old_clippy) != 1:
+              raise SystemExit('historical clippy command missing')
+          s = s.replace(old_clippy, new_clippy, 1)
           marker = "git config user.name 'MEMOPERF'"
           if marker not in s:
               raise SystemExit('delivery marker missing')

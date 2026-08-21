@@ -1,0 +1,28 @@
+name: QPage reconstruction probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/qpage-reconstruct-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply historical Q-Page hardening patch to current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 27cb6663c6b25841603e916c83c821c149e94dc8
+          git show 27cb6663c6b25841603e916c83c821c149e94dc8:.ci/autonomous-patch.sh > /tmp/qpage-patch.sh
+          bash /tmp/qpage-patch.sh
+      - name: Show resulting diff
+        if: always()
+        run: git diff -- crates/ccos-enterprise-runtime/src/lib.rs crates/ccos-enterprise-qpages/src/lib.rs crates/ccos-enterprise-qpages/src/policy.rs crates/ccos-enterprise-runtime/Cargo.toml

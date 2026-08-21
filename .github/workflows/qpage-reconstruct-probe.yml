@@ -57,6 +57,7 @@ jobs:
           s = one(s, "<<<<<<< ours\n            Self::ActiveModelInvalid {\n                tenant,\n                active_model,\n            } => write!(\n                f,\n                \"tenant {tenant:?} has invalid or ambiguous active model {active_model:?}\"\n            ),\n=======\n            Self::VariantPolicyCorrupt { tenant, detail } => {\n                write!(f, \"tenant {tenant:?} variant policy is corrupt: {detail}\")\n            }\n>>>>>>> theirs\n", "            Self::ActiveModelInvalid {\n                tenant,\n                active_model,\n            } => write!(\n                f,\n                \"tenant {tenant:?} has invalid or ambiguous active model {active_model:?}\"\n            ),\n            Self::VariantPolicyCorrupt { tenant, detail } => {\n                write!(f, \"tenant {tenant:?} variant policy is corrupt: {detail}\")\n            }\n", 'restore display')
           s = one(s, "<<<<<<< ours\n                            active_model: state.active_model.clone(),\n=======\n                            variant_policy: state.variant_policy.clone(),\n>>>>>>> theirs\n", "                            active_model: state.active_model.clone(),\n                            variant_policy: state.variant_policy.clone(),\n", 'snapshot write')
           s = one(s, "<<<<<<< ours\n                    active_model,\n=======\n                    variant_policy: t.variant_policy,\n>>>>>>> theirs\n", "                    active_model,\n                    variant_policy: t.variant_policy,\n", 'restore state')
+          s = one(s, ".activate(AdvancedQPageVariant::Hierarchical);", ".activate_raw(AdvancedQPageVariant::Hierarchical);", 'internal provisioning activation')
           if '<<<<<<<' in s or '>>>>>>>' in s or '\n=======\n' in s:
               raise SystemExit('unresolved runtime conflict')
           p.write_text(s)
@@ -95,6 +96,7 @@ jobs:
           if s.count(old_test_name) != 1:
               raise SystemExit('historical qpage test marker missing')
           s = s.replace(old_test_name, actual_test_name, 1)
+          s = s.replace('let mut rules = self', 'let rules = self')
           marker = "git config user.name 'MEMOPERF'"
           if marker not in s:
               raise SystemExit('delivery marker missing')

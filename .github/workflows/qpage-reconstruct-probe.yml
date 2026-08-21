@@ -68,6 +68,54 @@ jobs:
               raise SystemExit(f'chaos governance invariant anchor count={s.count(old3)}')
           p.write_text(s.replace(old3, new3, 1))
           PY
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/ccos-enterprise-conformance/tests/stress_budget_property.rs')
+          s = p.read_text()
+          old1 = '''        let mut t = d.tenant_mut("acme").expect("tenant");
+        assert_eq!(t.spent(), 1_000, "the ledger is readable…");
+        assert_eq!(t.limit(), 1_000, "…and so is the ceiling…");
+        t.allow_model("another-model")
+            .activate(AdvancedQPageVariant::CausalChain);
+        assert_eq!(t.spent(), 1_000, "…but configuration cannot rewind it");
+        assert_eq!(t.limit(), 1_000, "…nor widen it");
+'''
+          new1 = '''        let mut t = d.tenant_mut("acme").expect("tenant");
+        assert_eq!(t.spent(), 1_000, "the ledger is readable…");
+        assert_eq!(t.limit(), 1_000, "…and so is the ceiling…");
+        t.allow_model("another-model");
+        assert!(t.permit_variant(AdvancedQPageVariant::CausalChain));
+        assert_eq!(t.spent(), 1_000, "…but configuration cannot rewind it");
+        assert_eq!(t.limit(), 1_000, "…nor widen it");
+'''
+          if s.count(old1) != 1:
+              raise SystemExit(f'budget configuration anchor count={s.count(old1)}')
+          s = s.replace(old1, new1, 1)
+          old2 = '''    let mut acme = TenantState::new(4_000_000);
+    acme.allow_model("m")
+        .activate(AdvancedQPageVariant::Hierarchical);
+    assert!(d.add_tenant("o", "acme", acme));
+'''
+          new2 = '''    let mut acme = TenantState::new(4_000_000);
+    acme.allow_model("m");
+    assert!(d.add_tenant("o", "acme", acme));
+    assert!(
+        d.tenant_mut("acme")
+            .expect("acme was just provisioned")
+            .permit_variant(AdvancedQPageVariant::Hierarchical)
+    );
+    d.activate_variant_governed(
+        &TenantId("acme".to_string()),
+        AdvancedQPageVariant::Hierarchical,
+        None,
+        0,
+    )
+    .expect("permitted governed Q-Page activation");
+'''
+          if s.count(old2) != 1:
+              raise SystemExit(f'budget ledger fixture anchor count={s.count(old2)}')
+          p.write_text(s.replace(old2, new2, 1))
+          PY
           cargo fmt --all
           cargo fmt --all -- --check
           cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
@@ -76,10 +124,11 @@ jobs:
           cargo test -p ccos-enterprise-runtime --features test-fixtures
           cargo test -p ccos-enterprise-conformance --test stress_endurance --release
           cargo test -p ccos-enterprise-conformance --test stress_concurrency_chaos --release
+          cargo test -p ccos-enterprise-conformance --test stress_budget_property --release
           cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
           git status --short
-          test "$(git status --porcelain=v1 | wc -l)" -eq 4
-          git add crates/ccos-enterprise-qpages/src/policy.rs crates/ccos-enterprise-runtime/src/lib.rs tests/ccos-enterprise-conformance/tests/stress_endurance.rs tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs
+          test "$(git status --porcelain=v1 | wc -l)" -eq 5
+          git add crates/ccos-enterprise-qpages/src/policy.rs crates/ccos-enterprise-runtime/src/lib.rs tests/ccos-enterprise-conformance/tests/stress_endurance.rs tests/ccos-enterprise-conformance/tests/stress_concurrency_chaos.rs tests/ccos-enterprise-conformance/tests/stress_budget_property.rs
           git config user.name 'MEMOPERF'
           git config user.email 'contact@checkupauto.fr'
           git commit -m 'fix(qpages): close final CI and approval policy gaps'

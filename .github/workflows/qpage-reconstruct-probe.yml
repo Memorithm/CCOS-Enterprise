@@ -31,7 +31,16 @@ jobs:
             crates/ccos-enterprise-runtime/Cargo.toml \
             crates/ccos-enterprise-runtime/src/lib.rs \
             > /tmp/qpage-product.patch
+          set +e
           git apply --3way /tmp/qpage-product.patch
+          apply_rc=$?
+          set -e
+          if [ "$apply_rc" -ne 0 ]; then
+            cp crates/ccos-enterprise-runtime/Cargo.toml /tmp/qpage-conflict-Cargo.toml || true
+            cp crates/ccos-enterprise-runtime/src/lib.rs /tmp/qpage-conflict-lib.rs || true
+            git status --short
+            exit "$apply_rc"
+          fi
           mkdir -p .ci
           git show 27cb6663c6b25841603e916c83c821c149e94dc8:.ci/autonomous-patch.sh > .ci/autonomous-patch.sh
           python3 - <<'PY'
@@ -72,6 +81,8 @@ jobs:
             /tmp/qpage-probe.log
             /tmp/qpage-product.patch
             /tmp/qpage-result.patch
+            /tmp/qpage-conflict-Cargo.toml
+            /tmp/qpage-conflict-lib.rs
           if-no-files-found: ignore
       - name: Preserve probe failure
         if: steps.reconstruct.outcome == 'failure'

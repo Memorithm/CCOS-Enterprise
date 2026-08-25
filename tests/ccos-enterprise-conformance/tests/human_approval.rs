@@ -35,7 +35,7 @@ fn operator_call<'a>(
     }
 }
 
-fn operator_identity<'a>() -> ccos_enterprise_auth::AuthenticatedActor {
+fn operator_identity() -> ccos_enterprise_auth::AuthenticatedActor {
     actor("memorithm", "root", AuthStrength::Token)
 }
 
@@ -72,9 +72,8 @@ fn approval_gated_tool_denies_without_a_record() {
     );
     // The call is still admissible (the gate is separate from admit): an
     // operator can be told exactly which artifact needs approval.
-    assert_eq!(
+    assert!(
         d.admit(call).is_forwarded(),
-        true,
         "the governed path admits; the approval gate is the caller's second check"
     );
 }

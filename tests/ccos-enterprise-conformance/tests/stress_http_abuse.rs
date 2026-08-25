@@ -587,6 +587,7 @@ fn counter(tag: &str, burst: f64, per_second: f64) -> Counterparty {
         seed: SEED,
         bucket: TokenBucket::new(burst, per_second),
         vault_seen: None,
+        persist_writes: 0,
     };
     std::thread::spawn(move || {
         let _ = serve(listener, counter);
@@ -641,19 +642,19 @@ fn requests_without_a_request_line_are_refused_not_guessed() {
 
 /// Garbage methods and absurd request targets are classified, never executed.
 ///
-/// The method is matched *before* the path (`lib.rs:326`), which is why
-/// `GET /claim` — the product's own endpoint — is `404 Not Found` while
-/// `WOPBOPALOOBOP /nope` is `405 Method Not Allowed`. Both are asserted
-/// because both are the shipped behaviour, and the pairing is exactly
-/// backwards from what RFC 9110 §15.5.6 intends.
+/// Routing is **path-first** (`lib.rs`), which is the RFC-shaped pairing:
+/// an unknown path is `404 Not Found` whatever nonsense method arrives with
+/// it, while a known endpoint answers `405 Method Not Allowed` for methods
+/// it does not serve. `GET /claim` is therefore a `405`, not the inverted
+/// `404` this suite used to pin.
 ///
-/// The request line itself is never validated: `lib.rs:515-518` takes the
+/// The request line itself is still not validated: the parser takes the
 /// first two whitespace-separated tokens of the first line and ignores
 /// everything after them. So there is no method-token charset check, no
 /// request-target form check and no HTTP-version check — `GET /healthz` with
 /// no version, with `HTTP/9.9`, tab-separated or with trailing junk are all
-/// served identically, and a stray header line arriving first (`: no method`)
-/// is *routed*, as method `:` and target `no`. All fail-closed, all pinned.
+/// served identically, and a stray header line arriving first is routed as
+/// `(method, target) = (":", "no")`. All fail-closed, all pinned.
 #[test]
 fn garbage_methods_and_absurd_targets_are_classified_never_executed() {
     let c = counter("garbage", 1e6, 1e6);
@@ -661,7 +662,8 @@ fn garbage_methods_and_absurd_targets_are_classified_never_executed() {
     let long_path = format!("/{}", "a".repeat(4_000));
     let long_method = "M".repeat(4_000);
     for (what, request, expect) in [
-        ("a nonsense method", "WOPBOPALOOBOP /nope HTTP/1.1", 405u16),
+        // Path-first: /nope does not exist, so even a nonsense method is 404.
+        ("a nonsense method", "WOPBOPALOOBOP /nope HTTP/1.1", 404u16),
         ("a lowercase get", "get /healthz HTTP/1.1", 405),
         (
             "a 4 000-byte method",
@@ -696,12 +698,13 @@ fn garbage_methods_and_absurd_targets_are_classified_never_executed() {
             200,
         ),
         // A header line arriving where the request line belongs is routed as
-        // `(method, target) = (":", "no")` rather than refused.
-        ("a stray header line, routed", ": no method", 405),
+        // `(method, target) = (":", "no")` rather than refused; the target
+        // does not exist, so path-first routing answers 404.
+        ("a stray header line, routed", ": no method", 404),
         (
             "a Content-Length as a request line",
             "Content-Length: 5",
-            405,
+            404,
         ),
     ] {
         let reply = c.send(format!("{request}\r\n\r\n").as_bytes());
@@ -896,7 +899,7 @@ fn an_unparseable_content_length_is_now_refused_not_served_as_bodyless() {
 /// and a non-zero length would have blocked in the body loop until
 /// `IO_TIMEOUT`. The latency assertions are the proof that none of them did.
 #[test]
-fn duplicate_content_lengths_are_now_refused_but_hidden_ones_are_still_invisible() {
+fn duplicate_and_hidden_content_lengths_are_all_refused() {
     let c = counter("dupclen", 1e6, 1e6);
     let body = claim_body(&wire(0), &fp(1));
 
@@ -936,12 +939,13 @@ fn duplicate_content_lengths_are_now_refused_but_hidden_ones_are_still_invisible
         );
     }
 
-    // STILL A DEFECT: each of these hides the header from this parser and
-    // shows it to a lenient one, so the message is framed as bodyless here.
+    // REPAIRED as well: each of these used to hide the header from this
+    // parser while showing it to a lenient one. Now every variant is
+    // refused at the framing layer — whitespace before the colon, a bare CR
+    // inside the header block, and obs-fold continuations are all framing
+    // ambiguity, and ambiguity is answered with 400 rather than a guess.
     for (what, head) in [
         (
-            // The header name is compared verbatim, so a space before the
-            // colon hides it entirely.
             "a space before the colon hides the header",
             format!(
                 "POST /claim HTTP/1.1\r\nContent-Length : {}\r\n\r\n",
@@ -949,18 +953,14 @@ fn duplicate_content_lengths_are_now_refused_but_hidden_ones_are_still_invisible
             ),
         ),
         (
-            // `str::lines` does not end a line at a bare CR, so the hidden
-            // header is absorbed into the previous one's value.
-            "a bare CR hides the header from str::lines",
+            "`str::lines` does not end a line at a bare CR",
             format!(
                 "POST /claim HTTP/1.1\r\nX-Pad: pad\rContent-Length: {}\r\n\r\n",
                 body.len()
             ),
         ),
         (
-            // Obs-fold continuation (RFC 9112 §5.2 deprecates it; a front end
-            // that unfolds would see a length here).
-            "an obs-fold continuation line",
+            "an obs-fold continuation line (RFC 9112 §5.2 deprecates it)",
             format!(
                 "POST /claim HTTP/1.1\r\nX-Pad: pad\r\n Content-Length: {}\r\n\r\n",
                 body.len()
@@ -971,8 +971,9 @@ fn duplicate_content_lengths_are_now_refused_but_hidden_ones_are_still_invisible
         assert_eq!(reply.status(), Some(400), "{what}: {reply:?}");
         assert_eq!(
             reply.error().as_deref(),
-            Some("malformed claim request"),
-            "{what}: framed as bodyless, so the claim parser saw nothing"
+            Some("malformed request"),
+            "{what}: refused by the framer — no parser downstream can \
+             disagree about where this message ends"
         );
         assert!(
             reply.elapsed < Duration::from_secs(1),
@@ -1012,18 +1013,16 @@ fn duplicate_content_lengths_are_now_refused_but_hidden_ones_are_still_invisible
     c.assert_still_serving("duplicate and hidden content lengths");
 }
 
-/// **DEFECT (finding 3).** `Transfer-Encoding` is not implemented *and not
-/// refused*: a chunked claim is silently a bodyless claim. RFC 9112 §6.1
-/// requires a server that receives a `Transfer-Encoding` it cannot decode to
-/// answer 501, and §6.3 says `Transfer-Encoding` overrides `Content-Length`.
-/// Here `Content-Length` always wins, which is the TE.CL half of a desync.
+/// **REPAIRED (finding 3).** `Transfer-Encoding` is now refused at the
+/// framing layer, exactly as RFC 9112 §6.1 requires of a server that cannot
+/// decode it. Neither chunked alone nor the TE+CL pair can reach a handler,
+/// so no front end can disagree with this server about where a message ends.
 #[test]
-fn transfer_encoding_chunked_is_ignored_not_refused() {
+fn transfer_encoding_is_refused_not_negotiated() {
     let c = counter("chunked", 1e6, 1e6);
     let body = claim_body(&wire(0), &fp(1));
 
-    // A chunked-aware server would now wait for chunks; this one answers at
-    // once, having decided the message had no body.
+    // Chunked alone: refused by the framer before any handler runs.
     let reply = speak_head_only(
         c.addr,
         "POST /claim HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
@@ -1031,8 +1030,8 @@ fn transfer_encoding_chunked_is_ignored_not_refused() {
     assert_eq!(reply.status(), Some(400));
     assert_eq!(
         reply.error().as_deref(),
-        Some("malformed claim request"),
-        "chunked framing is ignored, so the counter saw an empty body"
+        Some("malformed request"),
+        "chunked framing is a framer refusal, not an empty claim"
     );
     assert!(
         reply.elapsed < Duration::from_secs(1),
@@ -1041,17 +1040,21 @@ fn transfer_encoding_chunked_is_ignored_not_refused() {
     );
     assert_eq!(c.on_disk().entries[&key(0)].status, Status::Unclaimed);
 
-    // With both headers present, Content-Length wins — the exact TE.CL
-    // disagreement RFC 9112 §6.3 exists to prevent.
+    // With both headers present, the message is still refused: TE.CL is
+    // precisely the disagreement RFC 9112 §6.3 exists to prevent.
     let both = format!(
         "POST /claim HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     let reply = c.send(both.as_bytes());
+    assert!(
+        reply.status() == Some(400) || reply.token().is_none(),
+        "TE+CL must never sell a seat: {reply:?}"
+    );
     assert_eq!(
-        reply.status(),
-        Some(200),
-        "Content-Length beat Transfer-Encoding: {reply:?}"
+        c.on_disk().entries[&key(0)].status,
+        Status::Unclaimed,
+        "the seat the TE.CL pair used to sell is unclaimed"
     );
 
     c.assert_still_serving("chunked framing");
@@ -1547,29 +1550,23 @@ fn idle_attacker_sockets_no_longer_add_up_to_an_outage() {
     c.assert_still_serving("three idle sockets");
 }
 
-/// **REGRESSION GUARD (repaired finding 1, the new bound) + DEFECT (finding
-/// 8).** One thread per connection is not free either, so the repair came with
-/// a cap: `MAX_CONCURRENT_CONNECTIONS` = 64 in flight (`lib.rs:60`), and past
-/// it the counter answers an announced `503` instead of queueing silently or
-/// spawning without limit (`lib.rs:444-453`). That ceiling is the reason
-/// unbounded concurrency is not simply a different exhaustion vector, so it is
-/// pinned here: 64 idle sockets are accepted, the 65th caller is **told** the
-/// counter is busy within milliseconds rather than being parked, and capacity
-/// returns on its own as soon as the idle sockets go away.
+/// **REGRESSION GUARD (repaired findings 1 and 8).** One thread per
+/// connection is not free either, so the repair came with a cap:
+/// `MAX_CONCURRENT_CONNECTIONS` = 64 in flight (`lib.rs:60`), and past it the
+/// counter answers an announced `503` instead of queueing silently or
+/// spawning without limit. That ceiling is the reason unbounded concurrency
+/// is not simply a different exhaustion vector, so it is pinned here: 64
+/// idle sockets are accepted, the 65th caller is **told** the counter is
+/// busy within milliseconds rather than being parked, and capacity returns
+/// on its own as soon as the idle sockets go away.
 ///
-/// Two warts on that path are pinned with it (finding 8), both discovered by
-/// this test:
-/// * the shed path writes the response and drops the stream **without ever
-///   reading the request**, so a caller that actually sent one leaves bytes in
-///   the receive queue, the close becomes an RST, and the announced JSON body
-///   is destroyed in flight often enough to be the common case on loopback.
-///   The caller sees a truncated `503` — some HTTP clients report that as a
-///   network error rather than as a refusal. The body is therefore read here
-///   from a probe that sends *nothing*, which is the only way to observe it
-///   intact;
-/// * `write_response` has no `503` arm, so the status line reads
-///   `503 Internal Server Error` (`lib.rs:560-568`). The status is right and
-///   the phrase is not: this is load shedding, not a crash.
+/// Both former warts on the shed path are fixed and pinned in their
+/// corrected form (finding 8):
+/// * the refusal is written and the connection's input drained briefly — off
+///   the accept loop — so a caller that sent request bytes still receives
+///   its announced JSON instead of an RST-truncated reply;
+/// * the status line reads `503 Service Unavailable`: load shedding is
+///   named as what it is.
 #[test]
 fn past_the_concurrency_cap_the_counter_sheds_load_with_an_announced_503() {
     let c = counter("shed", 1e6, 1e6);
@@ -1626,12 +1623,11 @@ fn past_the_concurrency_cap_the_counter_sheds_load_with_an_announced_503() {
         Some("counter busy — try again shortly"),
         "load shedding is announced, not silent: {shed:?}"
     );
-    // Pinned, not endorsed (finding 8): the reason phrase says the counter
-    // crashed when what happened is that it protected itself.
+    // REPAIRED (finding 8): the reason phrase names the outcome — load
+    // shedding, not a crash.
     assert!(
-        shed.raw
-            .starts_with("HTTP/1.1 503 Internal Server Error\r\n"),
-        "the 503 reason phrase is still the fallback one: {:?}",
+        shed.raw.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+        "the 503 reason phrase must say Service Unavailable: {:?}",
         shed.raw
     );
 
@@ -1706,6 +1702,16 @@ fn sixty_four_abrupt_clients_do_not_wedge_the_loop() {
 /// Path matching is exact and case-sensitive, which is correct: `//claim`,
 /// `/claim/` and `/CLAIM` are all `404`, so no normalization bug can smuggle a
 /// claim through a front end's path rewriting.
+/// **REPAIRED (finding 5).** The routing matrix is path-first now:
+///
+/// * an unknown path is `404` for every method — a prober no longer learns
+///   which methods exist from a path that does not;
+/// * `/healthz` and `/claim` answer `405` with the mandatory `Allow` header
+///   for any method they do not serve.
+///
+/// Path matching is exact and case-sensitive, which is correct: `//claim`,
+/// `/claim/` and `/CLAIM` are all `404`, so no normalization bug can smuggle a
+/// claim through a front end's path rewriting.
 #[test]
 fn method_path_matrix_is_exactly_the_documented_statuses() {
     let c = counter("matrix", 1e6, 1e6);
@@ -1714,19 +1720,22 @@ fn method_path_matrix_is_exactly_the_documented_statuses() {
     for method in ["GET", "POST", "PUT", "DELETE", "HEAD"] {
         for path in PATHS {
             let expect = match (method, path) {
-                ("GET", "/healthz") => 200,
-                ("GET", _) | ("POST", _) => 404,
-                _ => 405,
+                ("GET", "/healthz") | ("HEAD", "/healthz") => 200,
+                // Known endpoint, wrong method.
+                (_, "/healthz") => 405,
+                // Unknown paths: 404 for every method, whatever it is.
+                _ => 404,
             };
             let reply = c.send(format!("{method} {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes());
             assert_eq!(reply.status(), Some(expect), "{method} {path} -> {reply:?}");
         }
     }
 
-    // /claim itself: only POST routes. Everything else is 404 or 405, and the
-    // 404 for GET is the inversion named above.
+    // /claim itself: only POST routes. Every other method is a 405 that
+    // names what is allowed, and the unknown paths above stay 404 even for
+    // the exotic verbs.
     for (method, expect) in [
-        ("GET", 404u16),
+        ("GET", 405u16),
         ("PUT", 405),
         ("DELETE", 405),
         ("HEAD", 405),
@@ -1737,6 +1746,11 @@ fn method_path_matrix_is_exactly_the_documented_statuses() {
     ] {
         let reply = c.send(format!("{method} /claim HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes());
         assert_eq!(reply.status(), Some(expect), "{method} /claim -> {reply:?}");
+        assert_eq!(
+            reply.header("allow"),
+            Some("GET, POST"),
+            "{method} /claim must name the allowed methods"
+        );
     }
 
     // A query string is part of the opaque target, so it 404s. Fail-closed,
@@ -1750,42 +1764,39 @@ fn method_path_matrix_is_exactly_the_documented_statuses() {
     let reply = c.send(&get_request("/nope"));
     assert_eq!(reply.error().as_deref(), Some("no such endpoint"));
     let reply = c.send(b"DELETE /nope HTTP/1.1\r\n\r\n");
-    assert_eq!(reply.error().as_deref(), Some("method not allowed"));
+    assert_eq!(reply.error().as_deref(), Some("no such endpoint"));
 
     c.assert_still_serving("the 34-cell method/path matrix");
 }
 
-/// **DEFECT (finding 4).** Two protocol violations in the response writer
-/// (`lib.rs:559-574`), pinned so a fix fails here loudly:
-/// * a `HEAD` request gets a response **body** — RFC 9110 §9.3.2 forbids a
-///   body in a response to `HEAD` under any status, and a front end that
-///   pipelines would desync on it;
-/// * no `405` carries the `Allow` header RFC 9110 §15.5.6 says a server
-///   **MUST** generate, so a client is told "not that method" and never told
-///   which method to use.
+/// **REPAIRED (finding 4).** Both former violations are fixed and pinned in
+/// their corrected form:
+///
+/// * a `HEAD` request is answered as `GET` with the body suppressed —
+///   RFC 9110 §9.3.2 — while `Content-Length` still announces the entity a
+///   `GET` would have returned;
+/// * every `405` carries the `Allow` header RFC 9110 §15.5.6 requires.
 #[test]
-fn head_responses_carry_a_body_and_no_405_carries_allow() {
+fn head_is_bodyless_and_every_405_names_allow() {
     let c = counter("headbody", 1e6, 1e6);
 
     let reply = c.send(b"HEAD /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
-    assert_eq!(reply.status(), Some(405), "HEAD is unroutable: {reply:?}");
+    assert_eq!(reply.status(), Some(200), "HEAD reaches the health check");
+    assert_eq!(reply.body(), "", "a HEAD response must carry no body");
     assert_eq!(
-        reply.body(),
-        r#"{"error":"method not allowed"}"#,
-        "a HEAD response must have no body; this one has 30 of them"
-    );
-    assert_eq!(
-        reply.header("content-length").and_then(|v| v.parse().ok()),
-        Some(reply.body().len()),
-        "and the length header describes the forbidden body"
+        reply
+            .header("content-length")
+            .and_then(|v| v.parse::<usize>().ok()),
+        Some(r#"{"ok":true}"#.len()),
+        "the length header still describes what GET would return"
     );
 
-    for method in ["PUT", "DELETE", "HEAD", "OPTIONS"] {
+    for method in ["PUT", "DELETE", "OPTIONS"] {
         let reply = c.send(format!("{method} /healthz HTTP/1.1\r\n\r\n").as_bytes());
         assert_eq!(reply.status(), Some(405));
         assert_eq!(
             reply.header("allow"),
-            None,
+            Some("GET, POST"),
             "{method}: a 405 must name the allowed methods"
         );
     }
@@ -1856,67 +1867,54 @@ fn a_rate_limited_claim_never_burns_the_seat_it_refused() {
     c.assert_still_serving("a rate-limit round trip");
 }
 
-/// **DEFECT (finding 2).** The bucket is global and is charged *before* the
-/// request is understood, so ten junk requests empty the shipped burst and
-/// every paying customer gets `429`.
-///
-/// The junk is as cheap as HTTP allows: `POST /claim HTTP/1.1\r\n\r\n`, **24
-/// bytes**, no headers, no body. It is charged a token at `lib.rs:335` and
-/// only then discovered to be unparseable at `lib.rs:338`. At the shipped
-/// refill of 0.5/s (`bin/ccos-license-server.rs:100`) one such request every
-/// two seconds — **12 bytes per second** — holds the entire product's
-/// fulfillment path in `429` indefinitely, from any address, with no way for
-/// the counter to tell the attacker from a customer.
+/// **REPAIRED (finding 2).** The bucket used to be charged *before* the
+/// request was understood, so ten junk requests emptied the shipped burst and
+/// every paying customer got `429` — a ~12-bytes-per-second total lockout
+/// while `/healthz` stayed green. Now the bucket guards the expensive,
+/// brute-force-relevant work: only requests **shaped like claims** spend it.
+/// Junk is refused as malformed without touching the shared budget, so the
+/// same attack no longer reaches a single customer.
 #[test]
-fn ten_junk_requests_lock_out_every_paying_customer() {
+fn ten_junk_requests_no_longer_lock_out_any_paying_customer() {
     let c = counter("lockout", SHIPPED_BURST, SHIPPED_PER_SECOND);
 
-    // The cheapest request that still charges a token: no headers, no body.
+    // The cheapest request that used to charge a token: no headers, no body.
     let junk = b"POST /claim HTTP/1.1\r\n\r\n";
     assert_eq!(junk.len(), 24, "the attacker's whole cost, in bytes");
 
     let started = Instant::now();
-    for i in 0..SHIPPED_BURST as u32 {
+    for i in 0..(SHIPPED_BURST as u32 + 5) {
         let reply = c.send(junk);
         assert_eq!(
             reply.status(),
             Some(400),
-            "junk request {i} should be refused as malformed, not rate limited: {reply:?}"
+            "junk request {i} must be refused as malformed: {reply:?}"
         );
         assert_eq!(reply.error().as_deref(), Some("malformed claim request"));
     }
     let drain = started.elapsed();
     assert!(
         drain < Duration::from_secs(2),
-        "draining the shipped burst took {drain:?} — the refill would have \
-         outpaced the attack and this measurement is not the one described"
+        "refusing junk took {drain:?} — this measurement is not the one described"
     );
 
-    // The eleventh junk request, and then a real customer's correct claim.
-    let reply = c.send(junk);
-    assert_eq!(reply.status(), Some(429), "the bucket is empty: {reply:?}");
+    // The bucket was never touched by any of that junk, so a paying
+    // customer's correct claim goes straight through.
     let customer = c.claim(0, 1);
     assert_eq!(
         customer.status(),
-        Some(429),
-        "a paying customer's correct claim was locked out by junk: {customer:?}"
+        Some(200),
+        "a paying customer's correct claim is served despite the junk flood: {customer:?}"
     );
-    assert!(customer.token().is_none());
+    assert!(customer.token().is_some(), "the sale completed");
+    assert_eq!(c.on_disk().entries[&key(0)].status, Status::Claimed);
 
-    // /healthz is not rate limited at all, so the counter looks perfectly
-    // healthy to every monitor while no sale can complete.
+    // /healthz stays green throughout, as before.
     for _ in 0..20 {
         assert_eq!(c.healthz().status(), Some(200));
     }
-    assert_eq!(
-        c.claim(0, 1).status(),
-        Some(429),
-        "still locked out while /healthz reports ok"
-    );
 
-    // And the seat survived the lockout, which is the only consolation.
-    assert_eq!(c.on_disk().entries[&key(0)].status, Status::Unclaimed);
-    c.assert_still_serving("a rate-limit lockout");
+    c.assert_still_serving("a junk flood");
 }
 
 // ═════════════════════════════════════════════════════════════════════

@@ -102,6 +102,7 @@
 //!   observable only by driving admissions against it and watching which ones
 //!   are refused. That is what several tests below now do, and it is not what
 //!   an operator dashboard can do.
+//!
 //! Everything here is deterministic: fixed masks, a fixed-seed LCG, no clock,
 //! no threads, no RNG. It passes identically in debug and release.
 

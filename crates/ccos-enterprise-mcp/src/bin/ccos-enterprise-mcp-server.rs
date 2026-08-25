@@ -63,6 +63,12 @@ const EXECUTION_DIR: &str = ".execution";
 const CORRELATION_FILE: &str = "correlation.jsonl";
 const SKILLS_DIR: &str = ".skills";
 const MAX_HOST_META_BYTES: usize = 256;
+/// Seal the live decision journal once it grows past this many bytes, so
+/// startup replay cost stays bounded by traffic since the last checkpoint
+/// rather than by the deployment's lifetime. Compaction is cheap (one
+/// snapshot write plus a rename) but not free, so it runs only here, on the
+/// durability boundary, never mid-request.
+const COMPACTION_THRESHOLD_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -325,7 +331,20 @@ fn persist_deployment(store: &mut Store, deployment: &Deployment) -> Result<(), 
     // never reached the journal.
     store
         .save_snapshot(&snapshot)
-        .map_err(|error| format!("cannot persist Enterprise snapshot: {error}"))
+        .map_err(|error| format!("cannot persist Enterprise snapshot: {error}"))?;
+
+    // At this instant the runtime watermark and the durable sequence agree,
+    // which is exactly compaction's precondition. A failed rotation is a
+    // durability failure like any other: the caller poisons and stops.
+    let live_len = fs::metadata(store.root().join(ccos_enterprise_store::JOURNAL_FILE))
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    if live_len >= COMPACTION_THRESHOLD_BYTES {
+        store
+            .compact(&snapshot)
+            .map_err(|error| format!("cannot compact Enterprise journal: {error}"))?;
+    }
+    Ok(())
 }
 
 struct TenantBackend {

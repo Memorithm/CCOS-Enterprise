@@ -32,7 +32,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use serde::{de, Deserialize, Deserializer, Serialize};
 
@@ -77,7 +77,7 @@ pub enum Status {
 /// One sold seat: everything the counter knows about a code. Note what is
 /// absent — the code itself (only its hash keys the entry) and any hardware
 /// identity (the machine field is the client's opaque fingerprint).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     /// Licensee name carried into the signed token (an invoice reference works
@@ -458,9 +458,17 @@ impl TokenBucket {
     }
 }
 
-/// How the vault file looked when this process last read or wrote it:
-/// modification time and length. Used to notice an out-of-band edit.
-pub type VaultFingerprint = (SystemTime, u64);
+/// How the vault file looked when this process last read or wrote it: the
+/// SHA-256 of its bytes. Content-addressed on purpose — a fingerprint of
+/// (mtime, length) misses an edit that preserves both, and coarse timestamps
+/// made that reachable; two different vaults colliding on a hash is not.
+pub type VaultFingerprint = [u8; 32];
+
+fn fingerprint(path: &Path) -> Option<VaultFingerprint> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    Some(Sha256::digest(&bytes).into())
+}
 
 /// The claim counter: everything [`serve`] needs across requests.
 pub struct Counter {
@@ -473,13 +481,11 @@ pub struct Counter {
     /// The vault file as this process last saw it. `None` re-reads on the
     /// next claim. See [`Counter::refresh_vault`].
     pub vault_seen: Option<VaultFingerprint>,
-}
-
-/// Read the vault file's fingerprint. An unreadable file yields `None`, which
-/// forces a reload attempt rather than silently trusting memory.
-fn fingerprint(path: &Path) -> Option<VaultFingerprint> {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
+    /// How many times the ledger was actually persisted. Observability for a
+    /// subtle failure mode: an idempotent re-issue must NOT bump this, and a
+    /// test pins that — otherwise every lost-token retry pays a full
+    /// serialize + fsync of the vendor's whole sales history.
+    pub persist_writes: u64,
 }
 
 impl Counter {
@@ -525,25 +531,39 @@ impl Counter {
     fn save_vault(&mut self) -> io::Result<()> {
         self.vault.save(&self.vault_path)?;
         self.vault_seen = fingerprint(&self.vault_path);
+        self.persist_writes += 1;
         Ok(())
     }
     /// Handle one parsed request → `(http status, JSON body)`. Pure except for
     /// the durable vault write on a successful state flip — which happens
     /// **before** the token is disclosed, and is rolled back from disk if the
     /// write fails (never hand out a token the ledger did not record).
+    ///
+    /// Routing is **path-first**: `GET /claim` and `POST /healthz` are 405
+    /// (the endpoint exists, the method does not), while any method on an
+    /// unknown path is 404. The inverted matrix this replaces told a prober
+    /// more than it told a client.
     pub fn handle(&mut self, method: &str, path: &str, body: &str, now: u64) -> (u16, String) {
-        match (method, path) {
-            ("GET", "/healthz") => (200, r#"{"ok":true}"#.to_string()),
-            ("POST", ccos_enterprise_governance::claim::CLAIM_PATH) => self.handle_claim(body, now),
-            ("POST", _) | ("GET", _) => (404, err_body("no such endpoint")),
-            _ => (405, err_body("method not allowed")),
+        match path {
+            ccos_enterprise_governance::claim::CLAIM_PATH => match method {
+                "POST" => self.handle_claim(body, now),
+                _ => (405, err_body("method not allowed")),
+            },
+            "/healthz" => match method {
+                "GET" => (200, r#"{"ok":true}"#.to_string()),
+                _ => (405, err_body("method not allowed")),
+            },
+            _ => (404, err_body("no such endpoint")),
         }
     }
 
     fn handle_claim(&mut self, body: &str, now: u64) -> (u16, String) {
-        if !self.bucket.allow() {
-            return (429, err_body("rate limited — try again shortly"));
-        }
+        // Shape checks before the shared budget: a flood of one-line garbage
+        // costs almost nothing to refuse, and charging it here handed any
+        // attacker a ~12-bytes-per-second total lockout of every paying
+        // customer while `/healthz` stayed green. The bucket guards the
+        // expensive and brute-force-relevant work — ledger lookups — so only
+        // requests shaped like claims spend it.
         let Ok(req) = serde_json::from_str::<ccos_enterprise_governance::claim::ClaimRequest>(body)
         else {
             return (400, err_body("malformed claim request"));
@@ -553,6 +573,9 @@ impl Counter {
             || !ccos_enterprise_governance::claim::is_sha256_hex(&req.machine)
         {
             return (400, err_body("malformed claim request"));
+        }
+        if !self.bucket.allow() {
+            return (429, err_body("rate limited — try again shortly"));
         }
         // Adopt any out-of-band edit BEFORE deciding, so a revocation applied
         // while this process was running is honoured instead of overwritten.
@@ -564,11 +587,23 @@ impl Counter {
         let before = self.vault.clone();
         match self.vault.claim(&req.code_hash, &req.machine, now) {
             Ok((licensee, exp)) => {
-                if let Err(e) = self.save_vault() {
-                    // Roll back in memory: the ledger on disk is the truth.
-                    self.vault = before;
-                    eprintln!("[counter] persist FAILED, claim refused: {e}");
-                    return (500, err_body("persistence failure — nothing was issued"));
+                // A re-issue from the owning machine flips nothing: skipping
+                // the persist means a lost-token retry does not pay a full
+                // serialize + fsync of every seat the vendor ever sold. Two
+                // exceptions still must write: anything that changed, and an
+                // absent ledger file — after a deleted vault the daemon's
+                // memory is the last truth standing, and skipping the write
+                // would leave that truth unrecoverable.
+                let key = ccos_enterprise_governance::claim::vault_key(&req.code_hash);
+                let changed = self.vault.entries.get(&key) != before.entries.get(&key);
+                let ledger_missing = !self.vault_path.exists();
+                if changed || ledger_missing {
+                    if let Err(e) = self.save_vault() {
+                        // Roll back in memory: the ledger on disk is the truth.
+                        self.vault = before;
+                        eprintln!("[counter] persist FAILED, claim refused: {e}");
+                        return (500, err_body("persistence failure — nothing was issued"));
+                    }
                 }
                 let token = ccos_enterprise_governance::vendor::sign_token_bound(
                     &self.seed,
@@ -668,13 +703,24 @@ pub fn serve(listener: TcpListener, counter: Counter) -> io::Result<()> {
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
 
         if in_flight.load(Ordering::Acquire) >= MAX_CONCURRENT_CONNECTIONS {
-            // Announced refusal beats an unbounded thread count. Writing it
-            // is itself bounded by the write timeout set above.
-            let _ = write_response(
-                &mut stream,
-                503,
-                &err_body("counter busy — try again shortly"),
-            );
+            // Announced refusal beats an unbounded thread count. The write
+            // and the brief input drain happen off the accept loop: closing
+            // with unread request bytes pending turns the close into an RST
+            // that destroys the refusal in flight, but draining inline would
+            // let each shed connection stall every later accept for the
+            // drain window. These threads live at most one drain window.
+            let _ = std::thread::Builder::new()
+                .name("ccos-shed".into())
+                .spawn(move || {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                    let _ = write_response(
+                        &mut stream,
+                        503,
+                        &err_body("counter busy — try again shortly"),
+                        false,
+                    );
+                    drain_input(&mut stream, Duration::from_millis(250));
+                });
             continue;
         }
 
@@ -688,19 +734,30 @@ pub fn serve(listener: TcpListener, counter: Counter) -> io::Result<()> {
                 // cannot permanently consume a slot.
                 let _guard = InFlightGuard(&flight);
                 let deadline = Instant::now() + REQUEST_DEADLINE;
-                let (status, body) = match read_request(&mut stream, deadline) {
+                // HEAD is answered as GET with the body suppressed:
+                // RFC 9110 §9.3.2. `Content-Length` still names the entity a
+                // GET would have returned, which is why suppression happens
+                // at write time rather than by emptying the body.
+                let head_only = match read_request(&mut stream, deadline) {
                     Some((method, path, body)) => {
+                        let head_only = method == "HEAD";
+                        let route_method = if head_only { "GET" } else { method.as_str() };
                         let now = ccos_core::license::now_unix();
-                        match counter.lock() {
-                            Ok(mut c) => c.handle(&method, &path, &body, now),
+                        let outcome = match counter.lock() {
+                            Ok(mut c) => c.handle(route_method, &path, &body, now),
                             // A poisoned mutex means an earlier claim panicked
                             // mid-flip: refuse rather than trust the ledger.
                             Err(_) => (500, err_body("counter unavailable")),
-                        }
+                        };
+                        Some((outcome, head_only))
                     }
-                    None => (400, err_body("malformed request")),
+                    None => None,
                 };
-                let _ = write_response(&mut stream, status, &body);
+                let (status, body, suppress) = match head_only {
+                    Some(((status, body), suppress)) => (status, body, suppress),
+                    None => (400, err_body("malformed request"), false),
+                };
+                let _ = write_response(&mut stream, status, &body, suppress);
             });
         if spawned.is_err() {
             // Out of threads: give the slot back and shed this connection.
@@ -716,6 +773,20 @@ struct InFlightGuard<'a>(&'a AtomicUsize);
 impl Drop for InFlightGuard<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Read and discard inbound bytes for at most `window`, so a close after an
+/// announced refusal is a clean FIN rather than an RST that eats the refusal.
+fn drain_input(stream: &mut TcpStream, window: Duration) {
+    let give_up = Instant::now() + window;
+    let mut sink = [0u8; 4096];
+    while Instant::now() < give_up {
+        match stream.read(&mut sink) {
+            Ok(0) => return, // EOF: the client is done talking
+            Ok(_) => continue,
+            Err(_) => return,
+        }
     }
 }
 
@@ -742,28 +813,46 @@ fn read_request(stream: &mut TcpStream, deadline: Instant) -> Option<(String, St
     let mut request_line = lines.next()?.split_whitespace();
     let method = request_line.next()?.to_string();
     let path = request_line.next()?.to_string();
-    // Content-Length, strictly. The previous `.parse().ok().unwrap_or(0)`
-    // could not tell "no header" from "header we could not read", so
-    // `Content-Length: abc` and a value one past `u64::MAX` both silently
-    // became zero and were answered 200 — a request smuggling primitive the
-    // moment anything sits in front of this server. A header that is present
-    // must be exactly one header and exactly a decimal number.
-    let mut lengths = lines
-        .filter_map(|l| l.split_once(':'))
-        .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        .map(|(_, v)| v.trim());
-    let content_length: usize = match (lengths.next(), lengths.next()) {
-        (None, _) => 0,
-        // Two Content-Length headers: the classic desync. Refuse outright
-        // rather than pick one and hope the proxy picked the same.
-        (Some(_), Some(_)) => return None,
-        (Some(v), None) => {
-            if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+    // Every header is screened, not just searched for Content-Length. The
+    // framing differentials that used to slip past here are exactly what a
+    // lenient front end resolves differently from us: `Content-Length` with a
+    // space before the colon, a bare CR hiding a second header inside a
+    // value, an obs-fold continuation line, and `Transfer-Encoding`, which
+    // RFC 9112 §6.1 says must be refused when not implemented. All four are
+    // refused outright — one request per connection means we lose nothing by
+    // being strict, and a proxy can no longer disagree with our framing.
+    let mut content_length: Option<usize> = None;
+    for line in lines {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            return None; // obs-fold continuation
+        }
+        if line.contains('\r') {
+            return None; // bare CR inside the header block
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.is_empty()
+            || name.ends_with(' ')
+            || name.ends_with('\t')
+            || name.contains([' ', '\t'])
+        {
+            return None; // whitespace before the colon hides a header
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return None; // chunked framing is not implemented: refuse, never guess
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            // A header that is present must be exactly one header and
+            // exactly a decimal number. Duplicates were the classic desync;
+            // they are refused rather than picked between.
+            if content_length.is_some() || !value.trim().bytes().all(|b| b.is_ascii_digit()) {
                 return None;
             }
-            v.parse().ok()?
+            content_length = Some(value.trim().parse().ok()?);
         }
-    };
+    }
+    let content_length: usize = content_length.unwrap_or_default();
     if content_length > MAX_BODY {
         return None;
     }
@@ -782,7 +871,15 @@ fn read_request(stream: &mut TcpStream, deadline: Instant) -> Option<(String, St
     Some((method, path, String::from_utf8_lossy(&body).into_owned()))
 }
 
-fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> io::Result<()> {
+/// Write one response and close. `suppress_body` serves `HEAD`: the entity is
+/// withheld while `Content-Length` still announces what a GET would return
+/// (RFC 9110 §9.3.2).
+fn write_response(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &str,
+    suppress_body: bool,
+) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -790,13 +887,24 @@ fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> io::Result
         405 => "Method Not Allowed",
         410 => "Gone",
         429 => "Too Many Requests",
+        503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
-    write!(
-        stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+    // A 405 must say which methods the endpoint accepts (RFC 9110 §9.1.1).
+    let allow = if status == 405 {
+        "Allow: GET, POST\r\n"
+    } else {
+        ""
+    };
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{allow}Connection: close\r\n\r\n",
         body.len()
-    )
+    );
+    stream.write_all(head.as_bytes())?;
+    if !suppress_body {
+        stream.write_all(body.as_bytes())?;
+    }
+    Ok(())
 }
 
 /// Parse a 64-hex signing seed (the `CCOS_LICENSE_SIGNING_SEED` format shared
@@ -915,6 +1023,7 @@ mod tests {
             seed: SEED,
             bucket: TokenBucket::new(100.0, 100.0),
             vault_seen: None,
+            persist_writes: 0,
         }
     }
 
@@ -965,8 +1074,15 @@ mod tests {
         // Second machine → 410; same machine → 200 re-issue.
         let (status, _) = c.handle("POST", "/claim", &claim_body(&hash, &fp("m2")), NOW);
         assert_eq!(status, 410);
+        let writes_after_first_sale = c.persist_writes;
+        assert_eq!(writes_after_first_sale, 1);
         let (status, _) = c.handle("POST", "/claim", &claim_body(&hash, &fp("m1")), NOW + 10);
         assert_eq!(status, 200);
+        // The re-issue flipped nothing, so it must not have paid a persist.
+        assert_eq!(
+            c.persist_writes, writes_after_first_sale,
+            "an idempotent re-issue must skip the full-vault serialize + fsync"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

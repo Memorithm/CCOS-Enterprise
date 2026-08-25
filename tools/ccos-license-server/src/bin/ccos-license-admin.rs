@@ -242,9 +242,10 @@ fn cmd_new(vault_path: &Path, args: &[String]) {
 }
 
 /// First 12 chars of an identifier for display — never panics on a short or
-/// hand-edited value.
+/// hand-edited value, and never on a non-char boundary either: `get` is
+/// boundary-aware where slicing `&id[..n]` is not.
 fn short(id: &str) -> &str {
-    &id[..12.min(id.len())]
+    id.get(..12).unwrap_or(id)
 }
 
 fn cmd_list(vault_path: &Path) {

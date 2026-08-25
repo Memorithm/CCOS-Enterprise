@@ -21,6 +21,7 @@ ccos-enterprise-skills = { path = "../ccos-enterprise-skills" }
 ccos-enterprise-skills-audit = { path = "../ccos-enterprise-skills-audit" }
 ccos-core.workspace = true
 ed25519-dalek = "2"
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -49,6 +49,12 @@ This closes the crash window present in best-effort detached capture designs:
 a host crash can leave a pending outbox item, but it cannot make an acknowledged
 capture disappear from the adapter without a durable local record.
 
+The outbox drain is bounded per pass and corruption-tolerant: a torn or
+oversized entry (disk damage, manual tampering) is reported through the
+logger and left on disk for inspection while healthy entries keep flowing.
+Delivery stays ordered and fail-closed — the drain stops at the first entry
+the server refuses, so no capture is skipped past a blocked one.
+
 ## DSH compatibility target
 
 The initial target is DeepSeek Harness `0.1.0-rc.7`. The adapter intentionally

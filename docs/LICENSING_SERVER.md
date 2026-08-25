@@ -39,11 +39,54 @@ Refusals are announced, never silent:
 
 | Status | Meaning |
 | ------ | ------- |
-| `400` | malformed request (schema, non-hex fields, bad JSON) |
-| `404` | unknown code — nothing under that hash |
+| `400` | malformed request (framing, schema, non-hex fields, bad JSON) |
+| `404` | unknown path, or unknown code — nothing under that hash |
+| `405` | known endpoint, wrong method — the response names `Allow: GET, POST` |
 | `410` | seat taken on another machine, or code revoked |
-| `429` | global rate limit (~30 claims/min — 100-bit codes need no more) |
+| `429` | global claim rate limit (~30 claims/min — 100-bit codes need no more) |
 | `500` | counter misconfigured or persistence failed — **nothing was issued** |
+| `503` | all connection slots busy — load shedding, retry shortly |
+
+Framing and rate-limiting rules that matter behind a reverse proxy:
+
+- **The framer is strict so no front end can disagree with it.** A request
+  carrying `Transfer-Encoding`, a second or hidden `Content-Length` (space
+  before the colon, bare CR, obs-fold continuation) is refused `400`
+  without reaching a handler. One request per connection, `Connection:
+  close` always: there is no keep-alive to desync.
+- **Only well-shaped claims spend rate-limit tokens.** Malformed requests
+  are answered without touching the shared budget, so a flood of one-line
+  junk cannot lock paying customers out while `/healthz` stays green.
+  Fairness *between* legitimate sources is the proxy's job — give each
+  upstream client its own small queue so one noisy customer cannot consume
+  the shared claim budget. Reference shapes:
+
+  ```nginx
+  # nginx: per-source claim budget in front of the global counter bucket
+  limit_req_zone $binary_remote_addr zone=claim_per_client:10m rate=6r/m;
+  location = /claim {
+      limit_req zone=claim_per_client burst=3 nodelay;
+      proxy_pass http://127.0.0.1:8471;
+  }
+  location / { proxy_pass http://127.0.0.1:8471; }
+  ```
+
+  ```caddyfile
+  # Caddy (rate_limit module): same idea, one small queue per source IP
+  claim.example.com {
+      route {
+          rate_limit { zone claim_per_client { key {remote_host} events 3 window 30s } }
+          reverse_proxy 127.0.0.1:8471
+      }
+  }
+  ```
+
+  The counter itself stays single-bucket on purpose: it cannot see real
+  client addresses through the proxy, and inventing trust for
+  `X-Forwarded-For` would hand attackers a spoofable identity.
+- Routing is path-first: an unknown path is `404` for every method; a known
+  endpoint answers `405` with `Allow`. `HEAD /healthz` is served as `GET`
+  with the body suppressed (RFC 9110 §9.3.2).
 
 Re-claiming from the **same** machine re-issues the same license with the
 **stored** expiry (lost-token self-service; never an extension). Any other

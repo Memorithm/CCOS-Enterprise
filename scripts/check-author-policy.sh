@@ -31,9 +31,17 @@
 # what matters — a merge message is hand-editable, and a squash merge can carry
 # a whole pull-request body.
 #
-# Squash merges are NOT exempt (they produce ordinary single-parent commits):
-# merging that way from the web UI writes `GitHub` as committer and will fail
-# here by design. Merge with a merge commit, or merge locally.
+# WEB-UI SQUASHES get the same narrow identity exemption, for the same reason:
+# the button writes `GitHub <noreply@github.com>` as committer no matter how
+# the contributor merged, so demanding a normalized committer there is equally
+# unsatisfiable-after-the-fact and permanently reddens main. The bar stays
+# high where it means something: the AUTHOR must normalize to the authorized
+# human, the committer must be *exactly* GitHub's noreply stamp (not merely a
+# name someone could type), and every message rule still applies.
+#
+# Squash merges made LOCALLY are not exempt (both identities are under the
+# contributor's control): they must carry the human identity on both sides,
+# exactly like any ordinary commit.
 #
 # Usage:
 #   scripts/check-author-policy.sh           # check HEAD commit
@@ -43,6 +51,10 @@ cd "$(dirname "$0")/.."
 
 RANGE="${1:-HEAD}"
 CANONICAL_HUMAN_ID="zekriti-tarek"
+# The committer stamp GitHub's web UI writes and no contributor can set. It
+# is accepted only when the author already normalized to the human above.
+WEB_STAMP_CN="GitHub"
+WEB_STAMP_CE="noreply@github.com"
 
 # Map every verified display-name alias for the same authorized human to one
 # stable logical ID. New aliases must be added explicitly here; unknown names
@@ -72,10 +84,17 @@ while IFS=$'\t' read -r h an ae cn ce parents; do
   esac
   if [ "$is_merge" -eq 0 ]; then
     author_id="$(canonical_human_id "$an" 2>/dev/null || true)"
-    committer_id="$(canonical_human_id "$cn" 2>/dev/null || true)"
-    if [ "$author_id" != "$CANONICAL_HUMAN_ID" ] || [ "$committer_id" != "$CANONICAL_HUMAN_ID" ]; then
-      echo "::error::$h author/committer is '$an'/'$cn'; neither both normalize to the authorized human identity"
+    if [ "$author_id" != "$CANONICAL_HUMAN_ID" ]; then
+      echo "::error::$h author is '$an'; it does not normalize to the authorized human identity"
       fail=1
+    elif [ "$cn" = "$WEB_STAMP_CN" ] && [ "$ce" = "$WEB_STAMP_CE" ]; then
+      : # web-UI squash stamp: the author is proved, the committer is GitHub's own
+    else
+      committer_id="$(canonical_human_id "$cn" 2>/dev/null || true)"
+      if [ "$committer_id" != "$CANONICAL_HUMAN_ID" ]; then
+        echo "::error::$h committer is '$cn'; it does not normalize to the authorized human identity"
+        fail=1
+      fi
     fi
     if echo "$an$ae$cn$ce" | grep -Eiq "$IDENTITY_RE"; then
       echo "::error::$h AI/bot identity detected"

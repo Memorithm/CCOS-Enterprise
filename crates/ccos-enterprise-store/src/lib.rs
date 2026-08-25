@@ -52,6 +52,24 @@
 //! append of a single line to a page-aligned file is the one write POSIX
 //! actually makes cheap.
 //!
+//! ## Bounded startup: journal rotation
+//!
+//! The journals are append-only and their dense-sequence checks forbid
+//! rewriting history in place, so [`Store::load`] reads every decision ever
+//! made — unless the deployment compacts. [`Store::compact`] seals the live
+//! decision journal into an immutable segment (`audit.through-<last>.jsonl`)
+//! behind a durable snapshot of the same watermark and starts a fresh live
+//! file; startup then replays segments plus the short live tail. The order —
+//! snapshot first, then fsync + rename + directory fsync — makes every crash
+//! window land on a loadable state. Segments are complete by construction,
+//! so a torn or missing one is refused rather than forgiven.
+//!
+//! The governance journal is deliberately not rotated: it grows with rule
+//! changes rather than traffic, and anchoring its rotation would need an
+//! ordinal watermark the snapshot does not carry. Callers should compact on
+//! a size threshold at their durability boundary — see the MCP server's
+//! `persist_deployment`, which rotates once the live journal passes 128 MiB.
+//!
 //! ## Fail closed, and the one exception
 //!
 //! Every read path refuses rather than guesses. A missing root is
@@ -77,6 +95,11 @@ use ccos_enterprise_runtime::{AuditRecord, DeploymentSnapshot, GovernanceRecord}
 pub const SNAPSHOT_FILE: &str = "deployment.json";
 /// Journal file name under the store root.
 pub const JOURNAL_FILE: &str = "audit.jsonl";
+
+/// Prefix of a rotated decision-journal segment: `audit.through-<last>.jsonl`
+/// holds decisions `..=<last>` and is complete and immutable once published.
+pub const SEGMENT_PREFIX: &str = "audit.through-";
+const SEGMENT_SUFFIX: &str = ".jsonl";
 
 /// Rule changes, one JSON object per line, in the order they were made.
 ///
@@ -124,6 +147,15 @@ pub enum StoreError {
     /// their appends collide, so the second opener is refused rather than
     /// allowed to corrupt the journal.
     AlreadyOpen { path: PathBuf },
+    /// An earlier append failed partway through writing, so this handle can no
+    /// longer promise what is durable. Every further append is refused until
+    /// the store is reopened; reopening recomputes the sequence from disk and
+    /// rolls any partial write back out of the replay.
+    Poisoned { path: PathBuf, detail: String },
+    /// Compaction was refused: the caller's snapshot does not match the
+    /// durable journal end, or the rotation target already exists. Nothing
+    /// was moved — the store is exactly as it was.
+    CompactRefused { path: PathBuf, detail: String },
 }
 
 impl std::fmt::Display for StoreError {
@@ -159,6 +191,17 @@ impl std::fmt::Display for StoreError {
                  the store is single-writer",
                 path.display()
             ),
+            Self::Poisoned { path, detail } => write!(
+                f,
+                "{}: store is poisoned after an earlier append failure ({detail}); \
+                 reopen to recover from disk",
+                path.display()
+            ),
+            Self::CompactRefused { path, detail } => write!(
+                f,
+                "{}: compaction refused ({detail}); nothing was moved",
+                path.display()
+            ),
         }
     }
 }
@@ -183,7 +226,8 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError + '_ {
 #[derive(Debug)]
 pub struct Loaded {
     pub snapshot: DeploymentSnapshot,
-    /// Every journaled decision, in sequence order.
+    /// Every journaled decision, in sequence order — rotated segments first,
+    /// then the live journal.
     pub journal: Vec<AuditRecord>,
     /// Every journaled rule change, in the order it was made. Anchored to the
     /// decision stream by `at_sequence`, so the two merge without sharing a
@@ -195,6 +239,10 @@ pub struct Loaded {
     /// a client that never saw a response for it will retry under the same
     /// `request_id`, which replay suppression then handles.
     pub torn_tail: usize,
+    /// How many rotated decision-journal segments were folded into `journal`.
+    /// Observability for operators: this is how much history compaction has
+    /// already moved off the live file.
+    pub rotated_segments: usize,
 }
 
 /// A durable Enterprise deployment on disk.
@@ -212,10 +260,27 @@ pub struct Store {
     /// The next sequence this store expects to append, so a caller cannot
     /// journal decisions out of order or skip one.
     next_sequence: u64,
+    /// Set when an append fails partway through writing. The file may then
+    /// hold bytes this process has already been told (and reported) nothing
+    /// about: retrying would reuse sequence numbers and brick the journal at
+    /// the next open. Every further append refuses until the store is
+    /// reopened — fail-closed beats a corrupted ledger.
+    poisoned: Option<String>,
     /// Held open, and exclusively locked, for the lifetime of the store. Never
     /// read or written: the file is a handle for the kernel's lock, nothing
     /// more. Dropping it releases the lock, and so does the process dying.
     _lock: File,
+}
+
+/// Make a newly created directory entry durable.
+///
+/// Appending data with `sync_data` makes the *bytes* durable but not the
+/// *entry*: after a power loss a just-created `audit.jsonl` can vanish whole
+/// while every append returned success — the authoritative trail lost without
+/// a trace. One `sync_all` on the parent directory pins the name.
+fn sync_directory(dir: &Path) -> Result<(), StoreError> {
+    let handle = File::open(dir).map_err(io(dir))?;
+    handle.sync_all().map_err(io(dir))
 }
 
 impl Store {
@@ -268,10 +333,11 @@ impl Store {
         })?;
 
         let journal_path = root.join(JOURNAL_FILE);
-        let next_sequence = match read_journal(&journal_path)? {
+        let next_sequence = match read_audit_history(&root)? {
             Some((records, _)) => records.last().map(|r| r.sequence + 1).unwrap_or(0),
             None => 0,
         };
+        let journal_existed = journal_path.exists();
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -283,11 +349,16 @@ impl Store {
             Some((records, _)) => records.last().map(|r| r.ordinal + 1).unwrap_or(0),
             None => 0,
         };
+        let governance_existed = governance_path.exists();
         let governance_file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&governance_path)
             .map_err(io(&governance_path))?;
+
+        if !journal_existed || !governance_existed {
+            sync_directory(&root)?;
+        }
 
         Ok(Self {
             root,
@@ -295,6 +366,7 @@ impl Store {
             governance: BufWriter::new(governance_file),
             next_ordinal,
             next_sequence,
+            poisoned: None,
             _lock: lock,
         })
     }
@@ -324,6 +396,121 @@ impl Store {
     /// The ordinal the next appended rule change must carry.
     pub fn next_ordinal(&self) -> u64 {
         self.next_ordinal
+    }
+
+    /// Seal the decisions up to `snapshot.sequence_watermark` into an
+    /// immutable segment file and start a fresh live journal, so startup cost
+    /// stays bounded by traffic *since the last checkpoint* rather than by the
+    /// deployment's whole lifetime.
+    ///
+    /// ## The order is the correctness argument
+    ///
+    /// 1. **Snapshot first**, durably. From this instant every decision in
+    ///    the journal is already folded into the snapshot's ledgers.
+    /// 2. Then rotate: flush + fsync the live journal, rename it to its
+    ///    `through-<last>` name (atomic), recreate an empty live file, fsync
+    ///    the directory so the renames themselves survive a power cut.
+    ///
+    /// Every crash window therefore lands on a loadable state: before the
+    /// snapshot nothing moved; between snapshot and rotation the old pairing
+    /// still replays exactly (costs fold only at or after the watermark);
+    /// after rotation the segment plus fresh live journal concatenate into
+    /// the same dense stream. A refused compaction — snapshot watermark not
+    /// matching the durable end, or a name collision — moves nothing.
+    ///
+    /// The governance journal is deliberately *not* rotated: it grows with
+    /// rule changes, not traffic, and rotating it would need an ordinal
+    /// anchor the snapshot does not carry. See the crate docs.
+    pub fn compact(&mut self, snapshot: &DeploymentSnapshot) -> Result<(), StoreError> {
+        let journal_path = self.journal_path();
+        if let Some(reason) = &self.poisoned {
+            return Err(StoreError::Poisoned {
+                path: journal_path,
+                detail: reason.clone(),
+            });
+        }
+
+        let watermark = snapshot.sequence_watermark;
+        if watermark != self.next_sequence {
+            return Err(StoreError::CompactRefused {
+                path: journal_path,
+                detail: format!(
+                    "snapshot watermark {watermark} does not match the durable \
+                     journal end {}",
+                    self.next_sequence
+                ),
+            });
+        }
+
+        // 1. Durable checkpoint before anything moves.
+        self.save_snapshot(snapshot)?;
+
+        // 2. Seal the live journal only if it actually holds decisions since
+        //    the last rotation. Existence alone proves nothing — after every
+        //    rotation an empty live file sits there by design.
+        let live_len = std::fs::metadata(&journal_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        if live_len > 0 {
+            let last =
+                self.next_sequence
+                    .checked_sub(1)
+                    .ok_or_else(|| StoreError::CompactRefused {
+                        path: journal_path.clone(),
+                        detail: "a non-empty journal must end at sequence >= 0".into(),
+                    })?;
+            let segment_path = self
+                .root
+                .join(format!("{SEGMENT_PREFIX}{last}{SEGMENT_SUFFIX}"));
+            if segment_path.exists() {
+                return Err(StoreError::CompactRefused {
+                    path: segment_path,
+                    detail: "a segment with this name already exists".into(),
+                });
+            }
+            // Flush the buffered tail through to the disk before the fd that
+            // wrote it goes away. An empty buffer makes `into_inner` unable
+            // to fail; the error arm restores the writer anyway.
+            self.journal.flush().map_err(io(&journal_path))?;
+            let writer = std::mem::replace(
+                &mut self.journal,
+                BufWriter::new(
+                    OpenOptions::new()
+                        .append(true)
+                        .open(&journal_path)
+                        .map_err(io(&journal_path))?,
+                ),
+            );
+            let file = match writer.into_inner() {
+                Ok(file) => file,
+                // The buffered tail could not be flushed, so this handle's
+                // notion of "what is on disk" is gone with it. Poison rather
+                // than pretend; nothing has been renamed yet.
+                Err(error) => {
+                    let source = error.into_error();
+                    let reason = format!("rotation could not flush the live journal: {source}");
+                    self.poisoned = Some(reason.clone());
+                    return Err(StoreError::Poisoned {
+                        path: journal_path,
+                        detail: reason,
+                    });
+                }
+            };
+            file.sync_data().map_err(io(&journal_path))?;
+            drop(file);
+            std::fs::rename(&journal_path, &segment_path).map_err(io(&segment_path))?;
+
+            let fresh = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&journal_path)
+                .map_err(io(&journal_path))?;
+            self.journal = BufWriter::new(fresh);
+        }
+
+        // Pin both names: the sealed segment and the fresh live file.
+        sync_directory(&self.root)?;
+        Ok(())
     }
 
     /// Write the governed state atomically.
@@ -358,6 +545,17 @@ impl Store {
     /// Validate-then-write makes the error mean what it says.
     pub fn append(&mut self, records: &[AuditRecord]) -> Result<(), StoreError> {
         let path = self.journal_path();
+
+        // A prior IO failure may have left bytes in the file that no caller
+        // was told about. Retrying from here would reuse their sequence
+        // numbers; only a reopen (which recomputes the sequence from disk) is
+        // safe.
+        if let Some(reason) = &self.poisoned {
+            return Err(StoreError::Poisoned {
+                path,
+                detail: reason.clone(),
+            });
+        }
 
         // Phase 1: nothing is written until the entire batch is known good.
         let mut expected = self.next_sequence;
@@ -394,22 +592,50 @@ impl Store {
             expected += 1;
         }
 
-        // Phase 2: one write, one sync, then the sequence advances.
-        self.journal.write_all(&buffer).map_err(io(&path))?;
-        self.journal.flush().map_err(io(&path))?;
-        // `sync_data` rather than `sync_all`: the file's length is data, and
-        // an append never changes anything else in its metadata that a replay
-        // depends on.
-        self.journal.get_ref().sync_data().map_err(io(&path))?;
+        // Phase 2: one write, one sync, then the sequence advances. The file's
+        // length before the write is the rollback point: if any step fails
+        // partway, the store truncates back to it (best effort), poisons
+        // itself, and refuses every later append until reopened. A retry from
+        // a poisoned store would write the same sequences twice and turn this
+        // process's confusion into permanent journal corruption.
+        let durable_length = self.journal.get_ref().metadata().map_err(io(&path))?.len();
+        let outcome = self
+            .journal
+            .write_all(&buffer)
+            .and_then(|()| self.journal.flush())
+            .and_then(|()| self.journal.get_ref().sync_data());
+        if let Err(source) = outcome {
+            let file = self.journal.get_ref();
+            let _ = file.set_len(durable_length);
+            let _ = file.sync_data();
+            let reason = format!("journal append failed after {durable_length} durable bytes");
+            self.poisoned = Some(reason);
+            return Err(StoreError::Io { path, source });
+        }
         self.next_sequence = expected;
         Ok(())
     }
 
+    /// Enter the poisoned state directly. Test scaffolding: a real poisoning
+    /// needs a filesystem failure mid-append, which no test wants to stage.
+    #[cfg(test)]
+    fn poison(&mut self, reason: &str) {
+        self.poisoned = Some(reason.to_string());
+    }
+
     /// Append rule changes, with the same validate-then-write discipline as
     /// [`Store::append`]: nothing reaches the writer until the whole batch is
-    /// known good, so a refused batch really did write nothing.
+    /// known good, so a refused batch really did write nothing. Like
+    /// [`Store::append`], an IO failure poisons the store until reopen.
     pub fn append_governance(&mut self, records: &[GovernanceRecord]) -> Result<(), StoreError> {
         let path = self.governance_path();
+
+        if let Some(reason) = &self.poisoned {
+            return Err(StoreError::Poisoned {
+                path,
+                detail: reason.clone(),
+            });
+        }
 
         let mut expected = self.next_ordinal;
         let mut buffer: Vec<u8> = Vec::new();
@@ -441,9 +667,28 @@ impl Store {
             expected += 1;
         }
 
-        self.governance.write_all(&buffer).map_err(io(&path))?;
-        self.governance.flush().map_err(io(&path))?;
-        self.governance.get_ref().sync_data().map_err(io(&path))?;
+        // Roll back and poison on failure, exactly as `append` does: partial
+        // governance bytes plus an unadvanced ordinal would duplicate rule
+        // changes on retry.
+        let durable_length = self
+            .governance
+            .get_ref()
+            .metadata()
+            .map_err(io(&path))?
+            .len();
+        let outcome = self
+            .governance
+            .write_all(&buffer)
+            .and_then(|()| self.governance.flush())
+            .and_then(|()| self.governance.get_ref().sync_data());
+        if let Err(source) = outcome {
+            let file = self.governance.get_ref();
+            let _ = file.set_len(durable_length);
+            let _ = file.sync_data();
+            let reason = format!("governance append failed after {durable_length} durable bytes");
+            self.poisoned = Some(reason);
+            return Err(StoreError::Io { path, source });
+        }
         self.next_ordinal = expected;
         Ok(())
     }
@@ -455,14 +700,13 @@ impl Store {
     /// deployment that silently starts empty has reset every quota it holds.
     pub fn load(&self) -> Result<Option<Loaded>, StoreError> {
         let snapshot_path = self.snapshot_path();
-        let journal_path = self.journal_path();
 
         let snapshot_bytes = match std::fs::read(&snapshot_path) {
             Ok(b) => Some(b),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(io(&snapshot_path)(e)),
         };
-        let journal = read_journal(&journal_path)?;
+        let journal = read_audit_history(&self.root)?;
         let governance = read_governance(&self.governance_path())?;
 
         match (snapshot_bytes, journal) {
@@ -483,6 +727,7 @@ impl Store {
                 let (journal, torn_tail) = journal.unwrap_or_default();
                 let (governance, governance_torn) = governance.unwrap_or_default();
                 Ok(Some(Loaded {
+                    rotated_segments: segment_paths(&self.root)?.len(),
                     snapshot,
                     journal,
                     governance,
@@ -548,16 +793,56 @@ fn read_lines(path: &Path) -> Result<Option<Committed>, StoreError> {
     )))
 }
 
-/// Parse the decision journal. `None` when the file does not exist.
+/// Parse the decision journal: every rotated segment in watermark order,
+/// then the live file. The concatenation must be one dense stream starting
+/// at sequence zero — exactly what a single un-rotated journal used to be.
 ///
-/// Sequences must be dense from zero: a gap means a decision was made and
-/// lost, and this is the only place that can still say so.
-fn read_journal(path: &Path) -> Result<Option<(Vec<AuditRecord>, usize)>, StoreError> {
-    let Some((lines, torn_tail)) = read_lines(path)? else {
-        return Ok(None);
-    };
+/// A gap anywhere means a decision was made and lost, and this is the only
+/// place that can still say so.
+fn read_audit_history(root: &Path) -> Result<Option<(Vec<AuditRecord>, usize)>, StoreError> {
     let mut records: Vec<AuditRecord> = Vec::new();
     let mut expected = 0u64;
+    let mut seen_any = false;
+
+    for path in segment_paths(root)? {
+        let Some((lines, torn)) = read_lines(&path)? else {
+            continue;
+        };
+        // A segment is published by an atomic rename of a fully synced file,
+        // so a torn tail here is damage, not a crash window to forgive.
+        if torn != 0 {
+            return Err(StoreError::JournalCorrupt {
+                path,
+                line: 0,
+                detail: format!(
+                    "rotated segment ends with {torn} bytes that no newline \
+                     commits — a complete segment can only be damaged"
+                ),
+            });
+        }
+        append_audit_records(&mut records, &mut expected, &path, lines)?;
+        seen_any = true;
+    }
+
+    let live_path = root.join(JOURNAL_FILE);
+    let torn_live = match read_lines(&live_path)? {
+        None => 0,
+        Some((lines, torn)) => {
+            append_audit_records(&mut records, &mut expected, &live_path, lines)?;
+            seen_any = true;
+            torn
+        }
+    };
+
+    Ok(seen_any.then_some((records, torn_live)))
+}
+
+fn append_audit_records(
+    records: &mut Vec<AuditRecord>,
+    expected: &mut u64,
+    path: &Path,
+    lines: Vec<Vec<u8>>,
+) -> Result<(), StoreError> {
     for (index, line) in lines.into_iter().enumerate() {
         let record: AuditRecord =
             serde_json::from_slice(&line).map_err(|e| StoreError::JournalCorrupt {
@@ -565,18 +850,50 @@ fn read_journal(path: &Path) -> Result<Option<(Vec<AuditRecord>, usize)>, StoreE
                 line: index + 1,
                 detail: e.to_string(),
             })?;
-        if record.sequence != expected {
+        if record.sequence != *expected {
             return Err(StoreError::JournalDiscontinuity {
                 path: path.to_path_buf(),
                 line: index + 1,
-                expected,
+                expected: *expected,
                 found: record.sequence,
             });
         }
-        expected = record.sequence + 1;
+        *expected = record.sequence + 1;
         records.push(record);
     }
-    Ok(Some((records, torn_tail)))
+    Ok(())
+}
+
+/// Every rotated decision-journal segment under `root`, ordered by the last
+/// sequence it holds. A name that matches the prefix but not its exact
+/// grammar is operator debris sitting where the loader looks — refused rather
+/// than silently skipped, or it would hide exactly the history it names.
+fn segment_paths(root: &Path) -> Result<Vec<PathBuf>, StoreError> {
+    let mut segments: Vec<(u64, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(root).map_err(io(root))? {
+        let entry = entry.map_err(io(root))?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(SEGMENT_PREFIX) else {
+            continue;
+        };
+        let Some(last) = rest.strip_suffix(SEGMENT_SUFFIX) else {
+            continue;
+        };
+        let Ok(last) = last.parse::<u64>() else {
+            let detail = format!("segment name {name:?} does not carry a decimal watermark");
+            return Err(StoreError::JournalCorrupt {
+                path,
+                line: 0,
+                detail,
+            });
+        };
+        segments.push((last, path));
+    }
+    segments.sort_by_key(|(last, _)| *last);
+    Ok(segments.into_iter().map(|(_, path)| path).collect())
 }
 
 /// Parse the governance journal. `None` when the file does not exist.
@@ -658,6 +975,277 @@ mod tests {
         let dir = scratch("new");
         let store = Store::open(&dir).expect("open");
         assert!(store.load().expect("load").is_none(), "a new install");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_append_failure_poisons_every_later_append_until_reopen() {
+        let dir = scratch("poison");
+        let mut store = Store::open(&dir).expect("open");
+        let mut d = two_tenant_deployment();
+        store.save_snapshot(&d.snapshot()).expect("snapshot");
+        run(&mut d, &mut store, &[("acme", "r-1", 10)]);
+        assert_eq!(store.next_sequence(), 1);
+
+        // Simulate what a real mid-append IO failure leaves behind: unknown
+        // bytes in the file and an unadvanced sequence counter.
+        store.poison("simulated io failure");
+
+        d.admit(Call {
+            actor: &actor("memorithm", "alice", AuthStrength::Token),
+            request: &request("acme", "alice", "memory.ingest", "r-2"),
+            model: "claude-opus",
+            cost_tokens: 10,
+            variant: None,
+            justification: None,
+        });
+        let fresh: Vec<_> = d.audit().filter(|r| r.sequence >= 1).cloned().collect();
+        assert_eq!(fresh.len(), 1);
+
+        // A retry must be refused — writing sequence 1 again would brick the
+        // journal at the next open — for both journals.
+        assert!(matches!(
+            store.append(&fresh),
+            Err(StoreError::Poisoned { .. })
+        ));
+        assert!(matches!(
+            store.append_governance(&[GovernanceRecord {
+                at_sequence: 1,
+                ordinal: 0,
+                actor: None,
+                justification: None,
+                change: ccos_enterprise_runtime::GovernanceChange::RoleDefined {
+                    role: "x".into(),
+                    permissions: vec![],
+                },
+            }]),
+            Err(StoreError::Poisoned { .. })
+        ));
+
+        drop(store);
+        // Reopening recomputes the sequence from what is actually durable, so
+        // the deployment recovers instead of carrying silent damage forward.
+        let mut reopened = Store::open(&dir).expect("reopen");
+        assert_eq!(reopened.next_sequence(), 1, "sequence recomputed from disk");
+        reopened.append(&fresh).expect("append after reopen");
+        assert_eq!(reopened.next_sequence(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_created_journal_file_survives_a_simulated_lost_directory_entry() {
+        // The directory-entry fsync cannot be crash-tested here; what can be
+        // asserted is that opening a fresh root leaves a loadable store whose
+        // files exist (the entry was pinned), and reopening finds them.
+        let dir = scratch("dirsync");
+        {
+            let store = Store::open(&dir).expect("open");
+            assert!(dir.join(JOURNAL_FILE).exists());
+            assert!(dir.join(GOVERNANCE_FILE).exists());
+            drop(store);
+        }
+        let store = Store::open(&dir).expect("reopen");
+        assert!(store.load().expect("load").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compaction_rotates_history_and_startup_stays_exact() {
+        let dir = scratch("compact1");
+        let mut store = Store::open(&dir).expect("open");
+        let mut d = two_tenant_deployment();
+        store.save_snapshot(&d.snapshot()).expect("snapshot");
+
+        // History that will be sealed away.
+        run(
+            &mut d,
+            &mut store,
+            &[("acme", "c-1", 100), ("acme", "c-2", 50)],
+        );
+        assert_eq!(store.next_sequence(), 2);
+
+        // Compact at exactly the deployment's own watermark.
+        let snapshot = d.snapshot();
+        assert_eq!(snapshot.sequence_watermark, 2);
+        store.compact(&snapshot).expect("compact");
+
+        // The segment exists under its watermark name; the live journal is
+        // fresh; the store keeps appending densely.
+        assert!(dir
+            .join(format!("{SEGMENT_PREFIX}1{SEGMENT_SUFFIX}"))
+            .exists());
+        assert_eq!(store.next_sequence(), 2);
+        run(&mut d, &mut store, &[("acme", "c-3", 25)]);
+        assert_eq!(
+            store.next_sequence(),
+            3,
+            "sequences continue after rotation"
+        );
+
+        // A second compaction seals only the new tail.
+        store.compact(&d.snapshot()).expect("second compact");
+        assert!(dir
+            .join(format!("{SEGMENT_PREFIX}2{SEGMENT_SUFFIX}"))
+            .exists());
+        drop(store);
+
+        // Startup folds segments plus live journal into one exact ledger.
+        let store = Store::open(&dir).expect("reopen");
+        assert_eq!(store.next_sequence(), 3);
+        let loaded = store.load().expect("load").expect("state");
+        assert_eq!(loaded.rotated_segments, 2);
+        assert_eq!(loaded.torn_tail, 0);
+        let restored = Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance)
+            .expect("restore over segmented history");
+        assert_eq!(
+            restored.spent("acme"),
+            Some(175),
+            "100 + 50 + 25, billed once"
+        );
+        assert_eq!(
+            restored.audit().cloned().collect::<Vec<_>>(),
+            d.audit().cloned().collect::<Vec<_>>(),
+            "the trail is record-for-record identical across two rotations"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compacting_an_empty_journal_is_a_no_op_that_moves_nothing() {
+        let dir = scratch("compact2");
+        let mut store = Store::open(&dir).expect("open");
+        let mut d = two_tenant_deployment();
+        store.save_snapshot(&d.snapshot()).expect("snapshot");
+        run(&mut d, &mut store, &[("acme", "e-1", 10)]);
+
+        store.compact(&d.snapshot()).expect("first compact");
+        let segment = format!("{SEGMENT_PREFIX}0{SEGMENT_SUFFIX}");
+        assert!(dir.join(&segment).exists());
+
+        // Nothing new was decided: the live journal is empty now, so the
+        // second pass must succeed without touching the existing segment.
+        store.compact(&d.snapshot()).expect("idempotent compact");
+        assert!(dir.join(&segment).exists());
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(SEGMENT_PREFIX))
+            .collect();
+        assert_eq!(names.len(), 1, "no duplicate segment: {names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compaction_refuses_a_snapshot_that_does_not_match_the_durable_end() {
+        let dir = scratch("compact3");
+        let mut store = Store::open(&dir).expect("open");
+        let mut d = two_tenant_deployment();
+        store.save_snapshot(&d.snapshot()).expect("snapshot");
+        run(&mut d, &mut store, &[("acme", "m-1", 10)]);
+        assert_eq!(store.next_sequence(), 1);
+
+        // A stale snapshot (watermark 0) must be refused outright.
+        let stale = two_tenant_deployment();
+        let err = match store.compact(&stale.snapshot()) {
+            Ok(()) => panic!("stale watermark must refuse"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, StoreError::CompactRefused { .. }), "{err}");
+
+        // And nothing moved: the live journal still holds the decision.
+        assert!(!dir
+            .join(format!("{SEGMENT_PREFIX}0{SEGMENT_SUFFIX}"))
+            .exists());
+        drop(store);
+        let store = Store::open(&dir).expect("reopen");
+        assert_eq!(store.next_sequence(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lost_segment_is_refused_at_the_layer_that_can_name_the_loss() {
+        // Two rotations: `through-1` holds sequences 0..=1, `through-2` holds
+        // sequence 2, and the live journal is empty.
+        let build = |tag: &str| -> (PathBuf, u64) {
+            let dir = scratch(tag);
+            let mut store = Store::open(&dir).expect("open");
+            let mut d = two_tenant_deployment();
+            store.save_snapshot(&d.snapshot()).expect("snapshot");
+            run(
+                &mut d,
+                &mut store,
+                &[("acme", "l-1", 10), ("acme", "l-2", 10)],
+            );
+            store.compact(&d.snapshot()).expect("compact 1");
+            run(&mut d, &mut store, &[("acme", "l-3", 5)]);
+            store.compact(&d.snapshot()).expect("compact 2");
+            drop(store);
+            (dir, d.spent("acme").unwrap_or(0))
+        };
+
+        // Losing the LATER segment leaves history that is dense from zero
+        // and simply stops early: the store cannot tell that from a shorter
+        // life, but restore can — its watermark check names the exact gap.
+        let (dir_a, _spent_a) = build("compact4a");
+        std::fs::remove_file(dir_a.join(format!("{SEGMENT_PREFIX}2{SEGMENT_SUFFIX}")))
+            .expect("lose the late segment");
+        {
+            let store = Store::open(&dir_a).expect("open");
+            let loaded = store
+                .load()
+                .expect("load still reads the rest")
+                .expect("state");
+            assert_eq!(loaded.journal.len(), 2);
+            let err =
+                match Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance) {
+                    Ok(_) => panic!("a journal short of the watermark must refuse"),
+                    Err(e) => e,
+                };
+            assert!(
+                matches!(err, RestoreError::JournalDiscontinuity { .. }),
+                "{err}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir_a);
+
+        // Losing the EARLIER segment breaks the stream's own density: what
+        // remains starts at sequence 2, and nothing dense can begin there.
+        // The store refuses while opening, before any handle exists.
+        let (dir_b, _) = build("compact4b");
+        std::fs::remove_file(dir_b.join(format!("{SEGMENT_PREFIX}1{SEGMENT_SUFFIX}")))
+            .expect("lose the early segment");
+        let err = match Store::open(&dir_b) {
+            Ok(_) => panic!("a density break across segments must refuse open"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, StoreError::JournalDiscontinuity { .. }),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    #[test]
+    fn a_damaged_segment_is_corruption_not_a_forgivable_tail() {
+        // A rotated segment was published by fsync+rename: unlike the live
+        // journal it has no crash window, so a torn end is damage and is
+        // refused rather than trimmed.
+        let dir = scratch("compact5");
+        let mut store = Store::open(&dir).expect("open");
+        let mut d = two_tenant_deployment();
+        store.save_snapshot(&d.snapshot()).expect("snapshot");
+        run(&mut d, &mut store, &[("acme", "d-1", 10)]);
+        store.compact(&d.snapshot()).expect("compact");
+        drop(store);
+        let segment = dir.join(format!("{SEGMENT_PREFIX}0{SEGMENT_SUFFIX}"));
+        let mut bytes = std::fs::read(&segment).expect("read segment");
+        bytes.truncate(bytes.len() - 3); // tear mid-record, newline gone
+        std::fs::write(&segment, &bytes).expect("damage segment");
+        let err = match Store::open(&dir) {
+            Ok(_) => panic!("a torn segment must refuse open"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, StoreError::JournalCorrupt { .. }), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

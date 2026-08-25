@@ -407,6 +407,7 @@ fn counter_for(vault: Vault, path: &Path) -> Counter {
         // *costs*, not what the shipped 0.5 req/s bucket lets through.
         bucket: TokenBucket::new(1.0e9, 1.0e9),
         vault_seen: None,
+        persist_writes: 0,
     }
 }
 

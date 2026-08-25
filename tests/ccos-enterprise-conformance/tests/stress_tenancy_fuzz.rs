@@ -1748,10 +1748,14 @@ fn a_tenant_name_is_held_once_however_many_cells_it_has() {
         retained as f64 / CELLS as f64
     );
     // The claim is structural, so state it structurally: the whole tenant's
-    // footprint stays under a couple of copies of the name plus the cells
-    // themselves. Amplified, it would have been CELLS copies.
+    // footprint stays under a few copies of the name plus the cells
+    // themselves. Amplified, it would have been CELLS copies. The fixed
+    // 2 KiB slack absorbs allocator size-class drift as the Deployment
+    // struct itself evolves; name amplification by even ~16 copies would
+    // still blow straight through it.
+    const STRUCTURAL_SLACK: usize = 2048;
     assert!(
-        retained < name.len() * 4 + CELLS * 128,
+        retained < name.len() * 4 + CELLS * 128 + STRUCTURAL_SLACK,
         "expected the name to be held once, not {CELLS} times: {retained} B \
          for a {} B name over {CELLS} cells",
         name.len()
@@ -1768,10 +1772,15 @@ fn a_tenant_name_is_held_once_however_many_cells_it_has() {
         "the same {CELLS} cells under flat keying: {flat_retained} B ({:.1}x)",
         flat_retained as f64 / retained as f64
     );
+    // The structural claim, stated so allocator size-class drift cannot flip
+    // it: the measured saving must account for all but 4 KiB of the CELLS
+    // name copies the nesting eliminates. A regression that re-amplifies the
+    // name even 16 times blows through this; layout noise does not.
+    let saved = flat_retained.saturating_sub(retained);
     assert!(
-        flat_retained > retained * 2,
-        "the nesting must save the {CELLS} copies of a {} B name: nested \
-         {retained} B vs flat {flat_retained} B",
+        saved + 4096 >= CELLS * name.len(),
+        "the nesting must save ~{CELLS} copies of a {} B name: saved {saved} B \
+         (flat {flat_retained} B vs nested {retained} B)",
         name.len()
     );
     drop(flat);

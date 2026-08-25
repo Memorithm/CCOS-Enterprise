@@ -47,6 +47,10 @@ members = [
     "tests/ccos-knowledge-conformance",
 ]
 
+# The fuzz harness builds with its own sanitizer flags and nightly compiler;
+# it must not inherit workspace profile settings.
+exclude = ["core/fuzz"]
+
 [workspace.package]
 edition = "2021"
 rust-version = "1.89"

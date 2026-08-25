@@ -103,6 +103,7 @@ fn main() {
         seed,
         bucket: TokenBucket::new(10.0, 0.5),
         vault_seen: None,
+        persist_writes: 0,
     };
     if let Err(e) = serve(listener, counter) {
         eprintln!("[counter] fatal: {e}");

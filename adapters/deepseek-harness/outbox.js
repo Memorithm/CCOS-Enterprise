@@ -1,9 +1,15 @@
 import { mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
+// A single capture is a rendered turn: bounded by DSH context limits in
+// practice, but the outbox still refuses to load an entry larger than this so
+// a hostile or corrupted file cannot buy an unbounded allocation.
+const MAX_ENTRY_BYTES = 8 * 1024 * 1024
+
 export class DurableOutbox {
   constructor(root) {
     this.root = root
+    this.logger = undefined
   }
 
   async init() {
@@ -25,15 +31,38 @@ export class DurableOutbox {
     return target
   }
 
-  async list() {
+  /**
+   * List pending entries oldest-first.
+   *
+   * A corrupt or oversized entry never fails the listing: it would otherwise
+   * poison the drain loop forever (the entry cannot deliver, so the outbox can
+   * never empty). Such an entry is reported through `onCorrupt` — when given —
+   * and left on disk for operator inspection; healthy entries still flow.
+   */
+  async list({ limit = Infinity, onCorrupt } = {}) {
     await this.init()
     const names = (await readdir(this.root))
-      .filter((name) => name.endsWith('.json'))
+      .filter((name) => name.endsWith('.json') && !name.startsWith('.'))
       .sort()
     const entries = []
     for (const name of names) {
-      const raw = await readFile(join(this.root, name), 'utf8')
-      entries.push({ key: name.slice(0, -5), value: JSON.parse(raw) })
+      if (entries.length >= limit) break
+      let raw
+      try {
+        raw = await readFile(join(this.root, name))
+      } catch (error) {
+        if (error?.code === 'ENOENT') continue // removed concurrently
+        throw error
+      }
+      if (raw.byteLength > MAX_ENTRY_BYTES) {
+        onCorrupt?.(name.slice(0, -5), new Error(`entry exceeds ${MAX_ENTRY_BYTES} bytes`))
+        continue
+      }
+      try {
+        entries.push({ key: name.slice(0, -5), value: JSON.parse(raw.toString('utf8')) })
+      } catch (error) {
+        onCorrupt?.(name.slice(0, -5), error)
+      }
     }
     return entries
   }

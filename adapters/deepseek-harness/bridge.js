@@ -6,6 +6,9 @@ import { textFromMcpToolResult } from './mcp-stdio.js'
 export const PLUGIN_NAME = 'ccos-enterprise-memory'
 export const MAX_RECALL_FOREGROUND_MS = 3000
 export const EPISODE_SCHEMA = 'ccos.dsh.episode.v1'
+// Outbox entries delivered per drain pass. A backlog drains batch after batch;
+// the bound only caps one pass's memory, never total durability.
+const MAX_DRAIN_BATCH = 200
 
 const DSH_TURN_END_KINDS = new Set([
   'completed',
@@ -457,19 +460,33 @@ export class DeepSeekHarnessBridge {
   }
 
   #scheduleDrain() {
-    this.drainPromise = this.drainPromise.then(async () => {
-      const entries = await this.outbox.list()
-      for (const { key, value } of entries) {
-        if (this.disposed) return
-        try {
-          await this.client.callTool(value.tool, value.arguments, value.meta)
-          await this.outbox.remove(key)
-        } catch (error) {
-          this.logger.warn?.(`ccos-enterprise-memory: capture retained for retry: ${error?.message || String(error)}`)
-          return
+    // Bounded batches: a large backlog drains in batches so one pass cannot
+    // pin unbounded memory, and the loop keeps everything inside this single
+    // chained promise so flush() still waits for the whole drain.
+    const batchLoop = async () => {
+      while (!this.disposed) {
+        const entries = await this.outbox.list({
+          limit: MAX_DRAIN_BATCH,
+          onCorrupt: (key, error) => {
+            this.logger.warn?.(
+              `ccos-enterprise-memory: corrupt outbox entry ${key} left on disk for inspection: ${error?.message || String(error)}`,
+            )
+          },
+        })
+        if (!entries.length) return
+        for (const { key, value } of entries) {
+          if (this.disposed) return
+          try {
+            await this.client.callTool(value.tool, value.arguments, value.meta)
+            await this.outbox.remove(key)
+          } catch (error) {
+            this.logger.warn?.(`ccos-enterprise-memory: capture retained for retry: ${error?.message || String(error)}`)
+            return
+          }
         }
       }
-    }).catch((error) => {
+    }
+    this.drainPromise = this.drainPromise.then(batchLoop).catch((error) => {
       this.logger.warn?.(`ccos-enterprise-memory: outbox drain failed: ${error?.message || String(error)}`)
     })
   }

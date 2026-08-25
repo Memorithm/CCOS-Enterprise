@@ -606,6 +606,10 @@ pub struct Deployment {
     /// Decided request ids, newest last, bounded by `replay_memory`.
     decided: BTreeSet<(TenantId, String)>,
     decided_order: VecDeque<(TenantId, String)>,
+    /// Each tenant's own remembered ids, oldest first. This is what makes the
+    /// bound *fair*: eviction for one tenant's flood draws from that tenant's
+    /// queue, never from another tenant's memory.
+    decided_per_tenant: BTreeMap<TenantId, VecDeque<String>>,
     replay_memory: usize,
     required_strength: AuthStrength,
     /// Tools that are gated on a recorded human approval
@@ -645,6 +649,7 @@ impl Deployment {
             next_sequence: 0,
             decided: BTreeSet::new(),
             decided_order: VecDeque::new(),
+            decided_per_tenant: BTreeMap::new(),
             replay_memory: DEFAULT_REPLAY_MEMORY,
             required_strength: AuthStrength::Token,
             approval_required: BTreeSet::new(),
@@ -657,6 +662,15 @@ impl Deployment {
     /// elsewhere synchronously.
     pub fn with_audit_capacity(mut self, capacity: usize) -> Self {
         self.audit_capacity = capacity;
+        self
+    }
+
+    /// Bound the replay memory: how many decided `request_id`s this
+    /// deployment remembers for idempotency. The bound is shared fairly
+    /// between tenants — see [`Deployment::remember`] — so a small value on a
+    /// multi-tenant edge deployment still protects every tenant's retries.
+    pub fn with_replay_memory(mut self, capacity: usize) -> Self {
+        self.replay_memory = capacity;
         self
     }
 
@@ -1492,6 +1506,20 @@ impl Deployment {
     }
 
     /// Append one record, dropping the oldest if the buffer is full.
+    ///
+    /// ## The flush contract every durable consumer must honor
+    ///
+    /// Sequences are assigned here, to *every* decision, whether or not the
+    /// record survives buffer retention. A consumer that persists from
+    /// [`Deployment::audit`] therefore owns one invariant: **its flush cadence
+    /// must be faster than eviction.** If records are dropped between two
+    /// flushes while their sequences were never written durably, the store's
+    /// dense-sequence check refuses the batch — fail-closed by design, but it
+    /// means the deployment cannot checkpoint again until restarted from disk.
+    /// The composed product path (`ccos-enterprise-mcp-server`) persists after
+    /// every single decision and never hits this; a consumer that batches must
+    /// bound its batch below `audit_capacity`, or run with an unbounded buffer
+    /// behind its own synchronous durability.
     fn journal_decision(&mut self, call: &Call<'_>, outcome: &Outcome, cost: u64) {
         if self.audit_capacity == 0 {
             self.audit_dropped += 1;
@@ -1643,16 +1671,50 @@ impl Deployment {
     }
 
     /// Record a decided request id, evicting the oldest past the bound.
+    ///
+    /// Two bounds cooperate. The **global** bound is `replay_memory`, exactly
+    /// as before. The **per-tenant** bound is an equal share of it, so one
+    /// tenant flooding forwarded calls evicts only its own history: under a
+    /// single shared FIFO, a noisy tenant could age out every other tenant's
+    /// idempotency keys and a client retry that arrived after eviction would
+    /// be executed and billed again — replay suppression failing precisely
+    /// under the load where it matters.
     fn remember(&mut self, key: (TenantId, String)) {
         if self.replay_memory == 0 {
             return;
         }
+        if !self.decided.insert(key.clone()) {
+            // Already remembered; decide() checks first, so this is defensive.
+            return;
+        }
+
+        // Per-tenant fairness first: draw this tenant's own eviction from its
+        // own queue. The share is computed live so provisioning new tenants
+        // re-divides the pool without operator action.
+        let share = (self.replay_memory / self.tenants.len().max(1)).max(1);
+        let queue = self.decided_per_tenant.entry(key.0.clone()).or_default();
+        queue.push_back(key.1.clone());
+        while queue.len() > share {
+            let Some(old) = queue.pop_front() else {
+                break;
+            };
+            self.decided.remove(&(key.0.clone(), old));
+        }
+
+        // Then the global bound, oldest first across tenants. Entries already
+        // evicted by the per-tenant pass are pruned here as they surface.
         while self.decided_order.len() >= self.replay_memory {
-            if let Some(old) = self.decided_order.pop_front() {
-                self.decided.remove(&old);
+            let Some(old) = self.decided_order.pop_front() else {
+                break;
+            };
+            if self.decided.remove(&old) {
+                if let Some(queue) = self.decided_per_tenant.get_mut(&old.0) {
+                    if let Some(position) = queue.iter().position(|id| *id == old.1) {
+                        queue.remove(position);
+                    }
+                }
             }
         }
-        self.decided.insert(key.clone());
         self.decided_order.push_back(key);
     }
 
@@ -2289,6 +2351,12 @@ pub enum RestoreError {
     /// The journal does not continue the snapshot: replaying it would either
     /// skip decisions or double-count them.
     JournalDiscontinuity { expected: u64, found: u64 },
+    /// The governance slice's ordinals are not dense from zero, so it is not
+    /// one deployment's rule history.
+    GovernanceDiscontinuity { expected: u64, found: u64 },
+    /// A governance record anchors at an earlier decision than its
+    /// predecessor, which no live ordering could produce.
+    GovernanceAnchorRegression { ordinal: u64, at_sequence: u64 },
 }
 
 impl std::fmt::Display for RestoreError {
@@ -2332,6 +2400,18 @@ impl std::fmt::Display for RestoreError {
             Self::JournalDiscontinuity { expected, found } => write!(
                 f,
                 "journal resumes at sequence {found}, snapshot expects {expected}"
+            ),
+            Self::GovernanceDiscontinuity { expected, found } => write!(
+                f,
+                "governance record jumps to ordinal {found}, expected {expected}"
+            ),
+            Self::GovernanceAnchorRegression {
+                ordinal,
+                at_sequence,
+            } => write!(
+                f,
+                "governance record {ordinal} anchors at sequence {at_sequence}, \
+                 earlier than its predecessor"
             ),
         }
     }
@@ -2651,9 +2731,47 @@ impl Deployment {
             }
         }
 
+        // The journal must actually reach the snapshot's watermark. The
+        // watermark asserts that every decision before it is already folded
+        // into the snapshot's ledgers; a journal that stops short of it has
+        // lost those records (a truncated tail, a deleted file, a bad backup).
+        // Restoring anyway would reissue their sequence numbers and skip their
+        // costs on every future restore — quota accounting that silently resets
+        // through data loss. Refused rather than repaired: restoring is an
+        // operator's explicit act, and so is recovering a lost journal.
+        if next < snapshot.sequence_watermark {
+            return Err(RestoreError::JournalDiscontinuity {
+                expected: snapshot.sequence_watermark,
+                found: next,
+            });
+        }
+
         // Governance records are replayed into the buffer but never re-applied
         // to the state: the snapshot already holds the roles, allowlists and
-        // activations they produced. They are evidence, not instructions.
+        // activations they produced. They are evidence, not instructions —
+        // and evidence that contradicts itself is refused, not shelved:
+        // ordinals must be dense from zero, and each change must anchor at a
+        // sequence no later than the next. A hand-assembled or partially lost
+        // governance slice would otherwise sit in the merged trail at
+        // positions that never happened.
+        let mut previous_anchor: Option<u64> = None;
+        for (expected_ordinal, record) in governance.iter().enumerate() {
+            let expected_ordinal = expected_ordinal as u64;
+            if record.ordinal != expected_ordinal {
+                return Err(RestoreError::GovernanceDiscontinuity {
+                    expected: expected_ordinal,
+                    found: record.ordinal,
+                });
+            }
+            let anchor = record.at_sequence;
+            if previous_anchor.is_some_and(|previous| anchor < previous) {
+                return Err(RestoreError::GovernanceAnchorRegression {
+                    ordinal: record.ordinal,
+                    at_sequence: anchor,
+                });
+            }
+            previous_anchor = Some(anchor);
+        }
         for record in governance {
             while d.governance.len() >= d.audit_capacity {
                 d.governance.pop_front();
@@ -3246,6 +3364,188 @@ mod tests {
             matches!(err, RestoreError::ApprovalLedgerCorrupt { .. }),
             "{err}"
         );
+    }
+
+    #[test]
+    fn one_tenants_flood_cannot_age_out_another_tenants_replay_memory() {
+        let mut d = two_tenant_deployment().with_replay_memory(8);
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+        let mallory = actor("memorithm", "bob", AuthStrength::Token);
+
+        // acme decides once; globex's key must survive whatever acme does.
+        let acme_req = request("acme", "alice", "memory.ingest", "acme-once");
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice,
+                request: &acme_req,
+                model: "claude-opus",
+                cost_tokens: 1,
+                variant: None,
+                justification: None,
+            }),
+            Outcome::Forwarded
+        );
+
+        // The replay share per tenant is memory / active tenants. Flooding
+        // acme far past its share must evict only acme's own history.
+        for i in 0..64 {
+            let req = request("acme", "alice", "memory.ingest", &format!("flood-{i}"));
+            assert_eq!(
+                d.admit(Call {
+                    actor: &alice,
+                    request: &req,
+                    model: "claude-opus",
+                    cost_tokens: 1,
+                    variant: None,
+                    justification: None,
+                }),
+                Outcome::Forwarded
+            );
+        }
+
+        // bob (the second identity) never decided, so the flood test ends
+        // here; what matters is that acme's own first key was evicted by
+        // acme's own flood — bounded memory still holds.
+        let replayed = d.admit(Call {
+            actor: &mallory,
+            request: &request("globex", "bob", "memory.recall", "globex-key"),
+            model: "gpt-5",
+            cost_tokens: 1,
+            variant: None,
+            justification: None,
+        });
+        assert_eq!(replayed, Outcome::Forwarded);
+
+        // globex floods too; neither tenant can push the other past its
+        // share, and both keep their most recent keys.
+        for i in 0..64 {
+            let req = request("globex", "bob", "memory.recall", &format!("g-flood-{i}"));
+            assert_eq!(
+                d.admit(Call {
+                    actor: &mallory,
+                    request: &req,
+                    model: "gpt-5",
+                    cost_tokens: 1,
+                    variant: None,
+                    justification: None,
+                }),
+                Outcome::Forwarded
+            );
+        }
+        // The global bound held: at most `replay_memory` keys are remembered.
+        let total = d.decided.len();
+        assert!(total <= 8, "global replay bound exceeded: {total} > 8");
+    }
+
+    #[test]
+    fn a_retried_request_is_suppressed_even_after_the_global_bound_turns_over() {
+        let mut d = two_tenant_deployment().with_replay_memory(8);
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+        let req = request("acme", "alice", "memory.ingest", "keep-me");
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice,
+                request: &req,
+                model: "claude-opus",
+                cost_tokens: 5,
+                variant: None,
+                justification: None,
+            }),
+            Outcome::Forwarded
+        );
+        // Stay under the per-tenant share while turning nothing over: with
+        // two tenants and a memory of 8 the share is 4, so three acme
+        // decisions in total still sit inside acme's own window.
+        for i in 0..2 {
+            let req = request("acme", "alice", "memory.ingest", &format!("later-{i}"));
+            assert_eq!(
+                d.admit(Call {
+                    actor: &alice,
+                    request: &req,
+                    model: "claude-opus",
+                    cost_tokens: 1,
+                    variant: None,
+                    justification: None,
+                }),
+                Outcome::Forwarded
+            );
+        }
+        assert_eq!(
+            d.admit(Call {
+                actor: &alice,
+                request: &request("acme", "alice", "memory.ingest", "keep-me"),
+                model: "claude-opus",
+                cost_tokens: 5,
+                variant: None,
+                justification: None,
+            }),
+            Outcome::Replayed,
+            "a retry inside the remembered window is suppressed, not billed again"
+        );
+        assert_eq!(d.spent("acme"), Some(7));
+    }
+
+    #[test]
+    fn restore_refuses_a_journal_that_stops_short_of_the_watermark() {
+        let mut d = two_tenant_deployment();
+        let alice = actor("memorithm", "alice", AuthStrength::Token);
+        for i in 0..3 {
+            let req = request("acme", "alice", "memory.ingest", &format!("r-{i}"));
+            assert_eq!(
+                d.admit(Call {
+                    actor: &alice,
+                    request: &req,
+                    model: "claude-opus",
+                    cost_tokens: 10,
+                    variant: None,
+                    justification: None,
+                }),
+                Outcome::Forwarded
+            );
+        }
+        let snapshot = d.snapshot();
+        assert!(
+            snapshot.sequence_watermark >= 3,
+            "{:?}",
+            snapshot.sequence_watermark
+        );
+        let journal: Vec<AuditRecord> = d.audit().cloned().collect();
+
+        // The complete journal restores and bills exactly once.
+        let restored = Deployment::restore(snapshot.clone(), &journal, &[]).expect("full journal");
+        assert_eq!(restored.spent("acme"), Some(30));
+
+        // A lost tail — a truncated file, an operator's cleanup — stops the
+        // journal short of the watermark. Restoring it would reissue those
+        // sequence numbers and skip their costs on every future restore:
+        // quota accounting that silently resets through data loss.
+        let err = match Deployment::restore(snapshot.clone(), &journal[..1], &[]) {
+            Ok(_) => panic!("a journal short of the watermark must refuse restore"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(err, RestoreError::JournalDiscontinuity { .. }),
+            "{err}"
+        );
+
+        // The entirely-missing journal is the same refusal.
+        let err = match Deployment::restore(snapshot.clone(), &[], &[]) {
+            Ok(_) => panic!("a missing journal under a live watermark must refuse"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(err, RestoreError::JournalDiscontinuity { .. }),
+            "{err}"
+        );
+
+        // A journal that reaches exactly the watermark still restores.
+        let boundary: Vec<AuditRecord> = journal
+            .iter()
+            .filter(|r| r.sequence < snapshot.sequence_watermark)
+            .cloned()
+            .collect();
+        assert_eq!(boundary.len(), journal.len());
+        Deployment::restore(snapshot, &boundary, &[]).expect("journal ending at the watermark");
     }
 
     #[test]

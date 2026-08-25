@@ -28,3 +28,14 @@ ccos-enterprise-approval = { path = "../ccos-enterprise-approval" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+# The benches verify one real identity token at setup so they exercise only
+# the API a production caller can reach — no test-fixture constructors.
+ccos-enterprise-auth = { path = "../ccos-enterprise-auth", features = ["token-auth"] }
+ed25519-dalek = "2"
+
+[[bench]]
+name = "admission_bench"
+harness = false

@@ -2,3 +2,12 @@ target/
 Cargo.lock.bak
 *.ccos
 *.ccos.oplog
+
+# cargo-fuzz generates corpora and crash artifacts at run time.
+core/fuzz/corpus/
+core/fuzz/artifacts/
+core/fuzz/coverage/
+
+# Local AI-tooling workspace; its output must never enter the repository
+# (see scripts/check-author-policy.sh).
+.commandcode/

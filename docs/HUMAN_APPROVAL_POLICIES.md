@@ -38,6 +38,20 @@ describes the durable engine that makes it a real product behavior
   deterministically against the validated ledger. The approval ledger and
   the set of approval-gated tools are carried in the deployment snapshot, so
   a restart never silently drops either; a corrupt ledger refuses restore.
+- **Where the gate is enforced — read before integrating**: `admit` does
+  **not** evaluate the tool-approval gate. This is deliberate and pinned by
+  the conformance suite (`tests/human_approval.rs`): an approval authorizes
+  one *artifact* (a SHA-256 of what the call would change), and only the
+  code that knows the artifact can name it. Enforcement therefore lives at
+  each governed mutation site — retention-policy saves, model-allowlist
+  switches, Q-Page variant activation — which calls
+  `approval_gate(call, &artifact_hash)` *before* its durable effect and
+  after every other admission gate has passed. A generic hash over raw
+  arguments inside `admit` would either freeze request bytes into the
+  approval (breaking retries with identical intent) or weaken the record to
+  a per-tool wildcard. If you mark a new tool with `require_approval`, you
+  must also invoke `approval_gate` at its effect site: marking alone
+  configures policy, it does not enforce it.
 
 ## Approver identity
 

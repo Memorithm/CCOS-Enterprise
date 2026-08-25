@@ -91,7 +91,24 @@ isolation, persistence and determinism contract.
 | `ccos-enterprise-skills-audit` | operator-only, tenant-scoped, read-only skill/trial/evidence provenance audit (`audit.provenance`) |
 | `ccos-enterprise-admin` | administrative action validation + audit |
 | `ccos-enterprise-octasoma` | tenant-isolated semantic/episodic memory adapter; OctaSoma observations remain non-authoritative |
+| `ccos-enterprise-mcp` | governed MCP front door + stdio server; includes `ccos-enterprise-gen-token`, the identity-provisioning tool (CSPRNG-backed issuer keys, owner-only secret files, no deterministic defaults) |
 | `tools/ccos-license-server` | vendor claim counter (HTTP/1.1) + vault admin CLI + PHP shared-hosting flow |
 | `tests/ccos-enterprise-conformance` | the composed product path end to end: governed request admission, tenant isolation, the Hermes tool-catalogue contract, adversarial scenarios |
+
+## Benchmarks
+
+Admission-path cost is pinned by criterion benchmarks so a regression cannot
+land silently:
+
+```sh
+cargo bench -p ccos-enterprise-runtime --bench admission_bench   # governed admission
+cargo bench -p ccos-core --bench delta_bench                     # kernel incremental engine
+```
+
+The admission bench drives only API a production caller can reach (a real
+ed25519-verified identity) and measures the full nine-gate happy path, the
+replay-suppression hit against a saturated memory, and the cheapest refusal.
+Reference numbers on a 14-core CI host: forwarded ≈ 1.3 µs, replay hit
+≈ 0.31 µs, refused ≈ 0.24 µs.
 
 Sole human maintainer: **ZEKRITI Tarek** (see GOVERNANCE.md).

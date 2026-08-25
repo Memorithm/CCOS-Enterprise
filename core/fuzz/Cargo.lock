@@ -63,8 +63,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "ccos"
-version = "0.4.0"
+name = "ccos-core"
+version = "0.4.0-pre"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -80,7 +80,7 @@ name = "ccos-fuzz"
 version = "0.0.0"
 dependencies = [
  "base64",
- "ccos",
+ "ccos-core",
  "libfuzzer-sys",
  "serde_json",
 ]

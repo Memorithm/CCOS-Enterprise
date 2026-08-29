@@ -26,13 +26,7 @@ jobs:
           p = Path('crates/ccos-enterprise-memory/src/lib.rs')
           text = p.read_text()
           marker = 'mod governed_provider;\n'
-          addition = '''mod governed_recall;
-pub use governed_recall::{
-    admit_governed_recall, GovernedRecallGate, GovernedRecallGateError,
-    GovernedRecallTrustPolicy,
-};
-
-''' + marker
+          addition = 'mod governed_recall;\npub use governed_recall::{\n    admit_governed_recall, GovernedRecallGate, GovernedRecallGateError,\n    GovernedRecallTrustPolicy,\n};\n\n' + marker
           assert marker in text
           assert 'mod governed_recall;' not in text
           p.write_text(text.replace(marker, addition, 1))

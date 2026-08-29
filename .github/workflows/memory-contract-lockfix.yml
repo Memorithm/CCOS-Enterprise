@@ -1,5 +1,6 @@
 name: memory contract lock repair
 
+# Temporary branch-only workflow used to synchronize Cargo.lock minimally.
 on:
   push:
     branches: [feat/memory-contract]

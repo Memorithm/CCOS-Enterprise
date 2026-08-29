@@ -1,0 +1,59 @@
+name: Scientific evidence observation branch
+
+on:
+  push:
+    branches:
+      - feat/scientific-evidence-observation
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-wire:
+    if: github.repository == 'Memorithm/CCOS-Enterprise' && github.actor == 'CHECKUPAUTO'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/scientific-evidence-observation
+          fetch-depth: 0
+
+      - name: Install MSRV
+        run: rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
+
+      - name: Export scientific evidence contract
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('crates/ccos-enterprise-memory/src/lib.rs')
+          text = path.read_text()
+          marker = 'mod retention;\n'
+          block = '''mod scientific_evidence;\npub use scientific_evidence::{\n    ScientificEvidenceDisposition, ScientificEvidenceError, ScientificEvidenceKind,\n    ScientificEvidenceObservation, SCIENTIFIC_EVIDENCE_OBSERVATION_VERSION,\n};\n\n'''
+          if 'mod scientific_evidence;\n' not in text:
+              if marker not in text:
+                  raise SystemExit('memory module marker not found')
+              text = text.replace(marker, block + marker, 1)
+          path.write_text(text)
+
+      - name: Validate memory contract
+        run: |
+          cargo +1.89.0 fmt --all
+          cargo +1.89.0 fmt --all -- --check
+          cargo +1.89.0 clippy -p ccos-enterprise-memory --all-targets -- -D warnings
+          cargo +1.89.0 test -p ccos-enterprise-memory
+          RUSTDOCFLAGS='-D warnings' cargo +1.89.0 doc -p ccos-enterprise-memory --no-deps
+
+      - name: Commit validated wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          allowed='^( M crates/ccos-enterprise-memory/src/lib.rs| M crates/ccos-enterprise-memory/src/scientific_evidence.rs)$'
+          unexpected="$(git status --porcelain --untracked-files=no | grep -Ev "$allowed" || true)"
+          test -z "$unexpected" || { echo "$unexpected"; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/ccos-enterprise-memory/src/lib.rs crates/ccos-enterprise-memory/src/scientific_evidence.rs
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "feat(memory): wire scientific evidence observation"
+          git push origin HEAD:feat/scientific-evidence-observation

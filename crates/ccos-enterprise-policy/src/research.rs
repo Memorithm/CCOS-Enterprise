@@ -327,7 +327,10 @@ mod tests {
     #[test]
     fn evidence_never_authorizes_research_activation() {
         let policy = policy(BoundedHistoryFallback::Reject);
-        assert_eq!(policy.activation_decision(), PolicyDecision::RequireApproval);
+        assert_eq!(
+            policy.activation_decision(),
+            PolicyDecision::RequireApproval
+        );
     }
 
     #[test]

@@ -16,6 +16,11 @@ use std::fmt;
 
 use ccos_enterprise_tenancy::TenantScope;
 
+mod lineage_graph;
+pub use lineage_graph::{
+    MemoryAssetState, MemoryGraphError, MemoryInvalidationReport, MemoryLineageGraph,
+};
+
 /// A semantic-memory namespace inside one tenant.
 ///
 /// The variants model CCOS collaboration boundaries rather than backend

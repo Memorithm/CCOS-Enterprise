@@ -195,7 +195,8 @@ mod tests {
             id(value),
             space,
             MemoryStratum::Evidence,
-            MemoryLineage::root([MemoryEvidenceRef::new(format!("audit:{value}")).unwrap()]).unwrap(),
+            MemoryLineage::root([MemoryEvidenceRef::new(format!("audit:{value}")).unwrap()])
+                .unwrap(),
         )
         .unwrap()
     }
@@ -266,19 +267,17 @@ mod tests {
             ))
             .unwrap();
         graph
-            .register(derived(
-                "e2",
-                space,
-                MemoryStratum::Context,
-                [id("e1")],
-            ))
+            .register(derived("e2", space, MemoryStratum::Context, [id("e1")]))
             .unwrap();
 
         let report = graph.invalidate(&id("e0")).unwrap();
         assert_eq!(graph.state(&id("e0")), Some(MemoryAssetState::Invalidated));
         assert_eq!(graph.state(&id("e1")), Some(MemoryAssetState::Stale));
         assert_eq!(graph.state(&id("e2")), Some(MemoryAssetState::Stale));
-        assert_eq!(report.stale_descendants, BTreeSet::from([id("e1"), id("e2")]));
+        assert_eq!(
+            report.stale_descendants,
+            BTreeSet::from([id("e1"), id("e2")])
+        );
     }
 
     #[test]
@@ -296,12 +295,7 @@ mod tests {
             .unwrap();
         graph.invalidate(&id("root")).unwrap();
 
-        let child = derived(
-            "context",
-            space,
-            MemoryStratum::Context,
-            [id("episode")],
-        );
+        let child = derived("context", space, MemoryStratum::Context, [id("episode")]);
         assert_eq!(
             graph.register(child),
             Err(MemoryGraphError::ParentNotActive {

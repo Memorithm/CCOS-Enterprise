@@ -430,15 +430,10 @@ mod tests {
         );
 
         let id = asset_id("mem:evidence:1");
-        let lineage = MemoryLineage::derived([asset_id("mem:other")], [evidence_ref("audit:7")])
-            .unwrap();
+        let lineage =
+            MemoryLineage::derived([asset_id("mem:other")], [evidence_ref("audit:7")]).unwrap();
         assert_eq!(
-            MemoryAssetDescriptor::new(
-                id,
-                MemorySpace::Tenant,
-                MemoryStratum::Evidence,
-                lineage
-            ),
+            MemoryAssetDescriptor::new(id, MemorySpace::Tenant, MemoryStratum::Evidence, lineage),
             Err(MemoryError::EvidenceCannotHaveParents)
         );
     }

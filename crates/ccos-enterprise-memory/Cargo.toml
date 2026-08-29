@@ -1,0 +1,10 @@
+[package]
+name = "ccos-enterprise-memory"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }

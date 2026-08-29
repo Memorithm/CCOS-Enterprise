@@ -28,23 +28,22 @@ jobs:
           text = text.replace('use ccos_enterprise_tenancy::TenantScope;', 'use ccos_enterprise_tenancy::{TenantId, TenantScope};')
           text = text.replace('let TenantScope { tenant, value } = scoped;', 'let TenantScope { tenant, inner } = scoped;')
           text = text.replace('value.', 'inner.')
-          text = text.replace('scoped.inner.k', 'scoped.inner.k')
           text = text.replace('TenantScope::new("acme".into(), value)', 'TenantScope::new(TenantId("acme".into()), value)')
           module.write_text(text)
 
           lib = Path('crates/ccos-enterprise-memory/src/lib.rs')
           text = lib.read_text()
           needle = '''pub use loadout_policy::{
-              MAX_MEMORY_LOADOUT_BINDINGS, MemoryLoadoutBinding, MemoryLoadoutPlan,
-              MemoryLoadoutPlanError, MemoryUsageMode,
+              MemoryLoadoutBinding, MemoryLoadoutPlan, MemoryLoadoutPlanError, MemoryUsageMode,
+              MAX_MEMORY_LOADOUT_BINDINGS,
           };
           '''
           addition = needle + '''
           mod recall_budget;
           pub use recall_budget::{
-              BudgetedMemoryRecall, MAX_MEMORY_RECALL_ITEMS, MAX_MEMORY_RECALL_PAYLOAD_BYTES,
-              MAX_MEMORY_RECALL_SHORTLIST, MemoryRecallBudget, MemoryRecallBudgetError,
-              SemanticMemoryProviderExt,
+              BudgetedMemoryRecall, MemoryRecallBudget, MemoryRecallBudgetError,
+              SemanticMemoryProviderExt, MAX_MEMORY_RECALL_ITEMS, MAX_MEMORY_RECALL_PAYLOAD_BYTES,
+              MAX_MEMORY_RECALL_SHORTLIST,
           };
           '''
           assert needle in text

@@ -21,6 +21,12 @@ pub use lineage_graph::{
     MemoryAssetState, MemoryGraphError, MemoryInvalidationReport, MemoryLineageGraph,
 };
 
+mod loadout_policy;
+pub use loadout_policy::{
+    MemoryLoadoutBinding, MemoryLoadoutPlan, MemoryLoadoutPlanError, MemoryUsageMode,
+    MAX_MEMORY_LOADOUT_BINDINGS,
+};
+
 /// A semantic-memory namespace inside one tenant.
 ///
 /// The variants model CCOS collaboration boundaries rather than backend

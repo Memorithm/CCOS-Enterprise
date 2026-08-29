@@ -158,7 +158,10 @@ impl fmt::Display for MemoryLoadoutPlanError {
         match self {
             Self::Empty => write!(f, "memory loadout plan must contain at least one binding"),
             Self::TooManyBindings { found, max } => {
-                write!(f, "memory loadout plan has {found} bindings; maximum is {max}")
+                write!(
+                    f,
+                    "memory loadout plan has {found} bindings; maximum is {max}"
+                )
             }
             Self::DuplicateSpace(space) => {
                 write!(f, "memory loadout plan contains duplicate space {space:?}")
@@ -185,7 +188,11 @@ mod tests {
         let plan = MemoryLoadoutPlan::new([
             binding(team.clone(), 10, MemoryUsageMode::OnDemand),
             binding(project.clone(), 20, MemoryUsageMode::Bootstrap),
-            binding(MemorySpace::Tenant, 20, MemoryUsageMode::BootstrapAndOnDemand),
+            binding(
+                MemorySpace::Tenant,
+                20,
+                MemoryUsageMode::BootstrapAndOnDemand,
+            ),
         ])
         .unwrap();
 
@@ -216,9 +223,9 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(MemoryLoadoutPlanError::Memory(MemoryError::InvalidMemorySpace {
-                kind: "agent"
-            }))
+            Err(MemoryLoadoutPlanError::Memory(
+                MemoryError::InvalidMemorySpace { kind: "agent" }
+            ))
         ));
     }
 
@@ -233,11 +240,7 @@ mod tests {
         let team_space = MemorySpace::team("runtime").unwrap();
         let plan = MemoryLoadoutPlan::new([
             tenant,
-            binding(
-                project_space.clone(),
-                90,
-                MemoryUsageMode::Bootstrap,
-            ),
+            binding(project_space.clone(), 90, MemoryUsageMode::Bootstrap),
             binding(team_space.clone(), 80, MemoryUsageMode::OnDemand),
         ])
         .unwrap();
@@ -257,12 +260,9 @@ mod tests {
 
     #[test]
     fn absent_usage_class_returns_none_without_scope_widening() {
-        let plan = MemoryLoadoutPlan::new([binding(
-            MemorySpace::Tenant,
-            1,
-            MemoryUsageMode::Bootstrap,
-        )])
-        .unwrap();
+        let plan =
+            MemoryLoadoutPlan::new([binding(MemorySpace::Tenant, 1, MemoryUsageMode::Bootstrap)])
+                .unwrap();
         assert!(plan.on_demand_loadout().unwrap().is_none());
     }
 
@@ -271,7 +271,7 @@ mod tests {
         let bindings = (0..=MAX_MEMORY_LOADOUT_BINDINGS)
             .map(|index| {
                 binding(
-                    MemorySpace::agent(format!("agent-{index}" )).unwrap(),
+                    MemorySpace::agent(format!("agent-{index}")).unwrap(),
                     0,
                     MemoryUsageMode::OnDemand,
                 )

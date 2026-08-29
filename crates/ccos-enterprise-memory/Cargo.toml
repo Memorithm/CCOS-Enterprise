@@ -1,5 +1,5 @@
 [package]
-name = "ccos-enterprise-octasoma"
+name = "ccos-enterprise-memory"
 version = "0.1.0-pre"
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +7,4 @@ license.workspace = true
 publish = false
 
 [dependencies]
-ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
-octasoma.workspace = true

@@ -1,10 +1,11 @@
 //! Governed OctaSoma adapter for CCOS Enterprise.
 //!
 //! This crate is the only supported direct Enterprise dependency on OctaSoma.
-//! It keeps semantic-memory indexes physically isolated by tenant and memory
-//! space, enforces a hard per-tenant item quota before mutation, and returns
-//! owned recall observations. Similarity is evidence for higher layers; it is
-//! never authorization or causal truth.
+//! CCOS-owned memory domains and provider contracts live in
+//! `ccos-enterprise-memory`; this crate only implements those contracts with
+//! OctaSoma. Semantic-memory indexes remain physically isolated by tenant and
+//! memory space, and similarity remains evidence rather than authorization or
+//! causal truth.
 //!
 //! The legacy tenant-wide API remains available and maps exclusively to the
 //! [`MemorySpace::Tenant`] partition. Agent/team/project memories are only
@@ -13,97 +14,18 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::collections::BTreeMap;
 
+pub use ccos_enterprise_memory::{
+    LoadoutMemoryQuery, MemoryError as EnterpriseMemoryError, MemoryLoadout, MemorySpace,
+    ScopedMemoryObservation, ScopedMemoryWrite, SemanticMemoryProvider,
+};
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 use octasoma::HybridMemory;
-
-/// A physically isolated semantic-memory namespace inside one tenant.
-///
-/// Spaces are deliberately ordered so loadout recall can use deterministic
-/// tie-breaking without depending on insertion order.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MemorySpace {
-    /// Knowledge visible through the legacy tenant-wide API.
-    Tenant,
-    /// Project-specific shared memory.
-    Project(String),
-    /// Team-specific shared memory.
-    Team(String),
-    /// Private memory for one agent identity.
-    Agent(String),
-}
-
-impl MemorySpace {
-    pub fn project(id: impl Into<String>) -> Result<Self, EnterpriseMemoryError> {
-        validated_space(Self::Project(id.into()))
-    }
-
-    pub fn team(id: impl Into<String>) -> Result<Self, EnterpriseMemoryError> {
-        validated_space(Self::Team(id.into()))
-    }
-
-    pub fn agent(id: impl Into<String>) -> Result<Self, EnterpriseMemoryError> {
-        validated_space(Self::Agent(id.into()))
-    }
-}
-
-/// Explicit set of memory spaces that may participate in one recall.
-///
-/// Construction validates every scoped identifier and rejects an empty set.
-/// The set is private so callers cannot create an invalid loadout after
-/// validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryLoadout {
-    spaces: BTreeSet<MemorySpace>,
-}
-
-impl MemoryLoadout {
-    pub fn new(
-        spaces: impl IntoIterator<Item = MemorySpace>,
-    ) -> Result<Self, EnterpriseMemoryError> {
-        let spaces: BTreeSet<_> = spaces.into_iter().collect();
-        if spaces.is_empty() {
-            return Err(EnterpriseMemoryError::EmptyMemoryLoadout);
-        }
-        for space in &spaces {
-            validate_space(space)?;
-        }
-        Ok(Self { spaces })
-    }
-
-    /// A loadout containing only the tenant-wide partition.
-    pub fn tenant_only() -> Self {
-        Self {
-            spaces: BTreeSet::from([MemorySpace::Tenant]),
-        }
-    }
-
-    pub fn spaces(&self) -> impl Iterator<Item = &MemorySpace> {
-        self.spaces.iter()
-    }
-
-    pub fn len(&self) -> usize {
-        self.spaces.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.spaces.is_empty()
-    }
-}
 
 /// A tenant-scoped write into the legacy tenant-wide semantic-memory space.
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryWrite<'a> {
-    pub embedding: &'a [f32],
-    pub payload: &'a [u8],
-}
-
-/// A tenant-scoped write into one explicit semantic-memory space.
-#[derive(Debug, Clone, Copy)]
-pub struct ScopedMemoryWrite<'a> {
-    pub space: &'a MemorySpace,
     pub embedding: &'a [f32],
     pub payload: &'a [u8],
 }
@@ -116,15 +38,6 @@ pub struct MemoryQuery<'a> {
     pub shortlist: usize,
 }
 
-/// A precision recall request over an explicit memory loadout.
-#[derive(Debug, Clone, Copy)]
-pub struct LoadoutMemoryQuery<'a> {
-    pub embedding: &'a [f32],
-    pub k: usize,
-    pub shortlist: usize,
-    pub loadout: &'a MemoryLoadout,
-}
-
 /// An owned semantic-memory observation from the tenant-wide legacy API.
 ///
 /// The payload is copied out of the tenant-local OctaSoma instance so no caller
@@ -135,59 +48,6 @@ pub struct MemoryObservation {
     pub payload: Vec<u8>,
     pub similarity: f32,
 }
-
-/// An owned observation returned by a loadout recall, including the exact space
-/// that produced it for downstream policy/audit decisions.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ScopedMemoryObservation {
-    pub space: MemorySpace,
-    pub payload: Vec<u8>,
-    pub similarity: f32,
-}
-
-/// A fail-closed rejection from the Enterprise memory boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnterpriseMemoryError {
-    InvalidConfiguration(&'static str),
-    InvalidTenant,
-    InvalidMemorySpace { kind: &'static str },
-    EmptyMemoryLoadout,
-    DimensionMismatch { expected: usize, found: usize },
-    NonFiniteEmbedding,
-    TenantCapacityExceeded { limit: usize },
-    InsertRejected,
-}
-
-impl fmt::Display for EnterpriseMemoryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidConfiguration(detail) => {
-                write!(f, "invalid memory configuration: {detail}")
-            }
-            Self::InvalidTenant => write!(f, "tenant id must not be empty"),
-            Self::InvalidMemorySpace { kind } => {
-                write!(f, "{kind} memory-space id must not be empty")
-            }
-            Self::EmptyMemoryLoadout => write!(f, "memory loadout must contain at least one space"),
-            Self::DimensionMismatch { expected, found } => {
-                write!(
-                    f,
-                    "embedding dimension mismatch: expected {expected}, found {found}"
-                )
-            }
-            Self::NonFiniteEmbedding => write!(f, "embedding contains a non-finite value"),
-            Self::TenantCapacityExceeded { limit } => {
-                write!(
-                    f,
-                    "tenant semantic-memory capacity exceeded (limit {limit})"
-                )
-            }
-            Self::InsertRejected => write!(f, "OctaSoma rejected the validated insertion"),
-        }
-    }
-}
-
-impl std::error::Error for EnterpriseMemoryError {}
 
 #[derive(Default)]
 struct TenantMemory {
@@ -270,7 +130,7 @@ impl EnterpriseOctaSoma {
         payload: &[u8],
     ) -> Result<(), EnterpriseMemoryError> {
         validate_tenant(&tenant)?;
-        validate_space(space)?;
+        space.validate()?;
         validate_embedding(embedding, self.dim)?;
 
         if self
@@ -347,7 +207,7 @@ impl EnterpriseOctaSoma {
             return Err(EnterpriseMemoryError::EmptyMemoryLoadout);
         }
         for space in inner.loadout.spaces() {
-            validate_space(space)?;
+            space.validate()?;
         }
         if inner.k == 0 {
             return Ok(Vec::new());
@@ -408,22 +268,19 @@ impl EnterpriseOctaSoma {
     }
 }
 
-fn validated_space(space: MemorySpace) -> Result<MemorySpace, EnterpriseMemoryError> {
-    validate_space(&space)?;
-    Ok(space)
-}
+impl SemanticMemoryProvider for EnterpriseOctaSoma {
+    fn insert_scoped(
+        &mut self,
+        scoped: TenantScope<ScopedMemoryWrite<'_>>,
+    ) -> Result<(), EnterpriseMemoryError> {
+        EnterpriseOctaSoma::insert_scoped(self, scoped)
+    }
 
-fn validate_space(space: &MemorySpace) -> Result<(), EnterpriseMemoryError> {
-    let (kind, id) = match space {
-        MemorySpace::Tenant => return Ok(()),
-        MemorySpace::Project(id) => ("project", id),
-        MemorySpace::Team(id) => ("team", id),
-        MemorySpace::Agent(id) => ("agent", id),
-    };
-    if id.trim().is_empty() {
-        Err(EnterpriseMemoryError::InvalidMemorySpace { kind })
-    } else {
-        Ok(())
+    fn recall_loadout(
+        &self,
+        scoped: TenantScope<LoadoutMemoryQuery<'_>>,
+    ) -> Result<Vec<ScopedMemoryObservation>, EnterpriseMemoryError> {
+        EnterpriseOctaSoma::recall_loadout(self, scoped)
     }
 }
 
@@ -450,6 +307,8 @@ fn validate_embedding(embedding: &[f32], dim: usize) -> Result<(), EnterpriseMem
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn write<'a>(embedding: &'a [f32], payload: &'a [u8]) -> MemoryWrite<'a> {
@@ -689,6 +548,37 @@ mod tests {
             Err(EnterpriseMemoryError::InvalidMemorySpace { kind: "team" })
         );
         assert_eq!(memory.tenant_count(), 0);
+    }
+
+    #[test]
+    fn provider_trait_preserves_explicit_loadout_scope() {
+        let mut memory = EnterpriseOctaSoma::new(4, 64, 8, 17).unwrap();
+        let tenant = TenantId("acme".into());
+        let agent = MemorySpace::agent("agent-a").unwrap();
+        let excluded = MemorySpace::agent("agent-b").unwrap();
+        let v = [1.0, 0.0, 0.0, 0.0];
+
+        SemanticMemoryProvider::insert_scoped(
+            &mut memory,
+            TenantScope::new(tenant.clone(), scoped_write(&agent, &v, b"visible")),
+        )
+        .unwrap();
+        SemanticMemoryProvider::insert_scoped(
+            &mut memory,
+            TenantScope::new(tenant.clone(), scoped_write(&excluded, &v, b"excluded")),
+        )
+        .unwrap();
+
+        let loadout = MemoryLoadout::new([agent.clone()]).unwrap();
+        let recalled = SemanticMemoryProvider::recall_loadout(
+            &memory,
+            TenantScope::new(tenant, loadout_query(&v, &loadout, 4)),
+        )
+        .unwrap();
+
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].space, agent);
+        assert_eq!(recalled[0].payload, b"visible");
     }
 
     #[test]

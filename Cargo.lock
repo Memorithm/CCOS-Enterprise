@@ -348,6 +348,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-memory"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-tenancy",
+]
+
+[[package]]
 name = "ccos-enterprise-normalize"
 version = "0.1.0-pre"
 dependencies = [
@@ -369,6 +376,7 @@ dependencies = [
 name = "ccos-enterprise-octasoma"
 version = "0.1.0-pre"
 dependencies = [
+ "ccos-enterprise-memory",
  "ccos-enterprise-tenancy",
  "octasoma 0.4.0 (git+https://github.com/Memorithm/octasoma?rev=145761aeb52ef8ded85dcf2b8c97690005284926)",
 ]

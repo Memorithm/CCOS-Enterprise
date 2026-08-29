@@ -9,6 +9,7 @@ members = [
     "crates/ccos-enterprise-auth",
     "crates/ccos-enterprise-rbac",
     "crates/ccos-enterprise-tenancy",
+    "crates/ccos-enterprise-memory",
     "crates/ccos-enterprise-knowledge-model",
     "crates/ccos-enterprise-knowledge",
     "crates/ccos-enterprise-knowledge-store",

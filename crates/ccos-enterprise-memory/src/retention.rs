@@ -79,7 +79,9 @@ pub fn apply_memory_retention(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MemoryAssetDescriptor, MemoryEvidenceRef, MemoryLineage, MemorySpace, MemoryStratum};
+    use crate::{
+        MemoryAssetDescriptor, MemoryEvidenceRef, MemoryLineage, MemorySpace, MemoryStratum,
+    };
 
     fn id(value: &str) -> MemoryAssetId {
         MemoryAssetId::new(value).unwrap()
@@ -117,8 +119,13 @@ mod tests {
     fn retain_policy_never_auto_invalidates() {
         let mut graph = graph();
         assert_eq!(
-            apply_memory_retention(&mut graph, &id("root"), MemoryRetentionPolicy::Retain, u64::MAX)
-                .unwrap(),
+            apply_memory_retention(
+                &mut graph,
+                &id("root"),
+                MemoryRetentionPolicy::Retain,
+                u64::MAX
+            )
+            .unwrap(),
             MemoryRetentionOutcome::Retained
         );
         assert_eq!(graph.state(&id("root")), Some(MemoryAssetState::Active));
@@ -157,7 +164,10 @@ mod tests {
             panic!("expected expiration");
         };
         assert_eq!(report.invalidated, id("root"));
-        assert_eq!(report.stale_descendants.into_iter().collect::<Vec<_>>(), vec![id("child")]);
+        assert_eq!(
+            report.stale_descendants.into_iter().collect::<Vec<_>>(),
+            vec![id("child")]
+        );
     }
 
     #[test]
@@ -180,12 +190,7 @@ mod tests {
     fn unknown_asset_fails_closed() {
         let mut graph = MemoryLineageGraph::new();
         assert_eq!(
-            apply_memory_retention(
-                &mut graph,
-                &id("missing"),
-                MemoryRetentionPolicy::Retain,
-                0,
-            ),
+            apply_memory_retention(&mut graph, &id("missing"), MemoryRetentionPolicy::Retain, 0,),
             Err(MemoryRetentionError::UnknownAsset(id("missing")))
         );
     }

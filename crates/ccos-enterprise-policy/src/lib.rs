@@ -7,6 +7,13 @@
 
 use serde::{Deserialize, Serialize};
 
+mod research;
+
+pub use research::{
+    BoundedHistoryFallback, ResearchActivationPolicy, ResearchApprovalRequirement,
+    ResearchPolicyError, ResearchResourceCaps, ResearchResourceDecision, ResearchRollbackRule,
+};
+
 /// Every policy evaluation yields an explicit, loggable decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolicyDecision {

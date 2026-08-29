@@ -21,7 +21,7 @@ pub use ccos_enterprise_memory::{
     ScopedMemoryObservation, ScopedMemoryWrite, SemanticMemoryProvider,
 };
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
-use octasoma::HybridMemory;
+use octasoma::{HybridMemory, HybridMemoryFactory};
 
 /// A tenant-scoped write into the legacy tenant-wide semantic-memory space.
 #[derive(Debug, Clone, Copy)]
@@ -63,8 +63,7 @@ struct TenantMemory {
 /// write. The configured quota is enforced across all spaces owned by a tenant.
 pub struct EnterpriseOctaSoma {
     dim: usize,
-    seed: u64,
-    bits: usize,
+    factory: HybridMemoryFactory,
     per_tenant_capacity: usize,
     tenants: BTreeMap<TenantId, TenantMemory>,
 }
@@ -94,8 +93,7 @@ impl EnterpriseOctaSoma {
         }
         Ok(Self {
             dim,
-            seed,
-            bits,
+            factory: HybridMemoryFactory::new(dim, seed, bits),
             per_tenant_capacity,
             tenants: BTreeMap::new(),
         })
@@ -143,14 +141,12 @@ impl EnterpriseOctaSoma {
             });
         }
 
-        let dim = self.dim;
-        let seed = self.seed;
-        let bits = self.bits;
+        let factory = self.factory.clone();
         let tenant_memory = self.tenants.entry(tenant).or_default();
         let memory = tenant_memory
             .spaces
             .entry(space.clone())
-            .or_insert_with(|| HybridMemory::new(dim, seed, bits));
+            .or_insert_with(|| factory.create());
         if !memory.insert(embedding, payload) {
             return Err(EnterpriseMemoryError::InsertRejected);
         }
@@ -265,6 +261,12 @@ impl EnterpriseOctaSoma {
     /// Configured hard item limit for each tenant across all memory spaces.
     pub fn per_tenant_capacity(&self) -> usize {
         self.per_tenant_capacity
+    }
+
+    /// Bytes occupied by the one immutable SimHash projector shared by every
+    /// tenant/space index created by this adapter.
+    pub fn shared_projector_bytes(&self) -> usize {
+        self.factory.projector_bytes()
     }
 }
 

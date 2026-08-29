@@ -1,0 +1,65 @@
+name: governed OctaSoma provider validation
+
+on:
+  push:
+    branches: [ feat/octasoma-governed-provider ]
+
+permissions:
+  contents: write
+
+jobs:
+  wire:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/octasoma-governed-provider
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - name: Wire adapter
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/ccos-enterprise-octasoma/src/lib.rs')
+          text = p.read_text()
+          text = text.replace(
+              'use octasoma::{HybridMemory, HybridMemoryFactory};\n',
+              'use octasoma::{HybridMemory, HybridMemoryFactory};\n\nmod governed;\n',
+              1,
+          )
+          text = text.replace(
+              '    tenants: BTreeMap<TenantId, TenantMemory>,\n}',
+              '    tenants: BTreeMap<TenantId, TenantMemory>,\n    governed: BTreeMap<TenantId, governed::GovernedTenantMemory>,\n}',
+              1,
+          )
+          text = text.replace(
+              '            tenants: BTreeMap::new(),\n        })',
+              '            tenants: BTreeMap::new(),\n            governed: BTreeMap::new(),\n        })',
+              1,
+          )
+          text = text.replace(
+              '    pub fn tenant_len(&self, tenant: &TenantId) -> usize {\n        self.tenants.get(tenant).map_or(0, |memory| memory.len)\n    }',
+              '    pub fn tenant_len(&self, tenant: &TenantId) -> usize {\n        self.tenants.get(tenant).map_or(0, |memory| memory.len)\n            + self.governed.get(tenant).map_or(0, |memory| memory.len)\n    }',
+              1,
+          )
+          p.write_text(text)
+          PY
+          cargo fmt --all
+      - name: Validate targeted crates
+        run: |
+          cargo check -p ccos-enterprise-octasoma
+          cargo clippy -p ccos-enterprise-octasoma -- -D warnings
+          cargo test -p ccos-enterprise-octasoma
+      - name: Commit product
+        shell: bash
+        run: |
+          git config user.name MEMOPERF
+          git config user.email memoperf@users.noreply.github.com
+          git add crates/ccos-enterprise-octasoma/src/lib.rs crates/ccos-enterprise-octasoma/src/governed.rs
+          git commit -m 'feat(octasoma): preserve governed memory identity'
+          git fetch origin feat/octasoma-governed-provider
+          git rebase origin/feat/octasoma-governed-provider
+          git push origin HEAD:feat/octasoma-governed-provider

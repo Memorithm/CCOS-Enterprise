@@ -7,5 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
+ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
 octasoma.workspace = true

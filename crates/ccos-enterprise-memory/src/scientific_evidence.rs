@@ -220,9 +220,15 @@ pub enum ScientificEvidenceError {
 impl fmt::Display for ScientificEvidenceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EmptyStatement => formatter.write_str("scientific evidence statement must not be empty"),
-            Self::EmptySemanticIdentity => formatter.write_str("scientific semantic identity must not be empty"),
-            Self::EmptyApproximationClass => formatter.write_str("scientific approximation class must not be empty"),
+            Self::EmptyStatement => {
+                formatter.write_str("scientific evidence statement must not be empty")
+            }
+            Self::EmptySemanticIdentity => {
+                formatter.write_str("scientific semantic identity must not be empty")
+            }
+            Self::EmptyApproximationClass => {
+                formatter.write_str("scientific approximation class must not be empty")
+            }
         }
     }
 }
@@ -295,13 +301,19 @@ mod tests {
         let rejected = observation(ScientificEvidenceDisposition::Rejects);
         let inconclusive = observation(ScientificEvidenceDisposition::Inconclusive);
 
-        assert_eq!(rejected.disposition(), ScientificEvidenceDisposition::Rejects);
+        assert_eq!(
+            rejected.disposition(),
+            ScientificEvidenceDisposition::Rejects
+        );
         assert_eq!(
             inconclusive.disposition(),
             ScientificEvidenceDisposition::Inconclusive
         );
         assert_ne!(rejected.canonical_record(), inconclusive.canonical_record());
-        assert_ne!(rejected.stable_fingerprint(), inconclusive.stable_fingerprint());
+        assert_ne!(
+            rejected.stable_fingerprint(),
+            inconclusive.stable_fingerprint()
+        );
     }
 
     #[test]
@@ -316,7 +328,12 @@ mod tests {
         assert_eq!(first.canonical_record(), second.canonical_record());
         assert_eq!(first.stable_fingerprint(), second.stable_fingerprint());
         let record = first.canonical_record();
-        for forbidden in ["capability_token", "resource_lease", "resource_budget", "approval_token"] {
+        for forbidden in [
+            "capability_token",
+            "resource_lease",
+            "resource_budget",
+            "approval_token",
+        ] {
             assert!(!record.contains(forbidden));
         }
     }

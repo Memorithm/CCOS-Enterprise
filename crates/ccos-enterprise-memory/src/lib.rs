@@ -47,6 +47,12 @@ pub use recall_budget::{
     MAX_MEMORY_RECALL_ITEMS, MAX_MEMORY_RECALL_PAYLOAD_BYTES, MAX_MEMORY_RECALL_SHORTLIST,
 };
 
+mod scientific_evidence;
+pub use scientific_evidence::{
+    ScientificEvidenceDisposition, ScientificEvidenceError, ScientificEvidenceKind,
+    ScientificEvidenceObservation, SCIENTIFIC_EVIDENCE_OBSERVATION_VERSION,
+};
+
 mod retention;
 pub use retention::{
     apply_memory_retention, MemoryRetentionError, MemoryRetentionOutcome, MemoryRetentionPolicy,

@@ -542,10 +542,7 @@ mod tests {
 
         let loadout = MemoryLoadout::new([agent_a.clone()]).unwrap();
         let recalled = memory
-            .recall_loadout(TenantScope::new(
-                tenant,
-                loadout_query(&v, &loadout, 4),
-            ))
+            .recall_loadout(TenantScope::new(tenant, loadout_query(&v, &loadout, 4)))
             .unwrap();
 
         assert_eq!(recalled.len(), 1);
@@ -577,18 +574,20 @@ mod tests {
 
         let loadout = MemoryLoadout::new([project.clone(), team.clone()]).unwrap();
         let recalled = memory
-            .recall_loadout(TenantScope::new(
-                tenant,
-                loadout_query(&v, &loadout, 8),
-            ))
+            .recall_loadout(TenantScope::new(tenant, loadout_query(&v, &loadout, 8)))
             .unwrap();
         let payloads: BTreeSet<_> = recalled
             .iter()
             .map(|observation| observation.payload.as_slice())
             .collect();
 
-        assert_eq!(payloads, BTreeSet::from([b"project".as_slice(), b"team".as_slice()]));
-        assert!(recalled.iter().all(|observation| observation.space != excluded));
+        assert_eq!(
+            payloads,
+            BTreeSet::from([b"project".as_slice(), b"team".as_slice()])
+        );
+        assert!(recalled
+            .iter()
+            .all(|observation| observation.space != excluded));
     }
 
     #[test]
@@ -610,16 +609,10 @@ mod tests {
             .is_empty());
 
         memory
-            .insert(TenantScope::new(
-                tenant.clone(),
-                write(&v, b"tenant-wide"),
-            ))
+            .insert(TenantScope::new(tenant.clone(), write(&v, b"tenant-wide")))
             .unwrap();
         assert_eq!(
-            memory
-                .recall(TenantScope::new(tenant, query(&v)))
-                .unwrap()[0]
-                .payload,
+            memory.recall(TenantScope::new(tenant, query(&v))).unwrap()[0].payload,
             b"tenant-wide"
         );
     }

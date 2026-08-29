@@ -47,7 +47,7 @@ jobs:
           path.write_text(text)
           PY
           cargo fmt --all
-          cargo update -p octasoma --precise 2e2e0f1ed88d81675f301819529aeb3aa6053c72
+          cargo update -p 'git+https://github.com/Memorithm/octasoma?rev=145761aeb52ef8ded85dcf2b8c97690005284926#0.4.0' --precise 2e2e0f1ed88d81675f301819529aeb3aa6053c72
       - name: Validate focused integration
         run: |
           cargo metadata --locked --format-version 1 >/dev/null

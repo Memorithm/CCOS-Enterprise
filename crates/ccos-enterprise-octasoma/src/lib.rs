@@ -565,10 +565,7 @@ mod tests {
         .unwrap();
         SemanticMemoryProvider::insert_scoped(
             &mut memory,
-            TenantScope::new(
-                tenant.clone(),
-                scoped_write(&excluded, &v, b"excluded"),
-            ),
+            TenantScope::new(tenant.clone(), scoped_write(&excluded, &v, b"excluded")),
         )
         .unwrap();
 

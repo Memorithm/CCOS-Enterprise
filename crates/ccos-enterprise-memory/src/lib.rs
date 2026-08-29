@@ -223,17 +223,16 @@ mod tests {
     fn loadout_deduplicates_and_orders_spaces_deterministically() {
         let project = MemorySpace::project("ccos").unwrap();
         let team = MemorySpace::team("runtime").unwrap();
-        let loadout = MemoryLoadout::new([
-            team.clone(),
-            project.clone(),
-            MemorySpace::Tenant,
-            team,
-        ])
-        .unwrap();
+        let loadout =
+            MemoryLoadout::new([team.clone(), project.clone(), MemorySpace::Tenant, team]).unwrap();
 
         assert_eq!(
             loadout.spaces().cloned().collect::<Vec<_>>(),
-            vec![MemorySpace::Tenant, project, MemorySpace::team("runtime").unwrap()]
+            vec![
+                MemorySpace::Tenant,
+                project,
+                MemorySpace::team("runtime").unwrap()
+            ]
         );
     }
 }

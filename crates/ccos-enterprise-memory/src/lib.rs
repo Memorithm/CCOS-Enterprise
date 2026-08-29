@@ -33,6 +33,9 @@ pub use loadout_policy::{
     MAX_MEMORY_LOADOUT_BINDINGS,
 };
 
+mod promotion;
+pub use promotion::{evaluate_memory_promotion, MemoryPromotionCandidate, MemoryPromotionError};
+
 mod recall_budget;
 pub use recall_budget::{
     BudgetedMemoryRecall, MemoryRecallBudget, MemoryRecallBudgetError, SemanticMemoryProviderExt,

@@ -25,10 +25,9 @@ jobs:
           from pathlib import Path
           module = Path('crates/ccos-enterprise-memory/src/recall_budget.rs')
           text = module.read_text()
-          text = text.replace('use ccos_enterprise_tenancy::TenantScope;', 'use ccos_enterprise_tenancy::{TenantId, TenantScope};')
           text = text.replace('let TenantScope { tenant, value } = scoped;', 'let TenantScope { tenant, inner } = scoped;')
           text = text.replace('value.', 'inner.')
-          text = text.replace('TenantScope::new("acme".into(), value)', 'TenantScope::new(TenantId("acme".into()), value)')
+          text = text.replace('TenantScope::new("acme".into(), value)', 'TenantScope::new(ccos_enterprise_tenancy::TenantId("acme".into()), value)')
           module.write_text(text)
 
           lib = Path('crates/ccos-enterprise-memory/src/lib.rs')

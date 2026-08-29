@@ -1,0 +1,45 @@
+name: Research activation policy branch
+
+on:
+  push:
+    branches:
+      - feat/research-activation-policy
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.repository == 'Memorithm/CCOS-Enterprise' && github.actor == 'CHECKUPAUTO'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: feat/research-activation-policy
+          fetch-depth: 0
+      - name: Install pinned toolchains
+        run: |
+          rustup toolchain install nightly-2026-07-02 --profile minimal --component rustfmt --component clippy
+          rustup toolchain install 1.89.0 --profile minimal
+      - name: Format and validate policy
+        run: |
+          cargo +nightly-2026-07-02 fmt --all
+          cargo +nightly-2026-07-02 fmt --all -- --check
+          cargo +nightly-2026-07-02 clippy -p ccos-enterprise-policy --all-targets --locked -- -D warnings
+          cargo +1.89.0 test -p ccos-enterprise-policy --locked
+          cargo +1.89.0 doc -p ccos-enterprise-policy --no-deps --locked
+      - name: Commit formatting only
+        shell: bash
+        run: |
+          set -euo pipefail
+          allowed='^( M crates/ccos-enterprise-policy/src/lib.rs| M crates/ccos-enterprise-policy/src/research.rs)$'
+          unexpected="$(git status --porcelain --untracked-files=no | grep -Ev "$allowed" || true)"
+          test -z "$unexpected" || { echo "$unexpected"; exit 1; }
+          if git diff --quiet -- crates/ccos-enterprise-policy/src/lib.rs crates/ccos-enterprise-policy/src/research.rs; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/ccos-enterprise-policy/src/lib.rs crates/ccos-enterprise-policy/src/research.rs
+          git commit -m "style(policy): format research activation contract"
+          git push origin HEAD:feat/research-activation-policy

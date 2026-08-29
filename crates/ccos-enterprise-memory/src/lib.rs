@@ -27,6 +27,12 @@ pub use loadout_policy::{
     MAX_MEMORY_LOADOUT_BINDINGS,
 };
 
+mod recall_budget;
+pub use recall_budget::{
+    BudgetedMemoryRecall, MemoryRecallBudget, MemoryRecallBudgetError, SemanticMemoryProviderExt,
+    MAX_MEMORY_RECALL_ITEMS, MAX_MEMORY_RECALL_PAYLOAD_BYTES, MAX_MEMORY_RECALL_SHORTLIST,
+};
+
 /// A semantic-memory namespace inside one tenant.
 ///
 /// The variants model CCOS collaboration boundaries rather than backend

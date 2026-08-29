@@ -31,11 +31,7 @@ impl MemoryRecallBudget {
         max_payload_bytes: usize,
     ) -> Result<Self, MemoryRecallBudgetError> {
         validate_limit("max_items", max_items, MAX_MEMORY_RECALL_ITEMS)?;
-        validate_limit(
-            "max_shortlist",
-            max_shortlist,
-            MAX_MEMORY_RECALL_SHORTLIST,
-        )?;
+        validate_limit("max_shortlist", max_shortlist, MAX_MEMORY_RECALL_SHORTLIST)?;
         validate_limit(
             "max_payload_bytes",
             max_payload_bytes,
@@ -126,19 +122,19 @@ pub trait SemanticMemoryProviderExt: SemanticMemoryProvider {
         &self,
         scoped: TenantScope<BudgetedMemoryRecall<'_>>,
     ) -> Result<Vec<ScopedMemoryObservation>, MemoryRecallBudgetError> {
-        let TenantScope { tenant, value } = scoped;
-        let allowed_spaces: BTreeSet<_> = value.loadout.spaces().cloned().collect();
+        let TenantScope { tenant, inner } = scoped;
+        let allowed_spaces: BTreeSet<_> = inner.loadout.spaces().cloned().collect();
         let query = LoadoutMemoryQuery {
-            embedding: value.embedding,
-            k: value.budget.max_items,
-            shortlist: value.budget.max_shortlist,
-            loadout: value.loadout,
+            embedding: inner.embedding,
+            k: inner.budget.max_items,
+            shortlist: inner.budget.max_shortlist,
+            loadout: inner.loadout,
         };
         let observations = self
             .recall_loadout(TenantScope::new(tenant, query))
             .map_err(MemoryRecallBudgetError::Provider)?;
 
-        let mut accepted = Vec::with_capacity(observations.len().min(value.budget.max_items));
+        let mut accepted = Vec::with_capacity(observations.len().min(inner.budget.max_items));
         let mut payload_bytes = 0usize;
         for observation in observations {
             if !allowed_spaces.contains(&observation.space) {
@@ -149,11 +145,11 @@ pub trait SemanticMemoryProviderExt: SemanticMemoryProvider {
             if !observation.similarity.is_finite() {
                 return Err(MemoryRecallBudgetError::ProviderReturnedNonFiniteSimilarity);
             }
-            if accepted.len() >= value.budget.max_items {
+            if accepted.len() >= inner.budget.max_items {
                 break;
             }
             let next_bytes = payload_bytes.saturating_add(observation.payload.len());
-            if next_bytes > value.budget.max_payload_bytes {
+            if next_bytes > inner.budget.max_payload_bytes {
                 continue;
             }
             payload_bytes = next_bytes;
@@ -179,8 +175,8 @@ fn validate_limit(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{MemorySpace, ScopedMemoryWrite};
+    use super::*;
 
     struct Provider {
         observations: Vec<ScopedMemoryObservation>,
@@ -198,8 +194,8 @@ mod tests {
             &self,
             scoped: TenantScope<LoadoutMemoryQuery<'_>>,
         ) -> Result<Vec<ScopedMemoryObservation>, MemoryError> {
-            assert_eq!(scoped.value.k, 2);
-            assert_eq!(scoped.value.shortlist, 4);
+            assert_eq!(scoped.inner.k, 2);
+            assert_eq!(scoped.inner.shortlist, 4);
             Ok(self.observations.clone())
         }
     }
@@ -209,7 +205,7 @@ mod tests {
     }
 
     fn tenant_scope<T>(value: T) -> TenantScope<T> {
-        TenantScope::new("acme".into(), value)
+        TenantScope::new(ccos_enterprise_tenancy::TenantId("acme".into()), value)
     }
 
     #[test]
@@ -268,7 +264,10 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].payload, vec![7, 8, 9]);
         assert_eq!(result[1].payload, vec![10, 11]);
-        assert_eq!(result.iter().map(|item| item.payload.len()).sum::<usize>(), 5);
+        assert_eq!(
+            result.iter().map(|item| item.payload.len()).sum::<usize>(),
+            5
+        );
     }
 
     #[test]

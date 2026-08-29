@@ -162,11 +162,7 @@ pub fn assemble_bootstrap_context(
     })
 }
 
-fn validate_limit(
-    field: &'static str,
-    found: usize,
-    max: usize,
-) -> Result<(), MemoryContextError> {
+fn validate_limit(field: &'static str, found: usize, max: usize) -> Result<(), MemoryContextError> {
     if found == 0 || found > max {
         Err(MemoryContextError::LimitOutOfRange { field, found, max })
     } else {
@@ -268,12 +264,8 @@ mod tests {
     #[test]
     fn byte_budget_skips_whole_chunks_and_can_admit_later_smaller_chunks() {
         let assembly = assemble_bootstrap_context(
-            &MemoryLoadoutPlan::new([binding(
-                MemorySpace::Tenant,
-                1,
-                MemoryUsageMode::Bootstrap,
-            )])
-            .unwrap(),
+            &MemoryLoadoutPlan::new([binding(MemorySpace::Tenant, 1, MemoryUsageMode::Bootstrap)])
+                .unwrap(),
             [
                 observation(MemorySpace::Tenant, b"123456", 0.9),
                 observation(MemorySpace::Tenant, b"abc", 0.8),

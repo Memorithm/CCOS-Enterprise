@@ -16,6 +16,12 @@ use std::fmt;
 
 use ccos_enterprise_tenancy::TenantScope;
 
+mod context_budget;
+pub use context_budget::{
+    assemble_bootstrap_context, MemoryContextAssembly, MemoryContextBudget, MemoryContextError,
+    MAX_MEMORY_CONTEXT_ITEMS, MAX_MEMORY_CONTEXT_PAYLOAD_BYTES,
+};
+
 mod lineage_graph;
 pub use lineage_graph::{
     MemoryAssetState, MemoryGraphError, MemoryInvalidationReport, MemoryLineageGraph,

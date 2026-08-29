@@ -102,7 +102,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
+checksum = "37b2a672a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
@@ -325,6 +325,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-memory"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-enterprise-tenancy",
+]
+
+[[package]]
 name = "ccos-enterprise-mcp"
 version = "0.1.0-pre"
 dependencies = [
@@ -369,6 +376,7 @@ dependencies = [
 name = "ccos-enterprise-octasoma"
 version = "0.1.0-pre"
 dependencies = [
+ "ccos-enterprise-memory",
  "ccos-enterprise-tenancy",
  "octasoma 0.4.0 (git+https://github.com/Memorithm/octasoma?rev=145761aeb52ef8ded85dcf2b8c97690005284926)",
 ]
@@ -929,7 +937,7 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "cb4cb245038516f5f85277875cdaa8f671f8d9708acfd5fe0a8c1455d87220"
 dependencies = [
  "percent-encoding",
 ]
@@ -987,7 +995,7 @@ dependencies = [
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9b"
 dependencies = [
  "typenum",
  "version_check",
@@ -1573,7 +1581,7 @@ dependencies = [
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+checksum = "93857453250e3077bdc0bb98b6a65ea6621a19ff91a41a8b57ed50bc2de59c427"
 dependencies = [
  "lock_api",
  "parking_lot_core",

@@ -100,9 +100,7 @@ pub fn assemble_governed_bootstrap_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        MemoryAssetId, MemoryLoadoutBinding, MemorySpace, MemoryUsageMode,
-    };
+    use crate::{MemoryAssetId, MemoryLoadoutBinding, MemorySpace, MemoryUsageMode};
 
     fn binding(space: MemorySpace, priority: u16, usage: MemoryUsageMode) -> MemoryLoadoutBinding {
         MemoryLoadoutBinding::new(space, priority, usage).unwrap()
@@ -147,12 +145,7 @@ mod tests {
     fn governed_context_preserves_asset_identity() {
         let assembly = assemble_governed_bootstrap_context(
             &plan(),
-            [observation(
-                "asset:1",
-                MemorySpace::Tenant,
-                b"payload",
-                0.9,
-            )],
+            [observation("asset:1", MemorySpace::Tenant, b"payload", 0.9)],
             MemoryContextBudget::new(4, 64).unwrap(),
         )
         .unwrap();
@@ -199,12 +192,9 @@ mod tests {
 
     #[test]
     fn byte_budget_skips_whole_payloads_and_preserves_ids() {
-        let plan = MemoryLoadoutPlan::new([binding(
-            MemorySpace::Tenant,
-            1,
-            MemoryUsageMode::Bootstrap,
-        )])
-        .unwrap();
+        let plan =
+            MemoryLoadoutPlan::new([binding(MemorySpace::Tenant, 1, MemoryUsageMode::Bootstrap)])
+                .unwrap();
         let assembly = assemble_governed_bootstrap_context(
             &plan,
             [

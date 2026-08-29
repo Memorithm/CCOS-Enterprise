@@ -49,7 +49,10 @@ impl MemoryTrustMetadata {
         }
 
         let mut verification_refs: Vec<_> = verification_refs.into_iter().collect();
-        if verification_refs.iter().any(|value| value.trim().is_empty()) {
+        if verification_refs
+            .iter()
+            .any(|value| value.trim().is_empty())
+        {
             return Err(MemoryTrustError::EmptyVerificationRef);
         }
         verification_refs.sort();
@@ -123,8 +126,7 @@ impl MemoryTrustMetadata {
     /// promotion workflow. Promotion itself still requires the downstream
     /// artifact/proof policy; this method never publishes or executes anything.
     pub const fn promotion_eligible(&self) -> bool {
-        matches!(self.state, MemoryValidationState::Verified)
-            && self.contradiction_count == 0
+        matches!(self.state, MemoryValidationState::Verified) && self.contradiction_count == 0
     }
 }
 

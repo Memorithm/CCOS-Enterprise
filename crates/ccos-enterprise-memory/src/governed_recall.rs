@@ -130,14 +130,8 @@ mod tests {
     }
 
     fn verified() -> MemoryTrustMetadata {
-        MemoryTrustMetadata::new(
-            MemoryValidationState::Verified,
-            1,
-            1,
-            0,
-            ["proof:1".into()],
-        )
-        .unwrap()
+        MemoryTrustMetadata::new(MemoryValidationState::Verified, 1, 1, 0, ["proof:1".into()])
+            .unwrap()
     }
 
     #[test]

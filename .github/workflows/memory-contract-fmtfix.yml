@@ -1,0 +1,29 @@
+name: memory contract format repair
+
+on:
+  push:
+    branches: [feat/memory-contract]
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/memory-contract
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all
+      - name: Commit formatting
+        run: |
+          git diff --exit-code && exit 0
+          git config user.name 'MEMOPERF'
+          git config user.email 'memoperf@users.noreply.github.com'
+          git add crates/ccos-enterprise-memory/src/lib.rs crates/ccos-enterprise-octasoma/src/lib.rs
+          git commit -m 'style(memory): apply rustfmt'
+          git push origin HEAD:feat/memory-contract

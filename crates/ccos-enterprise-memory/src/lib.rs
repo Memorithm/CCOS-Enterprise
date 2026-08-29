@@ -22,6 +22,11 @@ pub use context_budget::{
     MAX_MEMORY_CONTEXT_ITEMS, MAX_MEMORY_CONTEXT_PAYLOAD_BYTES,
 };
 
+mod governed_provider;
+pub use governed_provider::{
+    GovernedMemoryObservation, GovernedMemoryWrite, GovernedSemanticMemoryProvider,
+};
+
 mod lineage_graph;
 pub use lineage_graph::{
     MemoryAssetState, MemoryGraphError, MemoryInvalidationReport, MemoryLineageGraph,

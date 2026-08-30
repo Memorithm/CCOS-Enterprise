@@ -36,6 +36,7 @@ pub enum MemoryGraphError {
         parent_space: MemorySpace,
         child_space: MemorySpace,
     },
+    UnresolvedImportParents(BTreeSet<MemoryAssetId>),
 }
 
 impl fmt::Display for MemoryGraphError {
@@ -57,6 +58,11 @@ impl fmt::Display for MemoryGraphError {
                 f,
                 "memory derivation would cross spaces for parent {}: {parent_space:?} -> {child_space:?}",
                 parent.as_str()
+            ),
+            Self::UnresolvedImportParents(assets) => write!(
+                f,
+                "memory lineage import contains unresolved parent dependencies for {} asset(s)",
+                assets.len()
             ),
         }
     }
@@ -140,6 +146,69 @@ impl MemoryLineageGraph {
 
     pub fn is_empty(&self) -> bool {
         self.assets.is_empty()
+    }
+
+    /// Export every currently active descriptor in deterministic asset-id order.
+    ///
+    /// Invalidation propagates staleness transitively, therefore an active asset
+    /// cannot retain a stale or invalidated registered ancestor. The returned set
+    /// is consequently lineage-closed with respect to the active graph and is a
+    /// safe metadata basis for portable memory manifests.
+    pub fn active_descriptors(&self) -> Vec<MemoryAssetDescriptor> {
+        self.assets
+            .iter()
+            .filter_map(|(id, descriptor)| {
+                (self.state(id) == Some(MemoryAssetState::Active)).then(|| descriptor.clone())
+            })
+            .collect()
+    }
+
+    /// Rebuild an active lineage graph from descriptors supplied in any order.
+    ///
+    /// Import is fail-closed: duplicates are rejected, normal graph invariants
+    /// are re-applied through [`Self::register`], and a missing/cyclic parent set
+    /// is rejected if no additional descriptor can be resolved. No state is
+    /// silently restored as active from a stale or invalidated snapshot; callers
+    /// must export through [`Self::active_descriptors`] for this v1 path.
+    pub fn from_active_descriptors(
+        descriptors: impl IntoIterator<Item = MemoryAssetDescriptor>,
+    ) -> Result<Self, MemoryGraphError> {
+        let mut pending = BTreeMap::new();
+        for descriptor in descriptors {
+            let id = descriptor.id.clone();
+            if pending.insert(id.clone(), descriptor).is_some() {
+                return Err(MemoryGraphError::DuplicateAsset(id));
+            }
+        }
+
+        let mut graph = Self::new();
+        while !pending.is_empty() {
+            let ready: Vec<_> = pending
+                .iter()
+                .filter(|(_, descriptor)| {
+                    descriptor
+                        .lineage
+                        .parents()
+                        .all(|parent| graph.assets.contains_key(parent))
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+
+            if ready.is_empty() {
+                return Err(MemoryGraphError::UnresolvedImportParents(
+                    pending.keys().cloned().collect(),
+                ));
+            }
+
+            for id in ready {
+                let descriptor = pending
+                    .remove(&id)
+                    .expect("ready ids are selected from pending descriptors");
+                graph.register(descriptor)?;
+            }
+        }
+
+        Ok(graph)
     }
 
     /// Explicitly invalidate one asset and mark all of its derived descendants stale.
@@ -324,6 +393,96 @@ mod tests {
         assert_eq!(
             graph.state(&id("episode")),
             Some(MemoryAssetState::Invalidated)
+        );
+    }
+
+    #[test]
+    fn active_export_is_deterministic_and_excludes_invalid_lineage() {
+        let mut graph = MemoryLineageGraph::new();
+        graph.register(root("b-root", MemorySpace::Tenant)).unwrap();
+        graph.register(root("a-root", MemorySpace::Tenant)).unwrap();
+        graph
+            .register(derived(
+                "b-child",
+                MemorySpace::Tenant,
+                MemoryStratum::Episode,
+                [id("b-root")],
+            ))
+            .unwrap();
+        graph.invalidate(&id("b-root")).unwrap();
+
+        let exported = graph.active_descriptors();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].id.as_str(), "a-root");
+    }
+
+    #[test]
+    fn active_import_resolves_reverse_order_and_round_trips() {
+        let space = MemorySpace::project("ccos").unwrap();
+        let root = root("root", space.clone());
+        let episode = derived(
+            "episode",
+            space.clone(),
+            MemoryStratum::Episode,
+            [id("root")],
+        );
+        let context = derived(
+            "context",
+            space,
+            MemoryStratum::Context,
+            [id("episode")],
+        );
+
+        let graph = MemoryLineageGraph::from_active_descriptors([
+            context.clone(),
+            episode.clone(),
+            root.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            graph
+                .active_descriptors()
+                .iter()
+                .map(|descriptor| descriptor.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["context", "episode", "root"]
+        );
+        assert_eq!(graph.descriptor(&id("context")), Some(&context));
+    }
+
+    #[test]
+    fn active_import_rejects_missing_or_cyclic_parent_sets() {
+        let missing = derived(
+            "child",
+            MemorySpace::Tenant,
+            MemoryStratum::Episode,
+            [id("missing")],
+        );
+        assert_eq!(
+            MemoryLineageGraph::from_active_descriptors([missing]),
+            Err(MemoryGraphError::UnresolvedImportParents(BTreeSet::from([
+                id("child")
+            ])))
+        );
+
+        let left = derived(
+            "left",
+            MemorySpace::Tenant,
+            MemoryStratum::Episode,
+            [id("right")],
+        );
+        let right = derived(
+            "right",
+            MemorySpace::Tenant,
+            MemoryStratum::Episode,
+            [id("left")],
+        );
+        assert_eq!(
+            MemoryLineageGraph::from_active_descriptors([left, right]),
+            Err(MemoryGraphError::UnresolvedImportParents(BTreeSet::from([
+                id("left"),
+                id("right")
+            ])))
         );
     }
 }

@@ -157,9 +157,8 @@ impl MemoryLineageGraph {
     pub fn active_descriptors(&self) -> Vec<MemoryAssetDescriptor> {
         self.assets
             .iter()
-            .filter_map(|(id, descriptor)| {
-                (self.state(id) == Some(MemoryAssetState::Active)).then(|| descriptor.clone())
-            })
+            .filter(|(id, _)| self.state(id) == Some(MemoryAssetState::Active))
+            .map(|(_, descriptor)| descriptor.clone())
             .collect()
     }
 

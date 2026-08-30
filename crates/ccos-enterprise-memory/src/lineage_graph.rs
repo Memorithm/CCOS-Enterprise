@@ -426,12 +426,7 @@ mod tests {
             MemoryStratum::Episode,
             [id("root")],
         );
-        let context = derived(
-            "context",
-            space,
-            MemoryStratum::Context,
-            [id("episode")],
-        );
+        let context = derived("context", space, MemoryStratum::Context, [id("episode")]);
 
         let graph = MemoryLineageGraph::from_active_descriptors([
             context.clone(),
@@ -458,12 +453,11 @@ mod tests {
             MemoryStratum::Episode,
             [id("missing")],
         );
-        assert_eq!(
+        assert!(matches!(
             MemoryLineageGraph::from_active_descriptors([missing]),
-            Err(MemoryGraphError::UnresolvedImportParents(BTreeSet::from([
-                id("child")
-            ])))
-        );
+            Err(MemoryGraphError::UnresolvedImportParents(ref assets))
+                if assets == &BTreeSet::from([id("child")])
+        ));
 
         let left = derived(
             "left",
@@ -477,12 +471,10 @@ mod tests {
             MemoryStratum::Episode,
             [id("left")],
         );
-        assert_eq!(
+        assert!(matches!(
             MemoryLineageGraph::from_active_descriptors([left, right]),
-            Err(MemoryGraphError::UnresolvedImportParents(BTreeSet::from([
-                id("left"),
-                id("right")
-            ])))
-        );
+            Err(MemoryGraphError::UnresolvedImportParents(ref assets))
+                if assets == &BTreeSet::from([id("left"), id("right")])
+        ));
     }
 }

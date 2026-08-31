@@ -1,0 +1,123 @@
+schema_version: 1
+kind: ccos_enterprise_ecosystem_agent_roadmap
+status: active
+last_updated: "2026-08-31"
+repository: Memorithm/CCOS-Enterprise
+intended_consumer: autonomous_coding_agent
+merge_policy: never_merge_this_file_to_default_branch_unless_user_explicitly_requests
+
+mission:
+  primary: >-
+    Preserve CCOS Enterprise as the governed multi-tenant deployment layer around
+    CCOS Core: authentication, authorization, tenant isolation, quotas, policy,
+    observability, backup/restore, governance and controlled enterprise adapters,
+    without duplicating or contaminating Core semantics.
+  ecosystem_goal: >-
+    Provide a secure organizational memory/context service for agent runtimes while
+    keeping experimental self-modification in CCOS Research Lab and agent execution
+    in products such as SoulSystem.
+
+invariants:
+  - exactly_one_Core_lineage_is_present_and_crossed_deliberately_via_subtree_or_equivalent_reviewed_sync
+  - Enterprise_dependencies_never_backflow_into_CCOS_Core
+  - tenant_memory_identity_quota_and_audit_boundaries_are_enforced_before_adapter_access
+  - raw_research_namespaces_shell_patch_self_and_code_execute_are_not_exposed_through_the_governed_gateway
+  - OctaSoma_is_accessed_only_through_the_governed_tenant_isolated_adapter
+  - authentication_authorization_tenant_isolation_and_backup_restore_are_separate_gates
+  - deterministic_or_core_claims_are_not_inferred_from_Enterprise_only_features
+  - required_CI_must_be_green_on_exact_PR_head_before_merge
+
+ownership:
+  role: governed_multi_tenant_CCOS_product_layer
+  owns:
+    - enterprise_identity_authentication_RBAC_and_policy
+    - tenant_isolation_quota_and_budget_enforcement
+    - governed_MCP_gateway_and_tool_catalogue
+    - enterprise_backup_restore_observability_and_governance
+    - governed_OctaSoma_and_other_enterprise_adapters
+  does_not_own:
+    - CCOS_Core_kernel_semantics
+    - CCOS_Research_Lab_RSI_Forge_or_generated_code_research
+    - SoulSystem_agent_runtime
+    - SciRust_Hub_global_ecosystem_orchestration
+
+interfaces:
+  Memorithm/CCOS-Core:
+    status: active_subtree_lineage
+    rules:
+      - record_exact_Core_source_commit_for_every_sync
+      - run_Core_and_Enterprise_compatibility_tests_before_accepting_sync
+      - upstream_general_Core_improvements_deliberately_not_by_copy_paste
+  Memorithm/CCOS-Research-Lab:
+    status: explicit_non_dependency
+    rule: research_features_require_independent_enterprise_security_and_governance_qualification_before_any_adoption
+  Memorithm/octasoma:
+    status: active_governed_adapter
+    rule: tenant_scope_and_quota_gate_every_memory_access
+  Memorithm/SoulSystem:
+    status: planned_consumer
+    rule: SoulSystem_may_use_governed_context_but_cannot_bypass_enterprise_authorization_or_tenant_scope
+  Memorithm/SciRust-Verify:
+    status: planned
+    rule: enterprise_admission_backup_restore_and_audit_evidence_may_be_sealed_without_moving_policy_semantics_into_Verify
+
+roadmap:
+  - id: ENT0
+    name: Core lineage and subtree discipline
+    status: active_priority
+    goals:
+      - exact_upstream_Core_identity_tracking
+      - deterministic_sync_conflict_review
+      - no_duplicate_Core_crates_or_shadow_implementations
+  - id: ENT1
+    name: Authorization and tenancy qualification
+    status: active
+    goals:
+      - complete_tool_route_permission_matrix
+      - adversarial_cross_tenant_isolation_tests
+      - token_key_rotation_and_revocation
+      - explicit_operator_vs_service_principal_boundaries
+  - id: ENT2
+    name: Backup restore and disaster recovery
+    status: active
+    goals:
+      - executable_backup_restore_acceptance_tests
+      - tenant_scoped_restore_and_integrity_validation
+      - key_governance_and_recovery_without_secret_defaults
+  - id: ENT3
+    name: Governed adapter framework
+    status: active
+    goals:
+      - one_adapter_authority_contract_per_external_memory_or_tool_provider
+      - quotas_policy_and_audit_before_dispatch
+      - no_raw_research_namespace_leakage
+  - id: ENT4
+    name: Agent-runtime integration
+    status: planned
+    goals:
+      - SoulSystem_tenant_identity_mapping
+      - CCOS_context_session_binding
+      - bounded_agent_tool_catalogue
+      - Verify_evidence_adapter
+  - id: ENT5
+    name: Stable enterprise productization
+    status: long_term
+    goals:
+      - semver_migrations_and_Core_compatibility_matrix
+      - operational_recovery_and_rotation_guides
+      - security_regression_and_admission_benchmarks_with_scoped_claims
+
+agent_operating_protocol:
+  must_read_this_file:
+    - at_start_of_every_agent_session
+    - before_Core_sync_auth_RBAC_tenancy_backup_or_gateway_changes
+    - before_external_adapter_or_agent_runtime_integration
+    - before_PR_or_merge_decisions
+  must_update_this_file:
+    - when_Core_lineage_changes
+    - when_security_or_governance_contract_changes
+    - when_external_adapter_status_changes
+  fail_closed: >-
+    If this roadmap cannot be read, do not make major Core-sync, authorization,
+    tenancy, governance, external-adapter, or merge decisions. Read-only diagnosis
+    is allowed.

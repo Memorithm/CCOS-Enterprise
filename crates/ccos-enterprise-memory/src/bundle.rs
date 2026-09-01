@@ -209,9 +209,7 @@ impl MemoryBundleManifest {
     /// are strengthened later.
     pub fn active_lineage_graph(&self) -> Result<MemoryLineageGraph, MemoryBundleError> {
         MemoryLineageGraph::from_active_descriptors(
-            self.entries
-                .iter()
-                .map(|entry| entry.descriptor.clone()),
+            self.entries.iter().map(|entry| entry.descriptor.clone()),
         )
         .map_err(MemoryBundleError::InvalidLineage)
     }
@@ -238,7 +236,9 @@ impl fmt::Display for MemoryBundleError {
         match self {
             Self::InvalidTenant => write!(f, "memory bundle tenant must not be empty"),
             Self::EmptyBundle => write!(f, "memory bundle must contain at least one asset"),
-            Self::InvalidContentDigest => write!(f, "memory bundle content digest must not be empty"),
+            Self::InvalidContentDigest => {
+                write!(f, "memory bundle content digest must not be empty")
+            }
             Self::InvalidProvider => write!(f, "memory bundle provider must not be empty"),
             Self::InvalidProviderReference => {
                 write!(f, "memory bundle provider reference must not be empty")
@@ -326,7 +326,10 @@ mod tests {
 
         assert_eq!(manifest.version(), MemoryBundleVersion::V1);
         assert_eq!(manifest.entries().len(), 2);
-        assert_eq!(manifest.entries()[0].descriptor().id.as_str(), "mem:episode");
+        assert_eq!(
+            manifest.entries()[0].descriptor().id.as_str(),
+            "mem:episode"
+        );
         assert_eq!(manifest.entries()[1].descriptor().id.as_str(), "mem:root");
         assert_eq!(
             manifest.entries()[0]

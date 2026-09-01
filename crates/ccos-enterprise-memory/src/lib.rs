@@ -16,6 +16,12 @@ use std::fmt;
 
 use ccos_enterprise_tenancy::TenantScope;
 
+mod bundle;
+pub use bundle::{
+    MemoryBundleEntry, MemoryBundleError, MemoryBundleManifest, MemoryBundleVersion,
+    MemoryContentDigest, MemoryProviderReference,
+};
+
 mod context_budget;
 pub use context_budget::{
     assemble_bootstrap_context, MemoryContextAssembly, MemoryContextBudget, MemoryContextError,

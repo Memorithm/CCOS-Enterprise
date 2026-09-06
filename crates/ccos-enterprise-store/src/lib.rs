@@ -1365,7 +1365,7 @@ mod tests {
         // The state is the snapshot's, not the record re-applied: `reader`
         // holds exactly what it held when the snapshot was taken.
         assert_eq!(
-            restored.roles_of("bob"),
+            restored.roles_of("memorithm", "bob"),
             vec!["reader"],
             "no grant was invented by the replay"
         );

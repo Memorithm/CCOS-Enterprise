@@ -61,7 +61,7 @@ fn single_tenant_deployment() -> Deployment {
     let mut tenant = TenantState::new(u64::MAX);
     tenant.allow_model("claude-opus");
     assert!(d.add_tenant("memorithm", "acme", tenant));
-    assert!(d.assign("alice", "writer"));
+    assert!(d.assign("memorithm", "alice", "writer"));
     d
 }
 

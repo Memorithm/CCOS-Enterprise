@@ -18,11 +18,119 @@ pub struct Role {
     pub permissions: BTreeSet<Permission>,
 }
 
-/// Role assignments per actor.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Role assignments per principal.
+///
+/// Assignments are keyed by **`(org, actor)`**, not by the bare actor name.
+/// A `RoleBook` used to key on the actor string alone, which made the book
+/// deployment-global across organizations: every org's `agent-7` shared one
+/// assignment row, so provisioning `agent-7` in org A granted org B's
+/// `agent-7` whatever org A's administrator intended. Identities are proved
+/// as `(org, actor)` pairs — [`ccos_enterprise_auth::AuthenticatedActor`]
+/// carries both — and the book keys on both or it keys on a name.
+///
+/// The wire form is a **row list**, not a map keyed by the tuple: JSON object
+/// keys must be strings, and a snapshot that cannot be written is worse than
+/// one that needs a few lines more. [`Deserialize`] still reads the legacy
+/// `actor → roles` map shape so pre-org snapshots load — see
+/// [`AssignmentRows::Legacy`] for the deliberate fail-closed reading of those
+/// rows.
+#[derive(Debug, Clone, Default)]
 pub struct RoleBook {
     roles: BTreeMap<String, Role>,
-    assignments: BTreeMap<String, BTreeSet<String>>,
+    assignments: BTreeMap<(String, String), BTreeSet<String>>,
+}
+
+/// One assignment row, as persisted.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct AssignmentRow {
+    org: String,
+    actor: String,
+    roles: BTreeSet<String>,
+}
+
+/// The two assignment encodings this type reads.
+///
+/// [`AssignmentRows::Scoped`] is the current form: one row per principal,
+/// organization named. [`AssignmentRows::Legacy`] is what every snapshot
+/// written before the org-scoped key carried: a map keyed by the bare actor
+/// name. Those rows record **no organization**, so they are restored under
+/// the empty org — which authorizes nobody, because `allows` keys on the
+/// proved `(org, actor)` pair and no credential proves an empty org. That is
+/// the fail-closed reading: a row whose org was never recorded cannot be
+/// safely attributed, so it grants nothing until an operator re-provisions
+/// the principal explicitly with `assign(org, actor, role)`. Silently
+/// re-attaching the grants to whichever single org the deployment happens to
+/// serve would be exactly the cross-tenant bleed this key exists to close.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum AssignmentRows {
+    Scoped(Vec<AssignmentRow>),
+    Legacy(BTreeMap<String, BTreeSet<String>>),
+}
+
+impl Default for AssignmentRows {
+    fn default() -> Self {
+        Self::Scoped(Vec::new())
+    }
+}
+
+impl serde::Serialize for RoleBook {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("RoleBook", 2)?;
+        state.serialize_field("roles", &self.roles)?;
+        // Empty grant sets are a state `assign` never produces (the entry is
+        // created only when a role is granted), so they are not written.
+        let rows: Vec<AssignmentRow> = self
+            .assignments
+            .iter()
+            .filter(|(_, grants)| !grants.is_empty())
+            .map(|((org, actor), grants)| AssignmentRow {
+                org: org.clone(),
+                actor: actor.clone(),
+                roles: grants.clone(),
+            })
+            .collect();
+        state.serialize_field("assignments", &rows)?;
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RoleBook {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            roles: BTreeMap<String, Role>,
+            #[serde(default)]
+            assignments: AssignmentRows,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let mut book = RoleBook {
+            roles: raw.roles,
+            assignments: BTreeMap::new(),
+        };
+        match raw.assignments {
+            AssignmentRows::Scoped(rows) => {
+                for row in rows {
+                    if !row.roles.is_empty() {
+                        book.assignments.insert((row.org, row.actor), row.roles);
+                    }
+                }
+            }
+            AssignmentRows::Legacy(map) => {
+                for (actor, grants) in map {
+                    if !grants.is_empty() {
+                        book.assignments
+                            .entry((String::new(), actor))
+                            .or_default()
+                            .extend(grants);
+                    }
+                }
+            }
+        }
+        Ok(book)
+    }
 }
 
 impl RoleBook {
@@ -78,35 +186,41 @@ impl RoleBook {
     }
 
     /// Withdraw one role from one actor. Returns whether the grant existed.
-    pub fn unassign(&mut self, actor: &str, role: &str) -> bool {
-        let Some(grants) = self.assignments.get_mut(actor) else {
+    pub fn unassign(&mut self, org: &str, actor: &str, role: &str) -> bool {
+        let Some(grants) = self
+            .assignments
+            .get_mut(&(org.to_string(), actor.to_string()))
+        else {
             return false;
         };
         let removed = grants.remove(role);
         if grants.is_empty() {
-            self.assignments.remove(actor);
+            self.assignments
+                .remove(&(org.to_string(), actor.to_string()));
         }
         removed
     }
 
     /// Withdraw every role from one actor — de-provisioning a principal.
     /// Returns whether the actor held anything.
-    pub fn remove_actor(&mut self, actor: &str) -> bool {
-        self.assignments.remove(actor).is_some()
+    pub fn remove_actor(&mut self, org: &str, actor: &str) -> bool {
+        self.assignments
+            .remove(&(org.to_string(), actor.to_string()))
+            .is_some()
     }
 
     /// Grant a role to an actor. Fails closed on an unknown role, and refuses
-    /// the empty string for either side: `""` is not a principal and not a
-    /// role, however willing a `BTreeMap` is to hold one.
-    pub fn assign(&mut self, actor: &str, role: &str) -> bool {
-        if actor.is_empty() || role.is_empty() {
+    /// the empty string for any side: `""` is not an organization, a principal
+    /// or a role, however willing a `BTreeMap` is to hold one.
+    pub fn assign(&mut self, org: &str, actor: &str, role: &str) -> bool {
+        if org.is_empty() || actor.is_empty() || role.is_empty() {
             return false;
         }
         if !self.roles.contains_key(role) {
             return false; // fail closed: unknown roles cannot be granted
         }
         self.assignments
-            .entry(actor.into())
+            .entry((org.to_string(), actor.to_string()))
             .or_default()
             .insert(role.into());
         true
@@ -131,32 +245,38 @@ impl RoleBook {
             .collect()
     }
 
-    /// Every actor currently holding this role, in name order.
+    /// Every actor currently holding this role, as `org/actor` strings in
+    /// key order.
     ///
     /// The blast radius of a redefinition or a removal: without it a journal
-    /// can say a role was rewritten but not whose rights moved.
-    pub fn holders_of(&self, name: &str) -> Vec<&str> {
+    /// can say a role was rewritten but not whose rights moved. The org is
+    /// part of the answer — `acme/agent-7` and `globex/agent-7` are different
+    /// principals and an auditor must be able to tell them apart.
+    pub fn holders_of(&self, name: &str) -> Vec<String> {
         self.assignments
             .iter()
             .filter(|(_, grants)| grants.contains(name))
-            .map(|(actor, _)| actor.as_str())
+            .map(|((org, actor), _)| format!("{org}/{actor}"))
             .collect()
     }
 
     /// The roles this actor holds, in name order.
-    pub fn roles_of(&self, actor: &str) -> Vec<&str> {
+    pub fn roles_of(&self, org: &str, actor: &str) -> Vec<&str> {
         self.assignments
-            .get(actor)
+            .get(&(org.to_string(), actor.to_string()))
             .into_iter()
             .flatten()
             .map(String::as_str)
             .collect()
     }
 
-    /// Deterministic permission check: allowed iff any assigned role grants it.
-    pub fn allows(&self, actor: &str, permission: &Permission) -> bool {
+    /// Deterministic permission check: allowed iff any assigned role grants
+    /// it. Keyed on the **proved** `(org, actor)` pair — the same pair the
+    /// credential carries — so a name collision across organizations reaches
+    /// nothing.
+    pub fn allows(&self, org: &str, actor: &str, permission: &Permission) -> bool {
         self.assignments
-            .get(actor)
+            .get(&(org.to_string(), actor.to_string()))
             .into_iter()
             .flatten()
             .filter_map(|r| self.roles.get(r))
@@ -177,10 +297,60 @@ mod tests {
         };
         reader.permissions.insert(Permission("memory.read".into()));
         book.add_role(reader);
-        assert!(book.assign("alice", "reader"));
-        assert!(!book.assign("alice", "admin")); // unknown role refused
-        assert!(book.allows("alice", &Permission("memory.read".into())));
-        assert!(!book.allows("alice", &Permission("memory.write".into())));
-        assert!(!book.allows("bob", &Permission("memory.read".into())));
+        assert!(book.assign("acme", "alice", "reader"));
+        assert!(!book.assign("acme", "alice", "admin")); // unknown role refused
+        assert!(book.allows("acme", "alice", &Permission("memory.read".into())));
+        assert!(!book.allows("acme", "alice", &Permission("memory.write".into())));
+        assert!(!book.allows("acme", "bob", &Permission("memory.read".into())));
+    }
+
+    #[test]
+    fn the_same_actor_name_in_two_organizations_holds_nothing_in_common() {
+        // The defect this key closes: the book was keyed by the bare actor
+        // name, so `agent-7` provisioned in `acme` carried `globex`'s grants —
+        // and vice versa. Identity is a `(org, actor)` pair; the book keys on
+        // the pair or it keys on a name.
+        let mut book = RoleBook::default();
+        let mut writer = Role {
+            name: "writer".into(),
+            ..Default::default()
+        };
+        writer.permissions.insert(Permission("memory.write".into()));
+        book.add_role(writer);
+
+        assert!(book.assign("acme", "agent-7", "writer"));
+
+        // Same name, other organization: denied by default, and the grant is
+        // invisible from both directions.
+        assert!(!book.allows("globex", "agent-7", &Permission("memory.write".into())));
+        assert!(book.roles_of("globex", "agent-7").is_empty());
+        assert!(!book.remove_actor("globex", "agent-7"));
+
+        // De-provisioning one org's principal leaves the other untouched.
+        assert!(book.remove_actor("acme", "agent-7"));
+        assert!(!book.allows("acme", "agent-7", &Permission("memory.write".into())));
+        assert!(book.holders_of("writer").is_empty());
+
+        // Holders are named with their organization.
+        assert!(book.assign("acme", "agent-7", "writer"));
+        assert!(book.assign("globex", "agent-7", "writer"));
+        assert_eq!(
+            book.holders_of("writer"),
+            vec!["acme/agent-7".to_string(), "globex/agent-7".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_orgs_actors_and_roles_are_refused() {
+        let mut book = RoleBook::default();
+        let mut reader = Role {
+            name: "reader".into(),
+            ..Default::default()
+        };
+        reader.permissions.insert(Permission("memory.read".into()));
+        book.add_role(reader);
+        assert!(!book.assign("", "alice", "reader"));
+        assert!(!book.assign("acme", "", "reader"));
+        assert!(!book.assign("acme", "alice", ""));
     }
 }

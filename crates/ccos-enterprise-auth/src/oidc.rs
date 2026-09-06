@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     is_canonical_identity, ActorId, AuthError, AuthStrength, AuthenticatedActor, Authenticator,
-    OrgId, Revocations, MAX_TOKEN_BYTES, MAX_TOKEN_LIFETIME_SECS,
+    OrgId, SharedRevocations, MAX_TOKEN_BYTES, MAX_TOKEN_LIFETIME_SECS,
 };
 
 /// The only signature algorithm this verifier accepts.
@@ -61,7 +61,9 @@ pub struct OidcAuthenticator {
     /// from whichever claim happened to be present.
     org_claim: String,
     leeway_secs: u64,
-    revocations: Revocations,
+    /// The deployment deny-list, shared behind an interior handle so every
+    /// verifier of one install consults the same list.
+    revocations: SharedRevocations,
 }
 
 impl OidcAuthenticator {
@@ -76,7 +78,7 @@ impl OidcAuthenticator {
             audience: audience.to_string(),
             org_claim: org_claim.to_string(),
             leeway_secs: 60,
-            revocations: Revocations::new(),
+            revocations: SharedRevocations::default(),
         }
     }
 
@@ -110,18 +112,37 @@ impl OidcAuthenticator {
         self.keys.len()
     }
 
-    /// The deny-list this verifier consults.
+    /// Point this verifier at a **shared** deny-list instead of a fresh one.
     ///
-    /// An OIDC token's `jti` is optional, so individual revocation only reaches
-    /// tokens whose provider sends one. Actor revocation always applies, and is
-    /// the one that answers "this person left".
-    pub fn revocations_mut(&mut self) -> &mut Revocations {
-        &mut self.revocations
+    /// The same [`SharedRevocations`] the token and mTLS verifiers accept: one
+    /// revoke call reaches every mechanism of the install, instead of each
+    /// verifier learning about it separately — or, on a second replica, never.
+    pub fn with_shared_revocations(mut self, revocations: SharedRevocations) -> Self {
+        self.revocations = revocations;
+        self
     }
 
-    /// The deny-list this verifier consults.
-    pub fn revocations(&self) -> &Revocations {
-        &self.revocations
+    /// The shared deny-list this verifier consults.
+    pub fn revocations_shared(&self) -> SharedRevocations {
+        std::sync::Arc::clone(&self.revocations)
+    }
+
+    /// Revoke one credential by identifier on this verifier's deny-list.
+    /// Returns whether the revocation took effect.
+    pub fn revoke_token(&self, jti: &str, expires_at: u64, now: u64) -> bool {
+        self.revocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .revoke_token(jti, expires_at, now)
+    }
+
+    /// Revoke every credential an actor holds. Returns whether the entry was
+    /// written.
+    pub fn revoke_actor(&self, org: &OrgId, actor: &ActorId, issued_through: u64) -> bool {
+        self.revocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .revoke_actor(org, actor, issued_through)
     }
 
     fn string_claim<'a>(v: &'a serde_json::Value, name: &str) -> Option<&'a str> {
@@ -138,6 +159,14 @@ impl OidcAuthenticator {
             }
             _ => false,
         }
+    }
+
+    /// Whether the token's `aud` array names more than one deployment.
+    fn audience_is_multiple(claims: &serde_json::Value) -> bool {
+        matches!(
+            claims.get("aud"),
+            Some(serde_json::Value::Array(items)) if items.len() > 1
+        )
     }
 }
 
@@ -207,12 +236,27 @@ impl Authenticator for OidcAuthenticator {
 
         if Self::string_claim(&claims, "iss") != Some(self.issuer.as_str()) {
             // A token from another provider, signed by a key we trust for this
-            // one, must not pass: an operator who configures two providers
-            // would otherwise let either mint identities for both.
-            return Err(AuthError::WrongAudience);
+            // one, is a misconfigured trust store — not a misdirected
+            // credential. It used to be reported as `WrongAudience`, which
+            // told the operator to look at `aud` and sent them hunting in the
+            // wrong claim; the audience check runs next and keeps its own
+            // error.
+            return Err(AuthError::UnknownIssuer);
         }
         if !Self::audience_matches(&claims, &self.audience) {
             return Err(AuthError::WrongAudience);
+        }
+        // A token minted for several deployments names, in `azp` (OIDC core
+        // §3.1.3.3), the party it was issued *to*. Without this check any
+        // deployment in the audience list could present a token that was never
+        // meant for it: one relying party accepting on behalf of all of them.
+        // A single-audience token carries no `azp`, which is legal, and a
+        // string `aud` has nothing to be ambiguous about.
+        if Self::audience_is_multiple(&claims) {
+            match claims.get("azp").and_then(serde_json::Value::as_str) {
+                Some(azp) if azp == self.audience => {}
+                _ => return Err(AuthError::WrongAudience),
+            }
         }
 
         let Some(exp) = claims.get("exp").and_then(serde_json::Value::as_u64) else {
@@ -265,7 +309,12 @@ impl Authenticator for OidcAuthenticator {
         let org = OrgId(org.to_string());
         let actor = ActorId(sub.to_string());
         let jti = Self::string_claim(&claims, "jti");
-        if self.revocations.is_revoked(jti, &org, &actor, iat) {
+        if self
+            .revocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_revoked(jti, &org, &actor, iat)
+        {
             return Err(AuthError::Revoked);
         }
 
@@ -415,13 +464,51 @@ mod tests {
     #[test]
     fn another_providers_token_is_refused_even_when_the_key_is_trusted() {
         // An operator running two providers would otherwise let either mint
-        // identities for both.
+        // identities for both. The error names the issuer, not the audience:
+        // the trust store is what is misconfigured here, and `WrongAudience`
+        // sent the operator hunting in the wrong claim.
         let mut p = payload();
         p["iss"] = serde_json::json!("https://idp.attacker.example/");
         assert_eq!(
             verifier().authenticate(&jwt(header(), p, &key(1)), NOW),
+            Err(AuthError::UnknownIssuer)
+        );
+    }
+
+    #[test]
+    fn a_multi_audience_token_must_name_this_deployment_as_azp() {
+        // `aud: [a, b]` says the token may be presented to several parties.
+        // Accepting on audience membership alone would let any party in the
+        // list admit a token meant for another one, so `azp` (OIDC core
+        // §3.1.3.3) must name *this* deployment.
+        let v = verifier();
+        let mut multi = payload();
+        multi["aud"] = serde_json::json!(["other-service", AUD]);
+        multi["azp"] = serde_json::json!(AUD);
+        let multi_clone = multi.clone();
+        assert!(v.authenticate(&jwt(header(), multi, &key(1)), NOW).is_ok());
+
+        // Same token, missing `azp`: refused — an implementation that never
+        // heard of `azp` gets no exemption.
+        let mut no_azp = multi_clone.clone();
+        no_azp.as_object_mut().unwrap().remove("azp");
+        assert_eq!(
+            v.authenticate(&jwt(header(), no_azp, &key(1)), NOW),
             Err(AuthError::WrongAudience)
         );
+
+        // `azp` naming the *other* party: the token is not for us.
+        let mut other_azp = multi_clone.clone();
+        other_azp["azp"] = serde_json::json!("other-service");
+        assert_eq!(
+            v.authenticate(&jwt(header(), other_azp, &key(1)), NOW),
+            Err(AuthError::WrongAudience)
+        );
+
+        // A single-audience token carries no `azp`, and that stays legal.
+        assert!(v
+            .authenticate(&jwt(header(), payload(), &key(1)), NOW)
+            .is_ok());
     }
 
     #[test]
@@ -429,6 +516,7 @@ mod tests {
         let v = verifier();
         let mut multi = payload();
         multi["aud"] = serde_json::json!(["other-service", AUD]);
+        multi["azp"] = serde_json::json!(AUD);
         assert!(v.authenticate(&jwt(header(), multi, &key(1)), NOW).is_ok());
 
         for wrong in [
@@ -559,7 +647,7 @@ mod tests {
 
     #[test]
     fn revocation_reaches_oidc_tokens_by_actor_and_by_jti_when_present() {
-        let mut v = verifier();
+        let v = verifier();
         let plain = jwt(header(), payload(), &key(1));
         let mut with_id = payload();
         with_id["jti"] = serde_json::json!("t-42");
@@ -569,14 +657,13 @@ mod tests {
         assert!(v.authenticate(&identified, NOW).is_ok());
 
         // A provider that sends `jti` can have one token revoked.
-        v.revocations_mut().revoke_token("t-42", NOW + 600, NOW);
+        v.revoke_token("t-42", NOW + 600, NOW);
         assert_eq!(v.authenticate(&identified, NOW), Err(AuthError::Revoked));
         assert!(v.authenticate(&plain, NOW).is_ok(), "unrelated token");
 
         // Actor revocation reaches both, including the one with no identifier —
         // which is the case individual revocation cannot serve.
-        v.revocations_mut()
-            .revoke_actor(&OrgId("acme".into()), &ActorId("agent-7".into()), NOW);
+        v.revoke_actor(&OrgId("acme".into()), &ActorId("agent-7".into()), NOW);
         assert_eq!(v.authenticate(&plain, NOW), Err(AuthError::Revoked));
     }
 

@@ -143,12 +143,13 @@ pub const MAX_TOKEN_BYTES: usize = 4_096;
 
 /// Longest lifetime an identity token may grant itself.
 ///
-/// There is no revocation list for identity tokens yet, so lifetime *is* the
-/// revocation window: a stolen token is valid until it expires. Twelve hours
-/// is short enough that key rotation is a real remedy and long enough that a
-/// working session does not re-authenticate mid-task. A token asking for more
-/// is refused rather than clamped — clamping would hand back a credential the
-/// issuer did not mean to grant, and silently.
+/// There is no default way to outlive this: the ceiling is what bounds how
+/// long a stolen token is useful, and [`Revocations`] is what shortens it
+/// below that after the fact. Twelve hours is short enough that key rotation
+/// is a real remedy and long enough that a working session does not
+/// re-authenticate mid-task. A token asking for more is refused rather than
+/// clamped — clamping would hand back a credential the issuer did not mean
+/// to grant, and silently.
 pub const MAX_TOKEN_LIFETIME_SECS: u64 = 12 * 60 * 60;
 
 /// Longest an org or actor identifier may be.
@@ -161,11 +162,76 @@ pub const MAX_IDENTITY_BYTES: usize = 128;
 /// non-default `test-identities` feature, [`AuthenticatedActor::asserted`].
 /// A production build cannot compile the second, so a production build cannot
 /// mint an identity without verifying one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Not serializable, on purpose.** This type used to derive
+/// `Serialize`/`Deserialize`, which made "this identity was proved" a wire
+/// claim any deserializer would accept: any binary in the build that touched
+/// a queue, a snapshot or a log could mint one from bytes, and the strength
+/// field — the thing `require_strength` gates on — came back from disk as
+/// confidently false as anything else the file held. A proof is an event, not
+/// a fact a file can carry. The sanctioned way to move identity *data* across
+/// a boundary is [`IdentityEx`], which says what it is and refuses to
+/// reconstruct a [`AuthStrength::Strong`] identity from a round trip.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedActor {
     org: OrgId,
     actor: ActorId,
     strength: AuthStrength,
+}
+
+/// An actor identity **as data**, for a transport or a log.
+///
+/// [`AuthenticatedActor`] is a proof; this is the paperwork about it. The two
+/// are deliberately different types because serialization used to be the hole
+/// in the proof: a `serde` derive on the actor itself meant any bytes in the
+/// build — a queue message, a snapshot, a log line — could be turned back
+/// into an identity the deployment would treat as verified, including a
+/// `Strong` one nothing had ever verified.
+///
+/// `IdentityEx` is honest about what a round trip is. It carries the same
+/// three fields and both directions are explicit:
+///
+/// * [`IdentityEx::of`] downgrades a proof into data at a named moment;
+/// * [`IdentityEx::to_actor`] rebuilds an actor at [`AuthStrength::Token`] or
+///   below — and returns `None` for [`AuthStrength::Strong`], because a
+///   private-key proof cannot survive a serialization round trip and
+///   describing one as reconstructed would be the exact lie this type exists
+///   to prevent. A receiver that needs a strongly-authenticated caller must
+///   re-verify the credential itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityEx {
+    pub org: OrgId,
+    pub actor: ActorId,
+    pub strength: AuthStrength,
+}
+
+impl IdentityEx {
+    /// Capture a proved identity as data.
+    pub fn of(actor: &AuthenticatedActor) -> Self {
+        Self {
+            org: actor.org().clone(),
+            actor: actor.actor().clone(),
+            strength: actor.strength(),
+        }
+    }
+
+    /// Rebuild an actor from data — at token strength or below, never above.
+    ///
+    /// `Strong` is refused rather than downgraded: silently handing back a
+    /// token-strength actor where the sender claimed a hardware proof would
+    /// let a forged record pass as a degraded-but-real identity. `None` says
+    /// "re-verify"; it does not guess.
+    #[cfg(any(feature = "token-auth", feature = "mtls-auth", feature = "oidc-auth"))]
+    pub fn to_actor(self) -> Option<AuthenticatedActor> {
+        match self.strength {
+            AuthStrength::Strong => None,
+            AuthStrength::Token | AuthStrength::Anonymous => Some(AuthenticatedActor::proved(
+                self.org,
+                self.actor,
+                self.strength,
+            )),
+        }
+    }
 }
 
 impl AuthenticatedActor {
@@ -390,13 +456,27 @@ pub fn is_canonical_identity(id: &str) -> bool {
 /// signature covers `ccosid1.ed25519.<kid>.<payload_b64url>` — prefix,
 /// algorithm and key id included, so none of them can be swapped without
 /// breaking the signature.
+/// An actor or credential the deployment has withdrawn.
+///
+/// A deny-list is a **deployment fact**, not a process detail. Held per
+/// verifier it failed open on every replica that had not seen the revoke
+/// call: one instance of two would refuse the stolen credential while the
+/// other kept honouring it, and which one answered was load-balancer luck.
+/// The fix is shape, not ceremony — [`SharedRevocations`] lets an installer
+/// point every verifier at the same deny-list (an `Arc<Mutex<Revocations>>`,
+/// or one per process fed from a shared store by the operator's refresh
+/// loop), and the verifiers' revoke helpers write through it.
+pub type SharedRevocations = std::sync::Arc<std::sync::Mutex<Revocations>>;
+
 #[cfg(feature = "token-auth")]
 pub struct TokenAuthenticator {
     issuers: BTreeMap<String, ed25519_dalek::VerifyingKey>,
     audience: String,
     attests: AuthStrength,
     leeway_secs: u64,
-    revocations: Revocations,
+    /// The deny-list, shared behind an interior handle so an operator can
+    /// point several verifiers — or several replicas — at one list.
+    revocations: SharedRevocations,
     single_use: Option<ReplayGuard>,
 }
 
@@ -418,7 +498,7 @@ impl TokenAuthenticator {
             audience: audience.to_string(),
             attests,
             leeway_secs: 60,
-            revocations: Revocations::new(),
+            revocations: SharedRevocations::default(),
             single_use: None,
         }
     }
@@ -436,14 +516,41 @@ impl TokenAuthenticator {
         self
     }
 
-    /// The deny-list this verifier consults, to revoke a token or an actor.
-    pub fn revocations_mut(&mut self) -> &mut Revocations {
-        &mut self.revocations
+    /// Point this verifier at a **shared** deny-list instead of a fresh one.
+    ///
+    /// The deployment-level answer to revocation across replicas: an installer
+    /// builds one `Arc<Mutex<Revocations>>`, hands it to every verifier it
+    /// constructs, and a revoke call reaches every path in the process at
+    /// once. Feeding it from a durable store is the deployment's refresh loop;
+    /// the type here guarantees only that the verifiers of one process cannot
+    /// disagree with each other.
+    pub fn with_shared_revocations(mut self, revocations: SharedRevocations) -> Self {
+        self.revocations = revocations;
+        self
     }
 
-    /// The deny-list this verifier consults.
-    pub fn revocations(&self) -> &Revocations {
-        &self.revocations
+    /// The shared deny-list this verifier consults.
+    pub fn revocations_shared(&self) -> SharedRevocations {
+        std::sync::Arc::clone(&self.revocations)
+    }
+
+    /// Revoke one credential by identifier on this verifier's deny-list.
+    /// Returns whether the revocation took effect — `false` means the
+    /// deny-list is full and the caller has been told, not silently ignored.
+    pub fn revoke_token(&self, jti: &str, expires_at: u64, now: u64) -> bool {
+        self.revocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .revoke_token(jti, expires_at, now)
+    }
+
+    /// Revoke every credential an actor holds, issued at or before
+    /// `issued_through`. Returns whether the entry was written.
+    pub fn revoke_actor(&self, org: &OrgId, actor: &ActorId, issued_through: u64) -> bool {
+        self.revocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .revoke_actor(org, actor, issued_through)
     }
 
     /// Tolerance for clock skew between issuer and verifier, in seconds.
@@ -590,8 +697,12 @@ impl Authenticator for TokenAuthenticator {
         // Revocation before replay. A revoked credential is refused whether or
         // not it has been seen, and recording it in the replay guard first
         // would spend a bounded resource on a credential already answered.
+        // The list is shared: read under the same lock a revoke on this or
+        // another verifier of the same process writes through.
         if self
             .revocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .is_revoked(Some(&claims.jti), &org, &actor, claims.issued_at)
         {
             return Err(AuthError::Revoked);
@@ -1015,14 +1126,14 @@ mod verifier_tests {
 
     #[test]
     fn revoking_one_token_leaves_the_actors_others_alone() {
-        let mut v = verifier("issuer-a", &seed(1), AuthStrength::Token);
+        let v = verifier("issuer-a", &seed(1), AuthStrength::Token);
         let leaked = good_token(); // jti "t-1"
         let mut other = claims("acme", "agent-7", AUD);
         other.jti = "t-2".into();
         let kept = issue_identity_token(&seed(1), "issuer-a", &other).unwrap();
 
         assert!(v.authenticate(&leaked, NOW).is_ok());
-        assert!(v.revocations_mut().revoke_token("t-1", NOW + 600, NOW));
+        assert!(v.revoke_token("t-1", NOW + 600, NOW));
         assert_eq!(v.authenticate(&leaked, NOW), Err(AuthError::Revoked));
         assert!(
             v.authenticate(&kept, NOW).is_ok(),
@@ -1035,7 +1146,7 @@ mod verifier_tests {
         // The incident key rotation could not serve: somebody leaves, and
         // nobody knows which tokens they hold. Rotating the issuer key would
         // have revoked every other actor's credentials with them.
-        let mut v = verifier("issuer-a", &seed(1), AuthStrength::Token);
+        let v = verifier("issuer-a", &seed(1), AuthStrength::Token);
         let mut theirs = claims("acme", "agent-7", AUD);
         theirs.jti = "unknown-to-the-operator".into();
         let token = issue_identity_token(&seed(1), "issuer-a", &theirs).unwrap();
@@ -1044,12 +1155,33 @@ mod verifier_tests {
         let unaffected = issue_identity_token(&seed(1), "issuer-a", &colleague).unwrap();
 
         assert!(v.authenticate(&token, NOW).is_ok());
-        v.revocations_mut()
-            .revoke_actor(&OrgId("acme".into()), &ActorId("agent-7".into()), NOW);
+        v.revoke_actor(&OrgId("acme".into()), &ActorId("agent-7".into()), NOW);
         assert_eq!(v.authenticate(&token, NOW), Err(AuthError::Revoked));
         assert!(v.authenticate(&unaffected, NOW).is_ok());
 
-        assert!(v.revocations().revoked_actor_count() == 1);
+        assert_eq!(
+            v.revocations_shared()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .revoked_actor_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_revocation_is_shared_by_every_verifier_pointed_at_the_same_list() {
+        // The multi-replica shape, inside one process: two verifiers built the
+        // ordinary way each hold their own list, and revoking on one leaves the
+        // other admitting — that is the fail-open the shared handle closes.
+        let shared = SharedRevocations::default();
+        let a = verifier("issuer-a", &seed(1), AuthStrength::Token)
+            .with_shared_revocations(shared.clone());
+        let b = verifier("issuer-a", &seed(1), AuthStrength::Token).with_shared_revocations(shared);
+        let token = good_token();
+        assert!(a.authenticate(&token, NOW).is_ok());
+        assert!(b.authenticate(&token, NOW).is_ok());
+        assert!(a.revoke_token("t-1", NOW + 600, NOW));
+        assert_eq!(b.authenticate(&token, NOW), Err(AuthError::Revoked));
     }
 
     #[test]
@@ -1085,8 +1217,8 @@ mod verifier_tests {
     fn revocation_is_answered_before_replay_is_recorded() {
         // A revoked credential is refused whether or not it has been seen, and
         // must not spend a bounded resource on the way to that answer.
-        let mut once = verifier("issuer-a", &seed(1), AuthStrength::Token).single_use();
-        once.revocations_mut().revoke_token("t-1", NOW + 600, NOW);
+        let once = verifier("issuer-a", &seed(1), AuthStrength::Token).single_use();
+        once.revoke_token("t-1", NOW + 600, NOW);
         let token = good_token();
         assert_eq!(once.authenticate(&token, NOW), Err(AuthError::Revoked));
         assert_eq!(once.authenticate(&token, NOW), Err(AuthError::Revoked));

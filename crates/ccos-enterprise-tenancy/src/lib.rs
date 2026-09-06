@@ -11,6 +11,31 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TenantId(pub String);
 
+impl TenantId {
+    /// Construct a tenant id only if it is one this product will carry:
+    /// non-empty, at most 128 bytes, ASCII `[a-z0-9_-]` with an alphanumeric
+    /// first byte.
+    ///
+    /// The rule is restated here rather than imported from the runtime because
+    /// tenancy is the lower crate and a dependency cycle is not worth the
+    /// reuse — the same discipline `ccos_enterprise_auth` applies to
+    /// identities. A confusable or path-unsafe tenant id is at its most
+    /// expensive at construction, before it can name a store, a path or an
+    /// audit row; the raw tuple constructor remains for state read back from
+    /// a validated snapshot, where the restore path has already checked it.
+    pub fn validated(id: &str) -> Option<Self> {
+        let mut bytes = id.bytes();
+        let Some(first) = bytes.next() else {
+            return None;
+        };
+        let ok = id.len() <= 128
+            && (first.is_ascii_lowercase() || first.is_ascii_digit())
+            && bytes
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+        ok.then(|| Self(id.to_string()))
+    }
+}
+
 /// Look a tenant up by name without owning one.
 ///
 /// This exists for a measured reason. A `BTreeMap` keyed by `TenantId` can only

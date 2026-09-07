@@ -9,8 +9,10 @@
 //! Restart replay deliberately does not consult a live Knowledge Plane. Historical
 //! entries were already admitted against their immutable `KnowledgeAnchor`; replay
 //! therefore uses [`DecisionState::replay`] and reconstructs only the deterministic
-//! decision state. A crash may leave an unterminated final fragment. Only that final
-//! fragment is ignored and reported; malformed complete records fail closed.
+//! decision state. A crash may leave an unterminated final fragment. Read-only load
+//! ignores and reports only that final fragment; a writer repairs it durably under
+//! the exclusive store lock before any later append. Malformed complete records fail
+//! closed.
 
 #![forbid(unsafe_code)]
 
@@ -44,6 +46,12 @@ pub enum StoreError {
     AlreadyOpen {
         path: PathBuf,
     },
+    /// A previous append entered journal I/O but did not complete durably.
+    /// Continuing with the old in-memory state could append behind ambiguous
+    /// bytes, so callers must drop and reopen the store.
+    RecoveryRequired {
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -65,6 +73,11 @@ impl std::fmt::Display for StoreError {
             Self::AlreadyOpen { path } => write!(
                 f,
                 "{}: another live writer already owns this decision store",
+                path.display()
+            ),
+            Self::RecoveryRequired { path } => write!(
+                f,
+                "{}: decision journal writer requires reopen/recovery after a failed append",
                 path.display()
             ),
         }
@@ -106,6 +119,10 @@ pub struct DecisionStore {
     root: PathBuf,
     journal: BufWriter<File>,
     state: DecisionState,
+    /// Raised before journal I/O and cleared only after flush+sync succeed.
+    /// An I/O error therefore makes every subsequent append fail closed until
+    /// a new `open` replays and, if necessary, repairs the journal.
+    recovery_required: bool,
     _lock: File,
 }
 
@@ -131,18 +148,37 @@ impl DecisionStore {
             },
         })?;
 
+        // `load` intentionally tolerates one unterminated crash fragment so a
+        // read-only diagnostic can observe it. A live writer cannot. With the
+        // exclusive lock already held, keep only the validated newline-ended
+        // prefix and make that size change durable before exposing append.
         let loaded = Self::load(&root)?;
         let journal_path = root.join(JOURNAL_FILE);
         let journal = OpenOptions::new()
             .create(true)
             .append(true)
+            .read(true)
             .open(&journal_path)
             .map_err(io(&journal_path))?;
+        if loaded.torn_tail > 0 {
+            let len = journal.metadata().map_err(io(&journal_path))?.len();
+            let torn_tail = loaded.torn_tail as u64;
+            let valid_len = len.checked_sub(torn_tail).ok_or_else(|| {
+                StoreError::JournalCorrupt {
+                    path: journal_path.clone(),
+                    line: 0,
+                    detail: "torn-tail byte count exceeds journal length".into(),
+                }
+            })?;
+            journal.set_len(valid_len).map_err(io(&journal_path))?;
+            journal.sync_all().map_err(io(&journal_path))?;
+        }
 
         Ok(Self {
             root,
             journal: BufWriter::new(journal),
             state: loaded.state,
+            recovery_required: false,
             _lock: lock,
         })
     }
@@ -212,6 +248,10 @@ impl DecisionStore {
         entries: &[DecisionJournalEntry],
         knowledge: &KnowledgeState,
     ) -> Result<(), StoreError> {
+        let path = self.root.join(JOURNAL_FILE);
+        if self.recovery_required {
+            return Err(StoreError::RecoveryRequired { path });
+        }
         if entries.is_empty() {
             return Ok(());
         }
@@ -225,11 +265,15 @@ impl DecisionStore {
             encoded.push(b'\n');
         }
 
-        let path = self.root.join(JOURNAL_FILE);
+        // Once I/O starts, a failure can leave any prefix visible to the file
+        // handle. Do not trust the old in-memory state for a second append;
+        // reopening is the recovery boundary that replays/repairs actual bytes.
+        self.recovery_required = true;
         self.journal.write_all(&encoded).map_err(io(&path))?;
         self.journal.flush().map_err(io(&path))?;
         self.journal.get_ref().sync_data().map_err(io(&path))?;
         self.state = candidate;
+        self.recovery_required = false;
         Ok(())
     }
 }
@@ -490,6 +534,70 @@ mod tests {
         assert_eq!(loaded.entries.len(), 1);
         assert!(loaded.torn_tail > 0);
         assert_eq!(loaded.state.next_sequence(), 1);
+    }
+
+    #[test]
+    fn reopen_repairs_torn_tail_before_any_new_append() {
+        let dir = TestDir::new();
+        let knowledge = knowledge();
+        {
+            let mut store = DecisionStore::open(&dir.0).unwrap();
+            store
+                .append(
+                    &[DecisionJournalEntry::new(
+                        0,
+                        DecisionOp::Record(draft("decision:1", &knowledge)),
+                    )],
+                    &knowledge,
+                )
+                .unwrap();
+        }
+        let path = dir.0.join(JOURNAL_FILE);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#"{"sequence":1,"op":{"broken""#).unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+
+        assert!(DecisionStore::load(&dir.0).unwrap().torn_tail > 0);
+        {
+            let mut store = DecisionStore::open(&dir.0).unwrap();
+            assert_eq!(store.next_sequence(), 1);
+            store
+                .append(
+                    &[DecisionJournalEntry::new(
+                        1,
+                        DecisionOp::Record(draft("decision:2", &knowledge)),
+                    )],
+                    &knowledge,
+                )
+                .unwrap();
+        }
+        let loaded = DecisionStore::load(&dir.0).unwrap();
+        assert_eq!(loaded.torn_tail, 0);
+        assert_eq!(loaded.entries.len(), 2);
+        assert_eq!(loaded.state.next_sequence(), 2);
+        DecisionStore::open(&dir.0).unwrap();
+    }
+
+    #[test]
+    fn a_poisoned_writer_refuses_further_appends_until_reopened() {
+        let dir = TestDir::new();
+        let knowledge = knowledge();
+        let mut store = DecisionStore::open(&dir.0).unwrap();
+        // Every real journal I/O failure leaves this set because append raises
+        // it before write_all and clears it only after sync_data succeeds.
+        store.recovery_required = true;
+        assert!(matches!(
+            store.append(
+                &[DecisionJournalEntry::new(
+                    0,
+                    DecisionOp::Record(draft("decision:1", &knowledge)),
+                )],
+                &knowledge,
+            ),
+            Err(StoreError::RecoveryRequired { .. })
+        ));
+        assert_eq!(store.next_sequence(), 0);
     }
 
     #[test]

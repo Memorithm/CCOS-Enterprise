@@ -6,7 +6,8 @@
 //! in-memory state advances. A restart reconstructs state exclusively from that journal.
 //!
 //! A crash may leave an unterminated final JSON fragment. Only that final fragment is
-//! discarded; malformed complete lines are corruption and fail closed.
+//! discarded; malformed complete lines are corruption and fail closed. A writer that
+//! acquires the store lock repairs that torn tail durably before it can append again.
 
 #![forbid(unsafe_code)]
 
@@ -40,6 +41,12 @@ pub enum StoreError {
     AlreadyOpen {
         path: PathBuf,
     },
+    /// A previous append reached the journal I/O phase but did not complete
+    /// durably. The in-memory state may no longer describe the bytes visible
+    /// through the file handle, so continuing in-process is forbidden.
+    RecoveryRequired {
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -67,6 +74,11 @@ impl std::fmt::Display for StoreError {
             Self::AlreadyOpen { path } => write!(
                 f,
                 "{}: another live writer already owns this knowledge store",
+                path.display()
+            ),
+            Self::RecoveryRequired { path } => write!(
+                f,
+                "{}: knowledge journal writer requires reopen/recovery after a failed append",
                 path.display()
             ),
         }
@@ -108,6 +120,10 @@ pub struct KnowledgeStore {
     root: PathBuf,
     journal: BufWriter<File>,
     state: KnowledgeState,
+    /// Set as soon as an append enters journal I/O and cleared only after the
+    /// bytes have been flushed and synced. Any I/O error leaves it set so a
+    /// caller cannot append behind bytes whose durable state is ambiguous.
+    recovery_required: bool,
     _lock: File,
 }
 
@@ -133,18 +149,37 @@ impl KnowledgeStore {
             },
         })?;
 
+        // Loading is deliberately tolerant of one unterminated final record,
+        // but a live writer must not append behind it. The exclusive store lock
+        // is already held here, so truncate to the exact validated prefix and
+        // sync the size change before exposing an append-capable handle.
         let loaded = Self::load(&root)?;
         let journal_path = root.join(JOURNAL_FILE);
         let journal = OpenOptions::new()
             .create(true)
             .append(true)
+            .read(true)
             .open(&journal_path)
             .map_err(io(&journal_path))?;
+        if loaded.torn_tail > 0 {
+            let len = journal.metadata().map_err(io(&journal_path))?.len();
+            let torn_tail = loaded.torn_tail as u64;
+            let valid_len =
+                len.checked_sub(torn_tail)
+                    .ok_or_else(|| StoreError::JournalCorrupt {
+                        path: journal_path.clone(),
+                        line: 0,
+                        detail: "torn-tail byte count exceeds journal length".into(),
+                    })?;
+            journal.set_len(valid_len).map_err(io(&journal_path))?;
+            journal.sync_all().map_err(io(&journal_path))?;
+        }
 
         Ok(Self {
             root,
             journal: BufWriter::new(journal),
             state: loaded.state,
+            recovery_required: false,
             _lock: lock,
         })
     }
@@ -211,6 +246,10 @@ impl KnowledgeStore {
 
     /// Validate an entire batch before writing a byte, then make the batch durable.
     pub fn append(&mut self, entries: &[JournalEntry]) -> Result<(), StoreError> {
+        let path = self.root.join(JOURNAL_FILE);
+        if self.recovery_required {
+            return Err(StoreError::RecoveryRequired { path });
+        }
         if entries.is_empty() {
             return Ok(());
         }
@@ -224,11 +263,15 @@ impl KnowledgeStore {
             encoded.push(b'\n');
         }
 
-        let path = self.root.join(JOURNAL_FILE);
+        // From this point onward an error may have left an unknown prefix of
+        // `encoded` in the BufWriter, the OS page cache, or durable storage.
+        // Keep the writer poisoned until a fresh open replays/repairs the file.
+        self.recovery_required = true;
         self.journal.write_all(&encoded).map_err(io(&path))?;
         self.journal.flush().map_err(io(&path))?;
         self.journal.get_ref().sync_data().map_err(io(&path))?;
         self.state = candidate;
+        self.recovery_required = false;
         Ok(())
     }
 }
@@ -333,6 +376,50 @@ mod tests {
         assert_eq!(loaded.entries.len(), 1);
         assert!(loaded.torn_tail > 0);
         assert_eq!(loaded.state.next_sequence(), 1);
+    }
+
+    #[test]
+    fn reopen_repairs_torn_tail_before_any_new_append() {
+        let dir = TestDir::new();
+        {
+            let mut store = KnowledgeStore::open(&dir.0).unwrap();
+            store.append(&[source(0, "acme", "source:1")]).unwrap();
+        }
+        let path = dir.0.join(JOURNAL_FILE);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#"{"sequence":1,"op":{"broken""#).unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+
+        // This is the regression sequence from the audit: first load tolerates
+        // the crash tail, reopen repairs it under the lock, append follows the
+        // validated prefix, and a second reopen must still parse the journal.
+        assert!(KnowledgeStore::load(&dir.0).unwrap().torn_tail > 0);
+        {
+            let mut store = KnowledgeStore::open(&dir.0).unwrap();
+            assert_eq!(store.next_sequence(), 1);
+            store.append(&[source(1, "acme", "source:2")]).unwrap();
+        }
+        let loaded = KnowledgeStore::load(&dir.0).unwrap();
+        assert_eq!(loaded.torn_tail, 0);
+        assert_eq!(loaded.entries.len(), 2);
+        assert_eq!(loaded.state.next_sequence(), 2);
+        KnowledgeStore::open(&dir.0).unwrap();
+    }
+
+    #[test]
+    fn a_poisoned_writer_refuses_further_appends_until_reopened() {
+        let dir = TestDir::new();
+        let mut store = KnowledgeStore::open(&dir.0).unwrap();
+        // Unit-level assertion of the post-I/O-error invariant. Every actual
+        // journal I/O branch leaves this flag set because it is raised before
+        // write_all and cleared only after sync_data succeeds.
+        store.recovery_required = true;
+        assert!(matches!(
+            store.append(&[source(0, "acme", "source:1")]),
+            Err(StoreError::RecoveryRequired { .. })
+        ));
+        assert_eq!(store.next_sequence(), 0);
     }
 
     #[test]

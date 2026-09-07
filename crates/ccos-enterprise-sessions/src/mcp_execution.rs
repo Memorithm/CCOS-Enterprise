@@ -229,8 +229,8 @@ mod tests {
         let mut acme = TenantState::new(10_000);
         acme.allow_model("claude-opus");
         deployment.add_tenant("memorithm", "acme", acme);
-        deployment.assign("alice", "writer");
-        deployment.assign("bob", "reader");
+        deployment.assign("memorithm", "alice", "writer");
+        deployment.assign("memorithm", "bob", "reader");
         deployment
     }
 

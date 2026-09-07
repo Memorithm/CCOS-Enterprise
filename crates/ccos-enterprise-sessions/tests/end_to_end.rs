@@ -42,8 +42,8 @@ fn product(root: &PathBuf) -> GovernedMcp<TenantSessions> {
         state.allow_model("claude-opus");
         assert!(d.add_tenant(ORG, tenant, state));
     }
-    d.assign("alice", "writer");
-    d.assign("bob", "reader");
+    d.assign(ORG, "alice", "writer");
+    d.assign(ORG, "bob", "reader");
     GovernedMcp::new(d, TenantSessions::new(root))
 }
 
@@ -223,7 +223,7 @@ fn an_exhausted_budget_stops_core_being_called() {
     let mut state = TenantState::new(25); // two calls at 10, then nothing
     state.allow_model("claude-opus");
     assert!(d.add_tenant(ORG, "acme", state));
-    d.assign("alice", "writer");
+    d.assign(ORG, "alice", "writer");
     let mut mcp = GovernedMcp::new(d, TenantSessions::new(&dir));
 
     let mut admitted = 0;

@@ -119,7 +119,12 @@ use ccos_enterprise_observability::CounterRegistry;
 use ccos_enterprise_policy::{ModelAllowlist, PolicyDecision, TokenBudget};
 use ccos_enterprise_qpages::{AdvancedQPageVariant, QPageRegistry};
 use ccos_enterprise_rbac::{Permission, Role, RoleBook};
-use ccos_enterprise_tenancy::{TenantId, TenantScope};
+use ccos_enterprise_tenancy::TenantId;
+// `TenantScope` names the direct storage API, which exists only for the
+// stress suite (`test-fixtures`); production builds do not compile it and
+// must not carry the import either.
+#[cfg(any(test, feature = "test-fixtures"))]
+use ccos_enterprise_tenancy::TenantScope;
 use sha2::{Digest, Sha256};
 
 /// Governed model switch transaction (docs/MODEL_SWITCHING_POLICY.md).
@@ -176,6 +181,18 @@ pub const DEFAULT_AUDIT_CAPACITY: usize = 100_000;
 /// suppression. Bounded for the same reason as the journal.
 pub const DEFAULT_REPLAY_MEMORY: usize = 65_536;
 
+/// How many decided `request_id`s are remembered for replay suppression, per
+/// **tenant** — the smallest share any deployment will hand out.
+///
+/// It used to be a single deployment-wide number, and `0` disabled the gate
+/// entirely: a deployment configured with `replay_memory(0)` — or any
+/// deployment whose operator had not thought about the knob — admitted the
+/// same `request_id` twice, executed the effect twice and billed twice.
+/// Replaying is the one thing `request_id` exists to prevent, so the floor is
+/// now a real bound, not a switch. See [`Deployment::remember`] for the
+/// per-tenant fairness rule.
+pub const MIN_REPLAY_MEMORY_PER_TENANT: usize = 4;
+
 /// Maximum cells one tenant may hold.
 ///
 /// The store had no cap on cells, on key bytes, on value bytes or on tenants,
@@ -190,6 +207,18 @@ pub const MAX_CELL_KEY_BYTES: usize = 1_024;
 /// Maximum bytes in a cell value. Generous — a cell holds a memory root, not a
 /// token — but finite, which is the property that was missing.
 pub const MAX_CELL_VALUE_BYTES: usize = 1_048_576;
+
+/// The most bytes tenant cells may hold **deployment-wide**.
+///
+/// The per-tenant cap alone let every tenant hold its full allowance of 64
+/// GiB, so one thousand tenants could pin 64 TiB of process memory with
+/// perfectly legitimate per-tenant traffic — a fleet-wide outage reachable by
+/// ordinary use. The global cap is the last line: the per-tenant cap keeps one
+/// tenant from starving its neighbors, this one keeps the sum from killing the
+/// deployment. When it is full, *new* cells are refused
+/// ([`Refusal::StorageExhausted`]) until something is deleted; overwriting an
+/// existing cell never grows the total and is always allowed.
+pub const MAX_TOTAL_CELL_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Why a call did not reach Core. Every variant is an announced refusal — the
 /// product never fails open and never fails silently.
@@ -314,28 +343,33 @@ pub enum GovernanceChange {
         holders: Vec<String>,
     },
     /// A role and every grant of it were removed.
-    RoleRemoved {
-        role: String,
-        holders: Vec<String>,
-    },
+    RoleRemoved { role: String, holders: Vec<String> },
     RoleAssigned {
+        /// The principal's organization. Part of the RBAC key: assignments
+        /// are scoped to it, so a grant for one org's `agent-7` says nothing
+        /// about another org's. `default` so snapshots written before the
+        /// field existed still load; on such a row the actor name is the
+        /// whole historical record.
+        #[serde(default)]
+        org: String,
         actor: String,
         role: String,
     },
     RoleUnassigned {
+        #[serde(default)]
+        org: String,
         actor: String,
         role: String,
     },
     /// A principal was de-provisioned.
     ActorRemoved {
+        #[serde(default)]
+        org: String,
         actor: String,
         roles: Vec<String>,
     },
     /// A tenant was provisioned on a serving deployment.
-    TenantAdded {
-        tenant: String,
-        org: String,
-    },
+    TenantAdded { tenant: String, org: String },
     /// A tenant's own rules changed, as measured across a mutable borrow.
     /// Only non-empty differences are journaled, so an inspection that changed
     /// nothing leaves no row.
@@ -360,17 +394,11 @@ pub enum GovernanceChange {
         previous: Option<String>,
     },
     /// A tool became an administrative act.
-    ToolMadeAdministrative {
-        tool: String,
-    },
+    ToolMadeAdministrative { tool: String },
     /// A tool became gated on a recorded human approval.
-    ToolMadeApprovalGated {
-        tool: String,
-    },
+    ToolMadeApprovalGated { tool: String },
     /// A human approval was recorded in the deployment's ledger.
-    ApprovalRecorded {
-        approval_id: String,
-    },
+    ApprovalRecorded { approval_id: String },
     /// A governed model switch transaction completed (or diverged and
     /// reverted). Carries the durable record digest so the audit can point at
     /// the full transaction.
@@ -585,7 +613,11 @@ pub struct Deployment {
     /// cells retained 256 copies of it — and could only be probed by building
     /// an owned key, so a 4 MiB `get` that missed still allocated 4 MiB. Here
     /// the name is held once per tenant and both lookups take a `&str`.
+    /// Store a tenant's cells. The nested map is probed by `&str` on lookup.
     store: BTreeMap<TenantId, BTreeMap<String, String>>,
+    /// Total bytes of cell keys and values across **all** tenants. Maintained
+    /// on every write and delete; `MAX_TOTAL_CELL_BYTES` caps it.
+    store_bytes: u64,
     metrics: CounterRegistry,
     audit: VecDeque<AuditRecord>,
     audit_capacity: usize,
@@ -638,6 +670,7 @@ impl Deployment {
             governed_tools: BTreeMap::new(),
             justification_required: BTreeSet::new(),
             store: BTreeMap::new(),
+            store_bytes: 0,
             metrics: CounterRegistry::default(),
             audit: VecDeque::new(),
             audit_capacity: DEFAULT_AUDIT_CAPACITY,
@@ -666,11 +699,24 @@ impl Deployment {
     }
 
     /// Bound the replay memory: how many decided `request_id`s this
-    /// deployment remembers for idempotency. The bound is shared fairly
-    /// between tenants — see [`Deployment::remember`] — so a small value on a
-    /// multi-tenant edge deployment still protects every tenant's retries.
+    /// deployment remembers for idempotency.
+    ///
+    /// The bound is shared fairly between tenants — see
+    /// [`Deployment::remember`] — so a small value on a multi-tenant edge
+    /// deployment still protects every tenant's retries.
+    ///
+    /// **Zero no longer disables the gate.** A capacity of `0` used to switch
+    /// replay suppression off entirely, which is the one thing `request_id`
+    /// exists to provide: every retried call was executed and billed again,
+    /// and a deployment provisioned with the "disable" value failed its own
+    /// contract by configuration. The stored value is now at least
+    /// [`MIN_REPLAY_MEMORY_PER_TENANT`] per tenant, so the smallest
+    /// deployment still remembers its last few ids. Idempotency is a floor,
+    /// not a preference.
     pub fn with_replay_memory(mut self, capacity: usize) -> Self {
-        self.replay_memory = capacity;
+        self.replay_memory = capacity
+            .max(MIN_REPLAY_MEMORY_PER_TENANT)
+            .max(MIN_REPLAY_MEMORY_PER_TENANT * self.tenants.len().max(1));
         self
     }
 
@@ -907,7 +953,7 @@ impl Deployment {
         why: Option<&str>,
     ) -> bool {
         let from = owned(&self.roles.permissions_of(name));
-        let holders = owned(&self.roles.holders_of(name));
+        let holders = self.roles.holders_of(name);
         let mut role = Role {
             name: name.to_string(),
             ..Default::default()
@@ -937,7 +983,7 @@ impl Deployment {
     }
 
     fn remove_role_as(&mut self, name: &str, by: Option<&str>, why: Option<&str>) -> bool {
-        let holders = owned(&self.roles.holders_of(name));
+        let holders = self.roles.holders_of(name);
         if !self.roles.remove_role(name) {
             return false;
         }
@@ -953,22 +999,25 @@ impl Deployment {
     }
 
     /// Withdraw one role from one actor. Returns whether the grant existed.
-    pub fn unassign(&mut self, actor: &str, role: &str) -> bool {
-        self.unassign_as(actor, role, None, None)
+    /// Keyed on `(org, actor)` like every RBAC operation — see [`Self::assign`].
+    pub fn unassign(&mut self, org: &str, actor: &str, role: &str) -> bool {
+        self.unassign_as(org, actor, role, None, None)
     }
 
     fn unassign_as(
         &mut self,
+        org: &str,
         actor: &str,
         role: &str,
         by: Option<&str>,
         why: Option<&str>,
     ) -> bool {
-        if !self.roles.unassign(actor, role) {
+        if !self.roles.unassign(org, actor, role) {
             return false;
         }
         self.record(
             GovernanceChange::RoleUnassigned {
+                org: org.to_string(),
                 actor: actor.to_string(),
                 role: role.to_string(),
             },
@@ -979,17 +1028,29 @@ impl Deployment {
     }
 
     /// De-provision a principal entirely. Returns whether it held anything.
-    pub fn remove_actor(&mut self, actor: &str) -> bool {
-        self.remove_actor_as(actor, None, None)
+    ///
+    /// The actor is named by its **organization** as well as its name: RBAC
+    /// keys on `(org, actor)`, so `remove_actor("agent-7")` used to de-provision
+    /// whichever organization's `agent-7` happened to hold grants — and could
+    /// silently strip another org's principal of its rights.
+    pub fn remove_actor(&mut self, org: &str, actor: &str) -> bool {
+        self.remove_actor_as(org, actor, None, None)
     }
 
-    fn remove_actor_as(&mut self, actor: &str, by: Option<&str>, why: Option<&str>) -> bool {
-        let roles = owned(&self.roles.roles_of(actor));
-        if !self.roles.remove_actor(actor) {
+    fn remove_actor_as(
+        &mut self,
+        org: &str,
+        actor: &str,
+        by: Option<&str>,
+        why: Option<&str>,
+    ) -> bool {
+        let roles = owned(&self.roles.roles_of(org, actor));
+        if !self.roles.remove_actor(org, actor) {
             return false;
         }
         self.record(
             GovernanceChange::ActorRemoved {
+                org: org.to_string(),
                 actor: actor.to_string(),
                 roles,
             },
@@ -999,9 +1060,10 @@ impl Deployment {
         true
     }
 
-    /// The roles an actor holds, in name order.
-    pub fn roles_of(&self, actor: &str) -> Vec<&str> {
-        self.roles.roles_of(actor)
+    /// The roles an actor holds, in name order. Keyed on `(org, actor)` —
+    /// the same pair admission authorizes on.
+    pub fn roles_of(&self, org: &str, actor: &str) -> Vec<&str> {
+        self.roles.roles_of(org, actor)
     }
 
     /// The tenant ids of this deployment, in name order. `None` is never
@@ -1017,16 +1079,31 @@ impl Deployment {
 
     /// Grant a role. Returns false (and grants nothing) for unknown roles —
     /// the RBAC crate's fail-closed rule, surfaced here.
-    pub fn assign(&mut self, actor: &str, role: &str) -> bool {
-        self.assign_as(actor, role, None, None)
+    ///
+    /// The grant is keyed on `(org, actor)`, not on the bare actor name. The
+    /// deployment-wide book used to key on the name alone, which made the
+    /// actor's organization irrelevant to authorization: provisioning
+    /// `agent-7` in one org granted every other org's `agent-7` the same
+    /// roles — cross-tenant privilege bleed by name collision. A caller who
+    /// cannot state the organization cannot provision the principal.
+    pub fn assign(&mut self, org: &str, actor: &str, role: &str) -> bool {
+        self.assign_as(org, actor, role, None, None)
     }
 
-    fn assign_as(&mut self, actor: &str, role: &str, by: Option<&str>, why: Option<&str>) -> bool {
-        if !self.roles.assign(actor, role) {
+    fn assign_as(
+        &mut self,
+        org: &str,
+        actor: &str,
+        role: &str,
+        by: Option<&str>,
+        why: Option<&str>,
+    ) -> bool {
+        if !self.roles.assign(org, actor, role) {
             return false;
         }
         self.record(
             GovernanceChange::RoleAssigned {
+                org: org.to_string(),
                 actor: actor.to_string(),
                 role: role.to_string(),
             },
@@ -1283,14 +1360,19 @@ impl Deployment {
     // cannot keep that promise however careful its keys are.
     //
     // `put`/`get`/`cells_of` are the storage layer underneath, with no gate in
-    // front. They are public because the stress suite measures this map's own
-    // growth, aliasing and cost characteristics, and running those through the
-    // gates would measure the gates instead — and bill a hundred thousand
-    // tokens to do it. What they are NOT is a way around the governed path
-    // for anything in the product: nothing outside these tests calls them, and
-    // the bounds and the unknown-tenant refusal below apply to both paths, so
-    // the storage layer is never in a state the governed path could not have
-    // produced.
+    // front. They are **behind `test-fixtures`**: the stress suite measures
+    // this map's own growth, aliasing and cost characteristics, and running
+    // those through the gates would measure the gates instead — and bill a
+    // hundred thousand tokens to do it. What they are NOT — any longer — is
+    // public API: a `pub` ungated `put`/`get` on tenant cells bypassed every
+    // one of the nine gates `admit` runs (identity, tenant binding, boundary,
+    // RBAC, billing, journal), so any crate in the build could read and write
+    // another tenant's memory without a credential. Nothing outside these
+    // tests calls them; the bounds and the unknown-tenant refusal below apply
+    // to both paths, so the storage layer is never in a state the governed
+    // path could not have produced. Shipped builds — `default = []` — do not
+    // compile them at all; the only production access to tenant cells is
+    // `put_cell`/`get_cell`/`remove_cell`, through every gate.
 
     /// Write a cell directly, with **no gate in front**. Returns whether it
     /// landed.
@@ -1299,6 +1381,7 @@ impl Deployment {
     /// accepted and readable, which made `Refusal::UnknownTenant` a property of
     /// `admit` rather than of the product: a cell could exist under a tenant
     /// no credential could ever name.
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn put(&mut self, scope: &TenantScope<String>, value: &str) -> bool {
         self.write_cell(&scope.tenant, &scope.inner, value).is_ok()
     }
@@ -1309,6 +1392,7 @@ impl Deployment {
     /// Allocates nothing, including on a miss: the tenant map is probed by
     /// `&str` through [`TenantId`]'s `Borrow` impl, so a caller-sized key costs
     /// a comparison rather than a copy.
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn get(&self, scope: &TenantScope<String>) -> Option<&str> {
         self.store
             .get(scope.tenant.0.as_str())?
@@ -1318,6 +1402,10 @@ impl Deployment {
 
     /// Every cell visible to a tenant — the shape a cross-tenant leak would
     /// have to show up in.
+    ///
+    /// Reading tenant state is not an authorization decision, so this stays
+    /// available to operators of the type (model-switch invariant capture);
+    /// it returns only the named tenant's own cells and nothing of any other.
     pub fn cells_of(&self, tenant: &str) -> Vec<(&str, &str)> {
         self.store
             .get(tenant)
@@ -1334,6 +1422,14 @@ impl Deployment {
 
     /// The shared rule both paths obey. `Err` carries the refusal the governed
     /// path reports; the direct path reports it as `false`.
+    ///
+    /// Enforces both storage ceilings: the per-tenant cell count and the
+    /// deployment-wide byte total. The per-tenant cap alone let every tenant
+    /// hold its full allowance simultaneously — a thousand tenants could pin
+    /// terabytes with legitimate per-tenant traffic — so the sum is capped
+    /// too. Overwriting an existing cell never grows the total and bypasses
+    /// neither check (it cannot exceed the per-tenant count, and its delta is
+    /// the value-size difference).
     fn write_cell(&mut self, tenant: &TenantId, key: &str, value: &str) -> Result<(), Refusal> {
         if !self.tenants.contains_key(tenant) {
             return Err(Refusal::UnknownTenant);
@@ -1351,11 +1447,53 @@ impl Deployment {
         // The cap is on *new* keys: overwriting one a tenant already holds
         // cannot grow the map, and refusing it would make a full tenant unable
         // to correct its own data.
-        if cells.len() >= MAX_CELLS_PER_TENANT && !cells.contains_key(key) {
+        let new_key = !cells.contains_key(key);
+        if new_key && cells.len() >= MAX_CELLS_PER_TENANT {
+            return Err(Refusal::StorageExhausted);
+        }
+        let delta = (key.len() + value.len()) as u64
+            - cells
+                .get(key)
+                .map_or(0, |old| (key.len() + old.len()) as u64);
+        if delta > 0 && self.store_bytes + delta > MAX_TOTAL_CELL_BYTES {
             return Err(Refusal::StorageExhausted);
         }
         cells.insert(key.to_string(), value.to_string());
+        self.store_bytes = self.store_bytes.saturating_add(delta);
         Ok(())
+    }
+
+    /// Bytes one cell map holds (keys and values).
+    fn map_bytes(cells: &BTreeMap<String, String>) -> u64 {
+        cells.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum()
+    }
+
+    /// The bytes every tenant's cells hold in total. A full recount, used
+    /// where whole maps are swapped (restore, checkpoint rollback) rather
+    /// than maintained incrementally.
+    pub(crate) fn total_cell_bytes(&self) -> u64 {
+        self.store.values().map(Self::map_bytes).sum()
+    }
+
+    /// Delete one cell. The gated and test paths both land here; always
+    /// compiled, because the governed `remove_cell` needs it in production
+    /// builds. Returns whether the cell existed.
+    fn delete_cell(&mut self, tenant: &str, key: &str) -> bool {
+        let Some(cells) = self.store.get_mut(tenant) else {
+            return false;
+        };
+        let removed = Self::map_bytes(cells);
+        let existed = cells.remove(key).is_some();
+        if cells.is_empty() {
+            // Drop the tenant's map with it, so an emptied tenant costs
+            // nothing — the map, its keys and the tenant name held once.
+            self.store.remove(tenant);
+        } else if existed {
+            self.store_bytes = self
+                .store_bytes
+                .saturating_sub(removed - Self::map_bytes(cells));
+        }
+        existed
     }
 
     /// Delete a cell directly. Returns whether it existed.
@@ -1364,22 +1502,24 @@ impl Deployment {
     /// retained for the lifetime of the process, because no `remove`, `evict`
     /// or `clear` existed anywhere in the API. Overwriting a value with `""`
     /// returned 7% of the bytes and there was no way to get the rest.
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn remove(&mut self, scope: &TenantScope<String>) -> bool {
-        let Some(cells) = self.store.get_mut(scope.tenant.0.as_str()) else {
-            return false;
-        };
-        let existed = cells.remove(scope.inner.as_str()).is_some();
-        if cells.is_empty() {
-            // Drop the tenant's map with it, so an emptied tenant costs
-            // nothing — the map, its keys and the tenant name held once.
-            self.store.remove(scope.tenant.0.as_str());
-        }
-        existed
+        self.delete_cell(scope.tenant.0.as_str(), &scope.inner)
     }
 
     /// Delete every cell a tenant holds. Returns how many were removed.
+    ///
+    /// Behind `test-fixtures` like `put`/`get`: bulk deletion without a
+    /// credential is a governed act (`remove_cell` is the gated shape), not a
+    /// public convenience on the type.
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn clear_cells(&mut self, tenant: &str) -> usize {
-        self.store.remove(tenant).map_or(0, |cells| cells.len())
+        let Some(cells) = self.store.remove(tenant) else {
+            return 0;
+        };
+        let removed = Self::map_bytes(&cells);
+        self.store_bytes = self.store_bytes.saturating_sub(removed);
+        cells.len()
     }
 
     // ── The governed cell path ───────────────────────────────────────────
@@ -1437,9 +1577,8 @@ impl Deployment {
 
     /// Delete a cell through every gate.
     pub fn remove_cell(&mut self, call: Call<'_>, key: &str) -> Outcome {
-        let scope = TenantScope::new(TenantId(call.request.tenant.clone()), key.to_string());
-        self.cell_call(call, move |d, _| {
-            d.remove(&scope);
+        self.cell_call(call, move |d, tenant| {
+            d.delete_cell(tenant.0.as_str(), key);
             Ok(None)
         })
     }
@@ -1594,11 +1733,19 @@ impl Deployment {
         }
 
         // 5. Authorization: deny by default, ungoverned tools included. Keyed
-        //    on the VERIFIED actor, never on the request's copy of it.
+        //    on the VERIFIED actor, never on the request's copy of it — and on
+        //    the VERIFIED organization with it. The role book used to key on
+        //    the actor name alone, which was deployment-global across orgs:
+        //    every org's `agent-7` shared one assignment row. Authorization
+        //    keys on the same `(org, actor)` pair the credential proves.
         let Some(permission) = self.governed_tools.get(&call.request.tool) else {
             return refuse(Refusal::ToolNotGoverned);
         };
-        if !self.roles.allows(&call.actor.actor().0, permission) {
+        if !self.roles.allows(
+            call.actor.org().0.as_str(),
+            call.actor.actor().0.as_str(),
+            permission,
+        ) {
             return refuse(Refusal::PermissionDenied);
         }
 
@@ -1804,6 +1951,10 @@ impl Deployment {
                 self.store.remove(tenant);
             }
         }
+        // Whole maps were swapped, so the incremental byte counter is rebuilt
+        // from the store rather than patched — a checkpoint rollback must
+        // restore the exact pre-switch total.
+        self.store_bytes = self.total_cell_bytes();
     }
 
     /// Journal one completed model switch transaction as a governance change.
@@ -1945,24 +2096,24 @@ impl Admin<'_> {
     }
 
     /// See [`Deployment::assign`].
-    pub fn assign(&mut self, actor: &str, role: &str) -> bool {
+    pub fn assign(&mut self, org: &str, actor: &str, role: &str) -> bool {
         let (by, why) = (self.actor.clone(), self.justification.clone());
         self.deployment
-            .assign_as(actor, role, Some(&by), Some(&why))
+            .assign_as(org, actor, role, Some(&by), Some(&why))
     }
 
     /// See [`Deployment::unassign`].
-    pub fn unassign(&mut self, actor: &str, role: &str) -> bool {
+    pub fn unassign(&mut self, org: &str, actor: &str, role: &str) -> bool {
         let (by, why) = (self.actor.clone(), self.justification.clone());
         self.deployment
-            .unassign_as(actor, role, Some(&by), Some(&why))
+            .unassign_as(org, actor, role, Some(&by), Some(&why))
     }
 
     /// See [`Deployment::remove_actor`].
-    pub fn remove_actor(&mut self, actor: &str) -> bool {
+    pub fn remove_actor(&mut self, org: &str, actor: &str) -> bool {
         let (by, why) = (self.actor.clone(), self.justification.clone());
         self.deployment
-            .remove_actor_as(actor, Some(&by), Some(&why))
+            .remove_actor_as(org, actor, Some(&by), Some(&why))
     }
 
     /// See [`Deployment::tenant_mut`].
@@ -2260,6 +2411,12 @@ impl ApprovalLedger {
 
 /// Unix seconds, saturating to `0` if the system clock is before the epoch
 /// (which a governance product must not trust as a negative timestamp).
+///
+/// The saturation is the fail-closed direction for approval expiry: a clock
+/// at `0` makes every approval-expiry check evaluate at the epoch, and an
+/// approval recorded after the epoch is live. The dangerous direction — a
+/// clock racing *ahead*, which would expire live approvals early — cannot be
+/// produced by a clock behind the epoch, so no ceiling is invented here.
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2828,7 +2985,6 @@ pub fn request(tenant: &str, actor: &str, tool: &str, request_id: &str) -> Gatew
 pub fn actor(org: &str, name: &str, strength: AuthStrength) -> AuthenticatedActor {
     AuthenticatedActor::asserted(org, name, strength)
 }
-
 /// A two-tenant deployment resembling a real install: `acme` and `globex`,
 /// both owned by the `memorithm` organization, each with its own budget,
 /// allowlist and Q-Page activations, plus the roles and governed tools a
@@ -2857,9 +3013,9 @@ pub fn two_tenant_deployment() -> Deployment {
     globex.allow_model("gpt-5");
     d.add_tenant("memorithm", "globex", globex);
 
-    d.assign("alice", "writer");
-    d.assign("bob", "reader");
-    d.assign("root", "operator");
+    d.assign("memorithm", "alice", "writer");
+    d.assign("memorithm", "bob", "reader");
+    d.assign("memorithm", "root", "operator");
     d
 }
 
@@ -2891,7 +3047,7 @@ mod tests {
         let mut other = TenantState::new(100);
         other.allow_model("claude-opus");
         assert!(d.add_tenant("initech", "hooli", other));
-        d.assign("mallory", "reader");
+        d.assign("initech", "mallory", "reader");
 
         // mallory is genuinely authenticated, in the wrong organization.
         let mallory = actor("initech", "mallory", AuthStrength::Token);
@@ -3011,7 +3167,7 @@ mod tests {
         let mut t = TenantState::new(10_000);
         t.allow_model("m");
         d.add_tenant("memorithm", "acme", t);
-        d.assign("bob", "reader");
+        d.assign("memorithm", "bob", "reader");
         let bob = actor("memorithm", "bob", AuthStrength::Token);
 
         for i in 0..100 {

@@ -65,7 +65,7 @@ fn operator_roles() -> RoleBook {
         .permissions
         .insert(Permission(SKILL_AUDIT_PERMISSION.to_string()));
     book.add_role(auditor);
-    assert!(book.assign("operator", "auditor"));
+    assert!(book.assign("memorithm", "operator", "auditor"));
     book
 }
 
@@ -119,6 +119,7 @@ fn operator_audit_is_tenant_scoped_and_newest_first() {
     ]);
     let report = audit_provenance(
         AuditQuery {
+            org: "memorithm",
             caller: "operator",
             scope: &scope,
             limits: AuditLimits::default(),
@@ -152,6 +153,7 @@ fn cross_tenant_audit_is_refused() {
     let foreign = TenantScope::new(TenantId("globex".into()), ());
     let err = audit_provenance(
         AuditQuery {
+            org: "memorithm",
             caller: "operator",
             scope: &foreign,
             limits: AuditLimits::default(),
@@ -174,6 +176,7 @@ fn audit_denied_without_the_permission() {
     let locked = RoleBook::default();
     let err = audit_provenance(
         AuditQuery {
+            org: "memorithm",
             caller: "operator",
             scope: &scope,
             limits: AuditLimits::default(),
@@ -197,6 +200,7 @@ fn audit_refuses_a_forged_actor_without_the_role() {
     let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId("acme".into()), ())]);
     let err = audit_provenance(
         AuditQuery {
+            org: "memorithm",
             caller: "mallory",
             scope: &scope,
             limits: AuditLimits::default(),
@@ -238,6 +242,7 @@ fn bounded_audit_reports_truncation_without_hiding_counters() {
     let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId("acme".into()), ())]);
     let report = audit_provenance(
         AuditQuery {
+            org: "memorithm",
             caller: "operator",
             scope: &scope,
             limits: AuditLimits {
@@ -266,6 +271,7 @@ fn report_serializes_schema_versioned_without_raw_material() {
     let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId("acme".into()), ())]);
     let report = audit_provenance(
         AuditQuery {
+            org: "memorithm",
             caller: "operator",
             scope: &scope,
             limits: AuditLimits::default(),
@@ -299,6 +305,7 @@ fn report_level_skill_cap_is_explicit() {
     let known = BTreeMap::from([(TenantId("acme".into()), ())]);
     let report = audit_provenance(
         AuditQuery {
+            org: "memorithm",
             caller: "operator",
             scope: &scope,
             limits: AuditLimits {

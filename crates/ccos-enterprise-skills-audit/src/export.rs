@@ -294,7 +294,7 @@ mod tests {
         role.permissions
             .insert(Permission(crate::SKILL_AUDIT_PERMISSION.to_string()));
         book.add_role(role);
-        assert!(book.assign("operator", "auditor"));
+        assert!(book.assign("test-org", "operator", "auditor"));
         book
     }
 
@@ -348,6 +348,7 @@ mod tests {
         let roles = operator_roles();
         let export = seal_export(
             AuditQuery {
+                org: "test-org",
                 caller: "operator",
                 scope: &scope,
                 limits: crate::AuditLimits::default(),
@@ -380,6 +381,7 @@ mod tests {
         let roles = operator_roles();
         let result = seal_export(
             AuditQuery {
+                org: "test-org",
                 caller: "operator",
                 scope: &scope,
                 limits: crate::AuditLimits::default(),
@@ -403,6 +405,7 @@ mod tests {
         let roles = operator_roles();
         let mut export = seal_export(
             AuditQuery {
+                org: "test-org",
                 caller: "operator",
                 scope: &scope,
                 limits: crate::AuditLimits::default(),
@@ -420,6 +423,7 @@ mod tests {
 
         let fresh = seal_export(
             AuditQuery {
+                org: "test-org",
                 caller: "operator",
                 scope: &scope,
                 limits: crate::AuditLimits::default(),
@@ -438,6 +442,7 @@ mod tests {
 
         let denied = seal_export(
             AuditQuery {
+                org: "test-org",
                 caller: "intruder",
                 scope: &scope,
                 limits: crate::AuditLimits::default(),

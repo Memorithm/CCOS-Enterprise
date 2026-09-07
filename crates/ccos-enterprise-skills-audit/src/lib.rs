@@ -316,9 +316,12 @@ impl<'a> AuditSources<'a> {
     }
 }
 
-/// A fully bound audit query: the caller's proven identity, the tenant scope,
-/// and the limits.
+/// A fully bound audit query: the caller's proven organization and actor
+/// identity, the tenant scope, and the limits.
 pub struct AuditQuery<'a> {
+    /// Organization proved by the caller's credential. This is deliberately
+    /// distinct from the tenant: RBAC assignments are keyed by `(org, actor)`.
+    pub org: &'a str,
     pub caller: &'a str,
     pub scope: &'a TenantScope<()>,
     pub limits: AuditLimits,
@@ -350,10 +353,10 @@ pub fn audit_provenance(
             found: query.limits.max_skills,
         });
     }
-    // RBAC: the caller must hold a role granting the audit capability. Deny
-    // by default — an actor holding no such role is refused here, at the
-    // capability boundary, before any ledger material is consulted.
+    // RBAC: the proved (org, actor) pair must hold a role granting the audit
+    // capability. Deny by default before any ledger material is consulted.
     if !query.roles.allows(
+        query.org,
         query.caller,
         &Permission(SKILL_AUDIT_PERMISSION.to_string()),
     ) {
@@ -451,6 +454,8 @@ mod tests {
         EpisodeObservation, SkillConfig, SkillTrialConfig, ToolObservation, ToolOutcome,
     };
 
+    const TEST_ORG: &str = "acme-org";
+
     fn episode(session: &str, turn: u64, evidence: char) -> EpisodeObservation {
         EpisodeObservation {
             evidence_id: evidence.to_string().repeat(64),
@@ -513,7 +518,7 @@ mod tests {
             .permissions
             .insert(Permission(SKILL_AUDIT_PERMISSION.to_string()));
         book.add_role(auditor);
-        assert!(book.assign("operator", "auditor"));
+        assert!(book.assign(TEST_ORG, "operator", "auditor"));
         book
     }
 
@@ -526,7 +531,7 @@ mod tests {
         };
         nobody.permissions.insert(Permission("memory.read".into()));
         book.add_role(nobody);
-        assert!(book.assign("operator", "nobody"));
+        assert!(book.assign(TEST_ORG, "operator", "nobody"));
         book
     }
 
@@ -538,6 +543,7 @@ mod tests {
         let roles = operator_roles();
         let report = audit_provenance(
             AuditQuery {
+                org: TEST_ORG,
                 caller: "operator",
                 scope: &scope,
                 limits: AuditLimits::default(),
@@ -562,6 +568,7 @@ mod tests {
         assert_eq!(
             audit_provenance(
                 AuditQuery {
+                    org: TEST_ORG,
                     caller: "operator",
                     scope: &foreign,
                     limits: AuditLimits::default(),
@@ -575,6 +582,28 @@ mod tests {
     }
 
     #[test]
+    fn same_actor_name_in_another_organization_is_denied() {
+        let skills = SkillRegistry::new(SkillConfig::default()).unwrap();
+        let trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
+        let scope = TenantScope::new(TenantId("acme".into()), ());
+        let roles = operator_roles();
+        assert_eq!(
+            audit_provenance(
+                AuditQuery {
+                    org: "globex-org",
+                    caller: "operator",
+                    scope: &scope,
+                    limits: AuditLimits::default(),
+                    sources: bound_sources(&scope.tenant.0, &skills, &trials),
+                    roles: &roles,
+                },
+                &tenants(&scope),
+            ),
+            Err(AuditError::PermissionDenied)
+        );
+    }
+
+    #[test]
     fn permission_is_denied_by_default_for_an_unauthorized_caller() {
         let skills = SkillRegistry::new(SkillConfig::default()).unwrap();
         let trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
@@ -583,6 +612,7 @@ mod tests {
         assert_eq!(
             audit_provenance(
                 AuditQuery {
+                    org: TEST_ORG,
                     caller: "operator",
                     scope: &scope,
                     limits: AuditLimits::default(),
@@ -598,6 +628,7 @@ mod tests {
         assert_eq!(
             audit_provenance(
                 AuditQuery {
+                    org: TEST_ORG,
                     caller: "intruder",
                     scope: &scope,
                     limits: AuditLimits::default(),
@@ -630,6 +661,7 @@ mod tests {
         let roles = operator_roles();
         let report = audit_provenance(
             AuditQuery {
+                org: TEST_ORG,
                 caller: "operator",
                 scope: &scope,
                 limits: AuditLimits::default(),
@@ -686,6 +718,7 @@ mod tests {
         };
         let report = audit_provenance(
             AuditQuery {
+                org: TEST_ORG,
                 caller: "operator",
                 scope: &scope,
                 limits,
@@ -736,6 +769,7 @@ mod tests {
         let roles = operator_roles();
         let report = audit_provenance(
             AuditQuery {
+                org: TEST_ORG,
                 caller: "operator",
                 scope: &scope,
                 limits: AuditLimits::default(),

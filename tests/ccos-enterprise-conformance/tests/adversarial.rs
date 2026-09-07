@@ -76,10 +76,13 @@ fn privilege_cannot_be_invented() {
     let mut d = two_tenant_deployment();
 
     assert!(
-        !d.assign("mallory", "superuser"),
+        !d.assign("memorithm", "mallory", "superuser"),
         "unknown role grants nothing"
     );
-    assert!(!d.assign("mallory", "root"), "nor does a role-shaped guess");
+    assert!(
+        !d.assign("memorithm", "mallory", "root"),
+        "nor does a role-shaped guess"
+    );
 
     let mallory = actor("memorithm", "mallory", AuthStrength::Strong);
     let req = request("acme", "mallory", "memory.recall", "r-1");
@@ -332,7 +335,7 @@ fn the_budget_boundary_is_exact() {
         d.add_tenant("o", "acme", t),
         "a fresh tenant is provisioned"
     );
-    d.assign("a", "writer");
+    d.assign("o", "a", "writer");
     let who = actor("o", "a", AuthStrength::Token);
 
     let call = |d: &mut Deployment, cost: u64, id: &str| {
@@ -454,7 +457,10 @@ fn a_foreign_org_cannot_spend_another_orgs_quota() {
     let mut hooli = TenantState::new(100);
     hooli.allow_model("claude-opus");
     assert!(d.add_tenant("initech", "hooli", hooli));
-    assert!(d.assign("mallory", "writer"), "a real role in her own org");
+    assert!(
+        d.assign("initech", "mallory", "writer"),
+        "a real role in her own org"
+    );
 
     let mallory = actor("initech", "mallory", AuthStrength::Token);
 

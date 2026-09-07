@@ -281,8 +281,8 @@ fn deployment_activating_capped(mask: u32, audit_capacity: usize) -> Deployment 
             governed_activate(&mut d, "acme", *v, 100);
         }
     }
-    d.assign("alice", "writer");
-    d.assign("bob", "reader");
+    d.assign(ORG, "alice", "writer");
+    d.assign(ORG, "bob", "reader");
     d
 }
 
@@ -668,7 +668,7 @@ fn ten_thousand_tenants_keep_disjoint_activation_sets() {
     let mut d = Deployment::new().with_audit_capacity(0);
     d.add_role("reader", &["memory.read"])
         .govern_tool("memory.recall", "memory.read");
-    d.assign("alice", "reader");
+    d.assign(ORG, "alice", "reader");
     for t in 0..N {
         let mut state = TenantState::new(100);
         state.allow_model("claude-opus");
@@ -1397,7 +1397,7 @@ fn no_activation_can_widen_the_boundary_the_allowlist_or_the_budget() {
     for v in ALL {
         governed_activate(&mut tight, "acme", v, 100);
     }
-    tight.assign("alice", "writer");
+    tight.assign(ORG, "alice", "writer");
     let out = recall(
         &mut tight,
         "alice",
@@ -1428,7 +1428,7 @@ fn no_activation_can_widen_the_boundary_the_allowlist_or_the_budget() {
 #[test]
 fn no_credential_reaches_a_variant_it_does_not_own() {
     let mut d = deployment_activating(SUBSETS - 1); // acme has all ten active
-    d.assign("mallory", "writer");
+    d.assign(FOREIGN_ORG, "mallory", "writer");
 
     // 1. bob authenticates honestly and then claims to be alice, who can write
     //    — and asks for a variant acme really has activated.
@@ -1536,7 +1536,7 @@ fn multi_tenant_federated_federates_nothing_and_leaks_nothing() {
             100,
         );
     }
-    d.assign("alice", "writer");
+    d.assign(ORG, "alice", "writer");
 
     d.put(&scope("acme", "shared"), "acme's note");
     d.put(&scope("globex", "shared"), "globex's note");
@@ -1734,7 +1734,7 @@ fn re_adding_a_live_tenant_is_refused_and_keeps_its_activations_and_ledger() {
         !d.add_tenant(FOREIGN_ORG, "acme", hijack),
         "a live tenant is not re-homed by re-provisioning it"
     );
-    d.assign("mallory", "writer");
+    d.assign(FOREIGN_ORG, "mallory", "writer");
     let mallory = actor(FOREIGN_ORG, "mallory", AuthStrength::Token);
     let req = request("acme", "mallory", "memory.recall", "hijack");
     assert_eq!(

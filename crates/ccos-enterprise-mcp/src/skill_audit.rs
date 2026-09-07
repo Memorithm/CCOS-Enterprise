@@ -49,13 +49,15 @@ pub fn skill_audit_tool_spec() -> Value {
 
 /// Build the audit report for the tenant this server is bound to.
 ///
-/// `actor` is the identity the server's token proved (the same one `admit`
-/// keys authorization on). The permission gate is enforced by the
-/// deployment's `admit` path before this runs (the tool is governed under
-/// `audit.provenance`); the audit crate re-checks the same role book, so a
-/// caller can never reach the report without holding the role.
+/// `org` and `actor` are the organization and actor the server's credential
+/// proved (the same pair `admit` keys authorization on). The permission gate
+/// is enforced by the deployment's `admit` path before this runs (the tool is
+/// governed under `audit.provenance`); the audit crate re-checks the exact
+/// `(org, actor)` pair in the same role book, so an equal actor name in a
+/// different organization cannot inherit the caller's role.
 pub fn skill_audit_result(
     deployment: &Deployment,
+    org: &str,
     actor: &str,
     tenant: &str,
     skill_store: &SkillStore,
@@ -79,6 +81,7 @@ pub fn skill_audit_result(
         deployment.tenant_ids().map(|id| (id.clone(), ())).collect();
     let report = audit_provenance(
         AuditQuery {
+            org,
             caller: actor,
             scope: &scope,
             limits: AuditLimits {
@@ -139,6 +142,8 @@ mod tests {
     use super::*;
     use ccos_enterprise_runtime::TenantState;
 
+    const TEST_ORG: &str = "memorithm";
+
     #[test]
     fn input_is_bounded_and_closed() {
         assert_eq!(skill_audit_limit(&json!({})).unwrap(), DEFAULT_AUDIT_LIMIT);
@@ -175,8 +180,8 @@ mod tests {
         d.add_role("reader", &["memory.read"]);
         let mut t = TenantState::new(100);
         t.allow_model("claude-opus");
-        d.add_tenant("memorithm", "acme", t);
-        d.assign("operator", "reader");
+        d.add_tenant(TEST_ORG, "acme", t);
+        d.assign(TEST_ORG, "operator", "reader");
         let root = std::env::temp_dir()
             .join(format!("ccos-skill-audit-unit-{}", std::process::id()))
             .join("acme");
@@ -187,6 +192,7 @@ mod tests {
         // permission refusal before any ledger material is read.
         let err = skill_audit_result(
             &d,
+            TEST_ORG,
             "operator",
             "acme",
             &skill_store,
@@ -198,9 +204,10 @@ mod tests {
         // Grant the audit permission and the same call reports the empty
         // tenant as a fact.
         d.add_role("auditor", &["audit.provenance"]);
-        d.assign("operator", "auditor");
+        d.assign(TEST_ORG, "operator", "auditor");
         let report = skill_audit_result(
             &d,
+            TEST_ORG,
             "operator",
             "acme",
             &skill_store,
@@ -210,5 +217,32 @@ mod tests {
         .expect("granted audit reports");
         assert_eq!(report["structuredContent"]["empty"], true);
         assert_eq!(report["structuredContent"]["tenant"], "acme");
+    }
+
+    #[test]
+    fn same_actor_name_in_another_org_does_not_inherit_audit_permission() {
+        let mut d = Deployment::new();
+        d.add_role("auditor", &["audit.provenance"]);
+        let mut t = TenantState::new(100);
+        t.allow_model("claude-opus");
+        d.add_tenant(TEST_ORG, "acme", t);
+        d.assign(TEST_ORG, "operator", "auditor");
+        let root = std::env::temp_dir()
+            .join(format!("ccos-skill-audit-org-unit-{}", std::process::id()))
+            .join("acme");
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+        let skill_store = SkillStore::open(&root).unwrap();
+        let trial_store = SkillTrialStore::open(&root).unwrap();
+        let err = skill_audit_result(
+            &d,
+            "globex",
+            "operator",
+            "acme",
+            &skill_store,
+            &trial_store,
+            &json!({}),
+        )
+        .expect_err("same actor name in another org must not inherit audit role");
+        assert!(err.contains("permission denied"), "{err}");
     }
 }

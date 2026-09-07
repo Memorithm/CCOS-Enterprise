@@ -520,7 +520,7 @@ fn advanced_variants_are_policy_activated_per_tenant() {
     // gate passes and this assertion continues to isolate Q-Page activation.
     // Both tenants belong to alice's organization and each call uses that
     // tenant's active model; the refusal below must therefore be the variant.
-    d.assign("alice", "writer");
+    d.assign("memorithm", "alice", "writer");
     let req = request("globex", "alice", "memory.recall", "r-2");
     let outcome = d.admit(Call {
         actor: &alice,
@@ -612,7 +612,7 @@ fn every_decision_is_journaled_with_its_outcome() {
         d.add_tenant("memorithm", "acme", t),
         "a fresh tenant is provisioned"
     );
-    d.assign("bob", "reader");
+    d.assign("memorithm", "bob", "reader");
 
     let bob = actor("memorithm", "bob", AuthStrength::Token);
     for (i, (tool, cost)) in [

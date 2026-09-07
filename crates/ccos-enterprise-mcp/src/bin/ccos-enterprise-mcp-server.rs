@@ -681,7 +681,7 @@ impl Server {
         if !deployment.add_tenant(org, &config.tenant, tenant) {
             return Err("configured tenant could not be provisioned".into());
         }
-        if !deployment.assign(actor, ROLE_NAME) {
+        if !deployment.assign(org, actor, ROLE_NAME) {
             return Err("configured actor could not be assigned the DSH memory role".into());
         }
         Ok(deployment)
@@ -709,7 +709,7 @@ impl Server {
         if !tenant.models.0.contains(&config.model) {
             return Err("configured model is absent from durable tenant allowlist".into());
         }
-        if !snapshot.roles.roles_of(actor).contains(&ROLE_NAME) {
+        if !snapshot.roles.roles_of(org, actor).contains(&ROLE_NAME) {
             return Err("signed actor does not hold the durable DSH memory role".into());
         }
         Ok(())
@@ -1313,6 +1313,7 @@ impl Server {
                     .and_then(|trials| {
                         skill_audit_result(
                             self.front_door.deployment(),
+                            &self.org,
                             &request.actor,
                             &self.config.tenant,
                             &self.skill_store,
@@ -2040,8 +2041,8 @@ mod tests {
             let d = server.front_door.deployment_mut();
             let mut admin = d.as_admin("root", "grant operator audit");
             admin.add_role("auditor", &["audit.provenance"]);
-            admin.assign("alice", "auditor");
-            admin.assign("operator", "auditor");
+            admin.assign("memorithm", "alice", "auditor");
+            admin.assign("memorithm", "operator", "auditor");
         }
         let guessed_from_model = server
             .handle(&call(
@@ -2097,7 +2098,7 @@ mod tests {
                 let d = server.front_door.deployment_mut();
                 let mut admin = d.as_admin("root", "grant operator audit");
                 admin.add_role("auditor", &["audit.provenance"]);
-                admin.assign("operator", "auditor");
+                admin.assign("memorithm", "operator", "auditor");
             }
             let first = server
                 .handle(&operator_audit(

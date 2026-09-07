@@ -17,7 +17,7 @@ fn deployment_with_approval_gate() -> Deployment {
     let mut t = TenantState::new(10_000);
     t.allow_model("claude-opus");
     assert!(d.add_tenant("memorithm", "acme", t));
-    d.assign("root", "operator");
+    d.assign("memorithm", "root", "operator");
     d
 }
 

@@ -206,7 +206,10 @@ fn no_privilege_reaches_past_the_boundary() {
         "superuser",
         &["memory.read", "memory.write", "policy.admin", "root"],
     );
-    assert!(d.assign("root", "superuser"), "the grant really was made");
+    assert!(
+        d.assign("memorithm", "root", "superuser"),
+        "the grant really was made"
+    );
     for tool in [
         "rsi.status",
         "forge.run",

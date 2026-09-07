@@ -163,13 +163,13 @@ impl DecisionStore {
         if loaded.torn_tail > 0 {
             let len = journal.metadata().map_err(io(&journal_path))?.len();
             let torn_tail = loaded.torn_tail as u64;
-            let valid_len = len.checked_sub(torn_tail).ok_or_else(|| {
-                StoreError::JournalCorrupt {
-                    path: journal_path.clone(),
-                    line: 0,
-                    detail: "torn-tail byte count exceeds journal length".into(),
-                }
-            })?;
+            let valid_len =
+                len.checked_sub(torn_tail)
+                    .ok_or_else(|| StoreError::JournalCorrupt {
+                        path: journal_path.clone(),
+                        line: 0,
+                        detail: "torn-tail byte count exceeds journal length".into(),
+                    })?;
             journal.set_len(valid_len).map_err(io(&journal_path))?;
             journal.sync_all().map_err(io(&journal_path))?;
         }

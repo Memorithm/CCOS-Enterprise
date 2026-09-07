@@ -164,13 +164,13 @@ impl KnowledgeStore {
         if loaded.torn_tail > 0 {
             let len = journal.metadata().map_err(io(&journal_path))?.len();
             let torn_tail = loaded.torn_tail as u64;
-            let valid_len = len.checked_sub(torn_tail).ok_or_else(|| {
-                StoreError::JournalCorrupt {
-                    path: journal_path.clone(),
-                    line: 0,
-                    detail: "torn-tail byte count exceeds journal length".into(),
-                }
-            })?;
+            let valid_len =
+                len.checked_sub(torn_tail)
+                    .ok_or_else(|| StoreError::JournalCorrupt {
+                        path: journal_path.clone(),
+                        line: 0,
+                        detail: "torn-tail byte count exceeds journal length".into(),
+                    })?;
             journal.set_len(valid_len).map_err(io(&journal_path))?;
             journal.sync_all().map_err(io(&journal_path))?;
         }
@@ -351,10 +351,7 @@ mod tests {
     fn invalid_batch_writes_nothing() {
         let dir = TestDir::new();
         let mut store = KnowledgeStore::open(&dir.0).unwrap();
-        let result = store.append(&[
-            source(0, "acme", "source:1"),
-            source(2, "acme", "source:2"),
-        ]);
+        let result = store.append(&[source(0, "acme", "source:1"), source(2, "acme", "source:2")]);
         assert!(matches!(result, Err(StoreError::Knowledge(_))));
         assert_eq!(store.next_sequence(), 0);
         drop(store);

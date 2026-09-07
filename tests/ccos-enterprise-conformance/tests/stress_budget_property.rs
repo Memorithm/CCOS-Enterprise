@@ -603,7 +603,7 @@ fn unlimited_budget_undercounts_without_bound() {
     let mut t = TenantState::new(u64::MAX);
     t.allow_model("m");
     assert!(d.add_tenant("o", "unlimited", t));
-    assert!(d.assign("a", "writer"));
+    assert!(d.assign("o", "a", "writer"));
     let who = actor("o", "a", AuthStrength::Token);
 
     let mut declared: u128 = 0;
@@ -889,7 +889,7 @@ fn the_ledger_is_private_and_a_live_tenant_is_never_reprovisioned() {
         !d.add_tenant("initech", "acme", TenantState::new(50)),
         "REGRESSION GUARD: a foreign org cannot re-home a live tenant"
     );
-    d.assign("mallory", "writer");
+    d.assign("initech", "mallory", "writer");
     let mallory = actor("initech", "mallory", AuthStrength::Token);
     let takeover = request("acme", "mallory", "memory.ingest", "r-5");
     assert_eq!(
@@ -1027,10 +1027,10 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
     let mut globex = TenantState::new(250_000);
     globex.allow_model("m");
     assert!(d.add_tenant("o", "globex", globex));
-    assert!(d.assign("a", "writer"));
+    assert!(d.assign("o", "a", "writer"));
     // `b` holds the same role, so the impersonation shape below is refused for
     // the identity mismatch and not merely for want of a permission.
-    assert!(d.assign("b", "writer"));
+    assert!(d.assign("o", "b", "writer"));
 
     let strong = actor("o", "a", AuthStrength::Token);
     let anon = actor("o", "a", AuthStrength::Anonymous);
@@ -1446,7 +1446,7 @@ fn a_replayed_request_id_is_billed_once() {
 ///
 /// The predecessor's `decide` took identity from `call.actor` but took the
 /// actor *name* and the tenant from the request: it checked
-/// `roles.allows(&call.request.actor, …)` and charged `call.request.tenant`'s
+/// `roles.allows("test-org", &call.request.actor, …)` and charged `call.request.tenant`'s
 /// budget. The authenticated principal was never compared with either.
 ///
 /// The budget consequence was total: any principal that could authenticate at
@@ -1535,7 +1535,7 @@ fn no_authenticated_actor_can_drain_another_tenants_budget() {
     // Impersonation is refused *inside* the organization too. This is the
     // sharper half: `insider` is a genuine memorithm principal whose org does
     // own acme, so the org gate cannot help here — only the actor binding can.
-    d.assign("insider", "reader");
+    d.assign("memorithm", "insider", "reader");
     let insider = actor("memorithm", "insider", AuthStrength::Token);
     let elevated = request("acme", "alice", "memory.ingest", "m-4");
     assert_eq!(
@@ -1709,7 +1709,7 @@ fn an_empty_allowlist_denies_everything_including_the_empty_string() {
     d.add_role("writer", &["memory.write"])
         .govern_tool("memory.ingest", "memory.write");
     assert!(d.add_tenant("o", "bare", TenantState::new(1_000)));
-    assert!(d.assign("a", "writer"));
+    assert!(d.assign("o", "a", "writer"));
     let who = actor("o", "a", AuthStrength::Token);
     for (i, model) in ["", "claude-opus", "gpt-5"].into_iter().enumerate() {
         let req = request("bare", "a", "memory.ingest", &format!("r-{i}"));
@@ -1925,7 +1925,7 @@ fn the_allowlist_accepts_non_canonical_entries() {
     let mut t = TenantState::new(100);
     t.allow_model("").allow_model(" ").allow_model("a\nb");
     assert!(d.add_tenant("o", "acme", t));
-    assert!(d.assign("a", "writer"));
+    assert!(d.assign("o", "a", "writer"));
     let who = actor("o", "a", AuthStrength::Token);
 
     let stored = d.tenant_models("acme").expect("tenant model allowlist");
@@ -2076,7 +2076,7 @@ fn the_budget_gate_leaks_the_balance_to_anyone_who_shares_the_tenant() {
     let mut victim = TenantState::new(LIMIT);
     victim.allow_model("m");
     assert!(d.add_tenant("victim-corp", "victim", victim));
-    assert!(d.assign("insider", "writer"));
+    assert!(d.assign("victim-corp", "insider", "writer"));
 
     let insider = actor("victim-corp", "insider", AuthStrength::Token);
     let legit = request("victim", "insider", "memory.ingest", "legit");
@@ -2328,7 +2328,7 @@ fn the_journal_is_bounded_and_the_meter_is_not() {
     let mut t = TenantState::new(CALLS);
     t.allow_model("m");
     assert!(d.add_tenant("o", "acme", t));
-    assert!(d.assign("a", "writer"));
+    assert!(d.assign("o", "a", "writer"));
     let who = actor("o", "a", AuthStrength::Token);
 
     for i in 0..CALLS {

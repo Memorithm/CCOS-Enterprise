@@ -361,9 +361,9 @@ fn fleet_deployment(names: &[String]) -> Deployment {
             .expect("ordinary endurance variant is policy-permitted");
         }
     }
-    assert!(d.assign("alice", "writer"));
-    assert!(d.assign("bob", "reader"));
-    assert!(d.assign("root", "operator"));
+    assert!(d.assign(FLEET_ORG, "alice", "writer"));
+    assert!(d.assign(FLEET_ORG, "bob", "reader"));
+    assert!(d.assign(FLEET_ORG, "root", "operator"));
     // `mallory` and `ghost` are deliberately left role-less.
     d
 }
@@ -1346,7 +1346,7 @@ fn unauthenticated_flood_is_bounded_by_the_audit_capacity() {
     let mut d = fleet_deployment(&names);
     let foreign = actor("nowhere", "ghost", AuthStrength::Token);
     assert!(
-        d.assign("ghost", "writer"),
+        d.assign("nowhere", "ghost", "writer"),
         "give the foreigner a full role: the org gate must still refuse"
     );
     let req = request(&names[0], "ghost", "memory.ingest", "r-foreign");
@@ -1981,7 +1981,7 @@ fn unlimited_budget_stops_summing_admitted_costs() {
     let mut unlimited = TenantState::new(u64::MAX);
     unlimited.allow_model("claude-opus");
     assert!(d.add_tenant(FLEET_ORG, "infinite", unlimited));
-    assert!(d.assign("alice", "writer"));
+    assert!(d.assign(FLEET_ORG, "alice", "writer"));
     let alice = actor(FLEET_ORG, "alice", AuthStrength::Token);
 
     let mut admitted_sum = 0u128;

@@ -12,6 +12,10 @@
 //! `rustls` `ServerConfig` inside it — and turns that result into an identity
 //! the admission path can key on. Everything below the [`VerifiedPeer`]
 //! boundary is somebody else's guarantee; everything above it is this crate's.
+//! What this crate *does* consult on its own is the deployment's deny-list: a
+//! principal the deployment has revoked is refused here even though the
+//! certificate itself is cryptographically perfect — see
+//! [`MtlsAuthenticator::with_shared_revocations`].
 //!
 //! # Where the trust boundary actually is
 //!
@@ -37,7 +41,10 @@
 
 use std::collections::BTreeSet;
 
-use crate::{is_canonical_identity, ActorId, AuthError, AuthStrength, AuthenticatedActor, OrgId};
+use crate::{
+    is_canonical_identity, ActorId, AuthError, AuthStrength, AuthenticatedActor, OrgId,
+    SharedRevocations,
+};
 
 /// A peer whose certificate chain **the transport has already verified**.
 ///
@@ -56,6 +63,11 @@ pub struct VerifiedPeer {
     org: String,
     actor: String,
     not_after: u64,
+    /// The leaf's own validity start, when the terminator reports it. A
+    /// certificate that is not yet valid is refused, symmetrically with the
+    /// expiry check — both are the terminator's job that this verifier repeats
+    /// because a forgotten proxy check must not matter.
+    not_before: Option<u64>,
 }
 
 impl VerifiedPeer {
@@ -71,12 +83,44 @@ impl VerifiedPeer {
     ///   terminator, which is the only party that knows which field its PKI
     ///   puts them in.
     /// * `not_after` — the leaf's expiry, unix seconds.
+    ///
+    /// **Behind `test-identities`, and only for tests.** Freezing the whole
+    /// peer — validity window included — from four strings was a constructor
+    /// production code could compile, and the window was the one field a
+    /// caller could set to whatever made admission easiest. Production callers
+    /// describe the peer through [`Self::attested_with_anchor`], which carries
+    /// the leaf's own `not_before` as well and is the shape a terminator
+    /// actually knows. A production build cannot compile this constructor at
+    /// all — the same gate `AuthenticatedActor::asserted` lives behind.
+    #[cfg(any(test, feature = "test-identities"))]
     pub fn attested(issuer_spki_sha256: [u8; 32], org: &str, actor: &str, not_after: u64) -> Self {
+        Self::attested_with_anchor(issuer_spki_sha256, org, actor, not_after, None)
+    }
+
+    /// Describe a peer whose chain **the transport has verified**.
+    ///
+    /// This is the production constructor. It is still an assertion — no Rust
+    /// type keeps a caller inside the same process from asserting something
+    /// false (see the module docs on where the trust boundary sits) — but it
+    /// can make the assertion carry what a real terminator knows and nothing
+    /// more: the pinned issuer key, the subject names, and the leaf's own
+    /// validity window. The window is an input the verifier checks, not a
+    /// claim the peer gets to drop.
+    ///
+    /// Call this from a TLS terminator and nowhere else.
+    pub fn attested_with_anchor(
+        issuer_spki_sha256: [u8; 32],
+        org: &str,
+        actor: &str,
+        not_after: u64,
+        not_before: Option<u64>,
+    ) -> Self {
         Self {
             issuer_spki_sha256,
             org: org.to_string(),
             actor: actor.to_string(),
             not_after,
+            not_before,
         }
     }
 
@@ -98,6 +142,12 @@ impl VerifiedPeer {
     /// The leaf certificate's expiry, unix seconds.
     pub fn not_after(&self) -> u64 {
         self.not_after
+    }
+
+    /// The leaf certificate's validity start, when the terminator reported
+    /// one, unix seconds.
+    pub fn not_before(&self) -> Option<u64> {
+        self.not_before
     }
 }
 
@@ -126,6 +176,10 @@ pub trait TransportAuthenticator {
 pub struct MtlsAuthenticator {
     anchors: BTreeSet<[u8; 32]>,
     leeway_secs: u64,
+    /// The deployment deny-list, shared behind an interior handle so every
+    /// verifier of one install — mTLS and token alike — can consult the same
+    /// list, and a revoke reaches all of them at once.
+    revocations: SharedRevocations,
 }
 
 impl MtlsAuthenticator {
@@ -139,6 +193,7 @@ impl MtlsAuthenticator {
         Self {
             anchors: BTreeSet::new(),
             leeway_secs: 60,
+            revocations: SharedRevocations::default(),
         }
     }
 
@@ -165,6 +220,34 @@ impl MtlsAuthenticator {
     pub fn anchor_count(&self) -> usize {
         self.anchors.len()
     }
+
+    /// Point this verifier at a **shared** deny-list instead of a fresh one.
+    ///
+    /// `revoke_actor` used to answer tokens and never reach the mTLS path: a
+    /// principal the deployment had withdrawn still connected on the strength
+    /// of a perfectly valid certificate, because pinning, expiry and
+    /// canonicality were the only checks here. Peer certificates are
+    /// typically long-lived, so nothing else bounds a withdrawn principal's
+    /// access. The list is the same [`SharedRevocations`] the token verifiers
+    /// accept, so one revoke call covers every mechanism of the install.
+    pub fn with_shared_revocations(mut self, revocations: SharedRevocations) -> Self {
+        self.revocations = revocations;
+        self
+    }
+
+    /// The shared deny-list this verifier consults.
+    pub fn revocations_shared(&self) -> SharedRevocations {
+        std::sync::Arc::clone(&self.revocations)
+    }
+
+    /// Revoke every credential an actor holds on this verifier's deny-list.
+    /// Returns whether the entry was written.
+    pub fn revoke_actor(&self, org: &OrgId, actor: &ActorId, issued_through: u64) -> bool {
+        self.revocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .revoke_actor(org, actor, issued_through)
+    }
 }
 
 impl TransportAuthenticator for MtlsAuthenticator {
@@ -179,11 +262,40 @@ impl TransportAuthenticator for MtlsAuthenticator {
         if !self.anchors.contains(&peer.issuer_spki_sha256) {
             return Err(AuthError::UntrustedIssuer);
         }
+        // Revocation second. A peer certificate carries no issue instant an
+        // actor entry could be compared against, so the deny-list is consulted
+        // with `now`: an entry revokes the principal from the instant it was
+        // written onward, and a peer presented after that instant is refused
+        // no matter how valid its chain. This is the check the token verifiers
+        // always had and this path never consulted — the gap between
+        // "revoke_actor returned true" and "the actor can no longer connect".
+        if self
+            .revocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_revoked(
+                None,
+                &OrgId(peer.org.clone()),
+                &ActorId(peer.actor.clone()),
+                now,
+            )
+        {
+            return Err(AuthError::Revoked);
+        }
         // Checked here as well as by the terminator. A proxy that forgets to
         // reject an expired client certificate is a plausible misconfiguration,
         // and this is the cheapest place to make it not matter.
         if now > peer.not_after.saturating_add(self.leeway_secs) {
             return Err(AuthError::PeerExpired);
+        }
+        // The other end of the window, symmetrically: a proxy that forgets to
+        // reject a certificate whose validity has not started yet is the same
+        // class of misconfiguration, refused here so the omission does not
+        // matter.
+        if let Some(not_before) = peer.not_before {
+            if now.saturating_add(self.leeway_secs) < not_before {
+                return Err(AuthError::NotYetValid);
+            }
         }
         if !is_canonical_identity(&peer.org) {
             return Err(AuthError::MalformedIdentity(format!("org {:?}", peer.org)));
@@ -282,6 +394,58 @@ mod tests {
         assert_eq!(
             m.authenticate_peer(&p, NOW + 31),
             Err(AuthError::PeerExpired)
+        );
+    }
+
+    #[test]
+    fn a_not_yet_valid_certificate_is_refused_here_too() {
+        // The other end of the window. A verifier that checks expiry but not
+        // validity start lets a certificate issued for next month authenticate
+        // today whenever the terminator's own check is misconfigured.
+        let m = verifier().with_leeway(30);
+        let p =
+            VerifiedPeer::attested_with_anchor(CA, "acme", "agent-7", NOW + 600, Some(NOW + 10));
+        assert!(
+            m.authenticate_peer(&p, NOW).is_ok(),
+            "the window opened within leeway"
+        );
+        assert_eq!(
+            m.authenticate_peer(&p, NOW - 60),
+            Err(AuthError::NotYetValid)
+        );
+    }
+
+    #[test]
+    fn a_revoked_actor_is_refused_at_the_transport_boundary_too() {
+        // `revoke_actor` used to answer tokens and never reach this path: a
+        // principal the deployment had withdrawn kept connecting on the
+        // strength of a valid certificate. Peer certificates are long-lived,
+        // so the deny-list is the only thing that answers "this principal must
+        // not connect any more" without waiting for expiry.
+        let m = verifier();
+        assert!(m.authenticate_peer(&peer("acme", "agent-7"), NOW).is_ok());
+        m.revoke_actor(&OrgId("acme".into()), &ActorId("agent-7".into()), NOW);
+        assert_eq!(
+            m.authenticate_peer(&peer("acme", "agent-7"), NOW),
+            Err(AuthError::Revoked)
+        );
+        // A different actor under the same authority is untouched.
+        assert!(m.authenticate_peer(&peer("acme", "agent-9"), NOW).is_ok());
+    }
+
+    #[test]
+    fn a_revocation_is_shared_by_every_verifier_pointed_at_the_same_list() {
+        // The deployment fact, not a verifier detail: revoking on one verifier
+        // must refuse on the other, the way it already does across the token
+        // verifiers of a shared install.
+        let shared = SharedRevocations::default();
+        let a = verifier().with_shared_revocations(shared.clone());
+        let b = verifier().with_shared_revocations(shared);
+        assert!(a.authenticate_peer(&peer("acme", "agent-7"), NOW).is_ok());
+        assert!(a.revoke_actor(&OrgId("acme".into()), &ActorId("agent-7".into()), NOW));
+        assert_eq!(
+            b.authenticate_peer(&peer("acme", "agent-7"), NOW),
+            Err(AuthError::Revoked)
         );
     }
 

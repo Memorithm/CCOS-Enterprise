@@ -967,7 +967,7 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
     // is keyed on the actor name alone, so she really does hold `writer`'s
     // permissions. She is simply in the wrong organization, and that alone is
     // enough. `initech` owns no tenant in this deployment.
-    governed.assign("mallory", "writer");
+    governed.assign("initech", "mallory", "writer");
     let mallory = actor("initech", "mallory", AuthStrength::Token);
 
     // Every axis a foreign caller could vary. The last element of each row is
@@ -1246,7 +1246,7 @@ fn rescope_carries_no_provenance_and_only_the_direct_path_crosses_silently() {
     // consulted and never charged.
     let mut governed = two_tenant_deployment();
     assert!(governed.put(&scope("globex", "memory-root"), "GLOBEX CONFIDENTIAL"));
-    governed.assign("mallory", "reader");
+    governed.assign("initech", "mallory", "reader");
     let mallory = actor("initech", "mallory", AuthStrength::Token);
     let req = request("globex", "mallory", "memory.recall", "r-crossed");
     assert_eq!(
@@ -1338,8 +1338,8 @@ fn the_store_refuses_unknown_tenants_and_the_governed_path_journals_every_cell()
         .govern_tool("memory.ingest", "memory.write")
         .govern_tool("memory.put", "memory.write")
         .govern_tool("memory.get", "memory.read");
-    d.assign("alice", "writer");
-    d.assign("bob", "reader");
+    d.assign(HOME_ORG, "alice", "writer");
+    d.assign(HOME_ORG, "bob", "reader");
 
     // A tenant that exists, but is allowed to spend nothing at all.
     let mut broke = TenantState::new(0);
@@ -2371,7 +2371,7 @@ fn visually_identical_tenant_names_can_no_longer_be_provisioned() {
     let alice = actor("memorithm", "alice", AuthStrength::Token);
     d.add_role("reader", &["memory.read"])
         .govern_tool("memory.recall", "memory.read");
-    d.assign("alice", "reader");
+    d.assign("memorithm", "alice", "reader");
     for t in ["Acme", "\u{0430}cme", "acme "] {
         let req = request(t, "alice", "memory.recall", &format!("r-{t}"));
         assert_eq!(

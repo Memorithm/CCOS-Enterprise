@@ -435,10 +435,10 @@ fn storm_deployment(cfg: &StormConfig) -> Deployment {
         // Actors are tenant-qualified: `t-a/alice` belongs to `t-a` and to
         // nothing else. Cross-tenant contamination is then a string prefix
         // away from being visible.
-        assert!(d.assign(&format!("{name}/alice"), "writer"));
+        assert!(d.assign(HOME_ORG, &format!("{name}/alice"), "writer"));
         // One operator per tenant, so the administrative probe is refused for
         // the *reason* it targets rather than on permission.
-        assert!(d.assign(&format!("{name}/root"), "operator"));
+        assert!(d.assign(HOME_ORG, &format!("{name}/root"), "operator"));
     }
     d
 }
@@ -863,7 +863,7 @@ fn run_thread(deployment: &Mutex<Deployment>, ops: &[Op], start: &Barrier) -> Th
                 }
             }
             Op::Assign { actor, role } => {
-                let ok = guard(deployment).assign(actor, role);
+                let ok = guard(deployment).assign("test-org", actor, role);
                 if *role == GHOST_ROLE && ok {
                     report.problems.push(format!(
                         "{actor} was granted the never-declared {GHOST_ROLE}"
@@ -1435,9 +1435,9 @@ fn run_std_script(ops: &[StdOp]) -> StdDigest {
                 roles.add_role(role);
                 0
             }
-            StdOp::Assign { actor, role } => u64::from(roles.assign(actor, role)),
+            StdOp::Assign { actor, role } => u64::from(roles.assign("test-org", actor, role)),
             StdOp::Allows { actor, perm } => {
-                u64::from(roles.allows(actor, &Permission(perm.clone())))
+                u64::from(roles.allows("test-org", actor, &Permission(perm.clone())))
             }
             StdOp::Charge { tokens } => {
                 let a = decision_code(finite.charge(*tokens));
@@ -1658,7 +1658,7 @@ fn one_tenant_with_audit_capacity(limit: u64, capacity: usize) -> Deployment {
     let mut st = TenantState::new(limit);
     st.allow_model(BASE_MODEL);
     assert!(d.add_tenant(HOME_ORG, "acme", st), "acme is new here");
-    assert!(d.assign("alice", "writer"));
+    assert!(d.assign(HOME_ORG, "alice", "writer"));
     d
 }
 

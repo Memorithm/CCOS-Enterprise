@@ -240,8 +240,8 @@ mod tests {
         let mut globex = TenantState::new(10_000);
         globex.allow_model("claude-opus");
         d.add_tenant("memorithm", "globex", globex);
-        d.assign("alice", "writer");
-        d.assign("bob", "reader");
+        d.assign("memorithm", "alice", "writer");
+        d.assign("memorithm", "bob", "reader");
         d
     }
 

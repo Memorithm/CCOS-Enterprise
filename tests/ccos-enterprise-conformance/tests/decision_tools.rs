@@ -120,8 +120,8 @@ fn deployment() -> Deployment {
     let mut tenant = TenantState::new(10_000);
     tenant.allow_model("claude-opus");
     deployment.add_tenant("memorithm", "acme", tenant);
-    deployment.assign("alice", "decision-writer");
-    deployment.assign("bob", "decision-reader");
+    deployment.assign("memorithm", "alice", "decision-writer");
+    deployment.assign("memorithm", "bob", "decision-reader");
     deployment
 }
 

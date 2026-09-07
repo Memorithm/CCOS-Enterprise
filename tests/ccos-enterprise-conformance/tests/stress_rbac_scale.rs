@@ -246,7 +246,11 @@ fn book_of(n: usize) -> RoleBook {
     }
     for i in 0..n {
         assert!(
-            book.assign(&format!("actor-{i:06}"), &format!("role-{i:06}")),
+            book.assign(
+                "test-org",
+                &format!("actor-{i:06}"),
+                &format!("role-{i:06}")
+            ),
             "known role must assign"
         );
     }
@@ -286,22 +290,26 @@ fn two_hundred_thousand_roles_and_assignments_resolve_exactly() {
     for i in (0..N).step_by(1_777) {
         let a = format!("actor-{i:06}");
         assert!(
-            book.allows(&a, &perm(&format!("perm.{i:06}"))),
+            book.allows("test-org", &a, &perm(&format!("perm.{i:06}"))),
             "actor-{i:06} lost its own grant at scale"
         );
         // …and exactly nothing else: the neighbour's permission, the
         // permission of a far-away role, and a prefix of its own.
         let neighbour = (i + 1) % N;
         assert!(
-            !book.allows(&a, &perm(&format!("perm.{neighbour:06}"))),
+            !book.allows("test-org", &a, &perm(&format!("perm.{neighbour:06}"))),
             "actor-{i:06} bled into its neighbour's permission"
         );
         assert!(
-            !book.allows(&a, &perm(&format!("perm.{:06}", (i + N / 2) % N))),
+            !book.allows(
+                "test-org",
+                &a,
+                &perm(&format!("perm.{:06}", (i + N / 2) % N))
+            ),
             "actor-{i:06} bled across the tree"
         );
         assert!(
-            !book.allows(&a, &perm("perm.")),
+            !book.allows("test-org", &a, &perm("perm.")),
             "a permission prefix is not a wildcard"
         );
         checked += 1;
@@ -311,6 +319,7 @@ fn two_hundred_thousand_roles_and_assignments_resolve_exactly() {
     for edge in [0usize, 1, N - 2, N - 1] {
         assert!(
             book.allows(
+                "test-org",
                 &format!("actor-{edge:06}"),
                 &perm(&format!("perm.{edge:06}"))
             ),
@@ -327,7 +336,7 @@ fn two_hundred_thousand_roles_and_assignments_resolve_exactly() {
         "actor-999999",
     ] {
         assert!(
-            !book.allows(stranger, &perm("perm.000000")),
+            !book.allows("test-org", stranger, &perm("perm.000000")),
             "{stranger:?} must hold nothing"
         );
     }
@@ -335,7 +344,7 @@ fn two_hundred_thousand_roles_and_assignments_resolve_exactly() {
     // Deep no-bleed probe on one actor: 0 of 2 000 foreign permissions.
     let alone = "actor-000000";
     let bled = (1..2_001)
-        .filter(|i| book.allows(alone, &perm(&format!("perm.{i:06}"))))
+        .filter(|i| book.allows("test-org", alone, &perm(&format!("perm.{i:06}"))))
         .count();
     assert_eq!(bled, 0, "one role must grant exactly one permission");
 }
@@ -442,7 +451,7 @@ fn rolebook_has_no_cap_one_actor_absorbs_half_a_million_roles() {
 
     let mut refusals = 0usize;
     for i in 0..N {
-        if !book.assign("mallory", &format!("r{i:06}")) {
+        if !book.assign("test-org", "mallory", &format!("r{i:06}")) {
             refusals += 1;
         }
     }
@@ -467,12 +476,12 @@ fn rolebook_has_no_cap_one_actor_absorbs_half_a_million_roles() {
     // exact — the growth is unbounded, not merely sloppy.
     for i in (0..N).step_by(9_973) {
         assert!(
-            book.allows("mallory", &perm(&format!("p{i:06}"))),
+            book.allows("test-org", "mallory", &perm(&format!("p{i:06}"))),
             "assignment {i} was accepted but does not grant"
         );
     }
     assert!(
-        !book.allows("mallory", &perm("p999999")),
+        !book.allows("test-org", "mallory", &perm("p999999")),
         "no bleed at 500k"
     );
 
@@ -486,15 +495,15 @@ fn rolebook_has_no_cap_one_actor_absorbs_half_a_million_roles() {
     const SAMPLES: u128 = 2;
     let mut lean = RoleBook::default();
     lean.add_role(role("only", &["p000000"]));
-    assert!(lean.assign("victim", "only"));
+    assert!(lean.assign("test-org", "victim", "only"));
     let t = Instant::now();
     for _ in 0..SAMPLES {
-        assert!(!lean.allows("victim", &perm("nope")));
+        assert!(!lean.allows("test-org", "victim", &perm("nope")));
     }
     let lean_ns = t.elapsed().as_nanos().max(1);
     let t = Instant::now();
     for _ in 0..SAMPLES {
-        assert!(!book.allows("mallory", &perm("nope")));
+        assert!(!book.allows("test-org", "mallory", &perm("nope")));
     }
     let fat_ns = t.elapsed().as_nanos().max(1);
     println!(
@@ -525,7 +534,7 @@ fn rolebook_has_no_cap_on_distinct_actors_and_none_can_be_removed() {
     book.add_role(role("reader", &["memory.read"]));
     for i in 0..N {
         assert!(
-            book.assign(&format!("ghost-{i:07}"), "reader"),
+            book.assign("test-org", &format!("ghost-{i:07}"), "reader"),
             "no cap on principals"
         );
     }
@@ -541,21 +550,21 @@ fn rolebook_has_no_cap_on_distinct_actors_and_none_can_be_removed() {
     );
 
     for i in (0..N).step_by(9_973) {
-        assert!(book.allows(&format!("ghost-{i:07}"), &perm("memory.read")));
+        assert!(book.allows("test-org", &format!("ghost-{i:07}"), &perm("memory.read")));
     }
 
     // Precise removal now exists: one principal, without touching the rest.
-    assert!(book.remove_actor("ghost-0000000"));
-    assert!(!book.allows("ghost-0000000", &perm("memory.read")));
+    assert!(book.remove_actor("test-org", "ghost-0000000"));
+    assert!(!book.allows("test-org", "ghost-0000000", &perm("memory.read")));
     assert!(
-        book.allows("ghost-0000001", &perm("memory.read")),
+        book.allows("test-org", "ghost-0000001", &perm("memory.read")),
         "removing one principal must not disturb its neighbours"
     );
 
     // And the wholesale lever still exists, deliberately named: removing the
     // role purges all 500 000 grants with it, and the memory comes back.
     assert!(book.remove_role("reader"));
-    assert!(!book.allows("ghost-0499999", &perm("memory.read")));
+    assert!(!book.allows("test-org", "ghost-0499999", &perm("memory.read")));
     let after = live_bytes().saturating_sub(before);
     assert!(
         after < retained / 4,
@@ -584,7 +593,7 @@ fn assignment_storage_is_quadratic_in_admin_calls() {
         for a in 0..actors {
             let who = format!("a{a:06}");
             for name in &names {
-                assert!(book.assign(&who, name));
+                assert!(book.assign("test-org", &who, name));
             }
         }
         let retained = live_bytes().saturating_sub(before);
@@ -643,10 +652,10 @@ fn add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act() {
     let mut book = RoleBook::default();
 
     assert!(book.add_role(role("editor", &["memory.read", "memory.write"])));
-    assert!(book.assign("alice", "editor"));
-    assert!(book.assign("bob", "editor"));
-    assert!(book.allows("alice", &perm("memory.write")));
-    assert!(book.allows("bob", &perm("memory.write")));
+    assert!(book.assign("test-org", "alice", "editor"));
+    assert!(book.assign("test-org", "bob", "editor"));
+    assert!(book.allows("test-org", "alice", &perm("memory.write")));
+    assert!(book.allows("test-org", "bob", &perm("memory.write")));
 
     // Re-adding under the same name is refused and changes nothing. The
     // return value is the signal the old signature could not carry.
@@ -655,10 +664,10 @@ fn add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act() {
         "a live role was silently replaced"
     );
     assert!(
-        book.allows("alice", &perm("memory.write")),
+        book.allows("test-org", "alice", &perm("memory.write")),
         "a refused add_role revoked a live grant anyway"
     );
-    assert!(book.allows("bob", &perm("memory.write")));
+    assert!(book.allows("test-org", "bob", &perm("memory.write")));
 
     // The deliberate lever still works, and still hits every holder at once —
     // which is what a role *is*, and why it needs its own name.
@@ -666,9 +675,9 @@ fn add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act() {
         book.redefine_role(role("editor", &["memory.read"])),
         "redefine_role must report that it replaced something"
     );
-    assert!(!book.allows("alice", &perm("memory.write")));
-    assert!(!book.allows("bob", &perm("memory.write")));
-    assert!(book.allows("alice", &perm("memory.read")));
+    assert!(!book.allows("test-org", "alice", &perm("memory.write")));
+    assert!(!book.allows("test-org", "bob", &perm("memory.write")));
+    assert!(book.allows("test-org", "alice", &perm("memory.read")));
 
     // Redefining a name that does not exist reports `false` and defines it,
     // so a caller can tell "changed an existing role" from "created one".
@@ -687,12 +696,12 @@ fn add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act() {
     // reachable by accident.
     assert!(book.redefine_role(role("editor", &["memory.read", "policy.admin"])));
     assert!(
-        book.allows("alice", &perm("policy.admin")),
+        book.allows("test-org", "alice", &perm("policy.admin")),
         "redefinition must reach every holder, immediately"
     );
-    assert!(book.allows("bob", &perm("policy.admin")));
+    assert!(book.allows("test-org", "bob", &perm("policy.admin")));
     assert!(
-        !book.allows("alice", &perm("memory.write")),
+        !book.allows("test-org", "alice", &perm("memory.write")),
         "and simultaneously drops what the previous definition granted"
     );
 
@@ -701,7 +710,7 @@ fn add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act() {
     // everyone with no re-assignment step. `remove_role` is the real thing
     // now, and it purges the grants: re-creating the name later grants nobody.
     assert!(book.redefine_role(role("editor", &[])));
-    assert!(!book.allows("alice", &perm("memory.read")));
+    assert!(!book.allows("test-org", "alice", &perm("memory.read")));
     assert_eq!(
         stored_actors(&book),
         BTreeSet::from(["alice".to_string(), "bob".to_string()]),
@@ -709,7 +718,7 @@ fn add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act() {
     );
     assert!(book.redefine_role(role("editor", &["memory.read"])));
     assert!(
-        book.allows("alice", &perm("memory.read")),
+        book.allows("test-org", "alice", &perm("memory.read")),
         "…so refilling re-grants"
     );
 
@@ -719,10 +728,10 @@ fn add_role_refuses_to_replace_and_redefinition_is_a_separate_deliberate_act() {
     assert!(stored_actors(&book).is_empty(), "the grants went with it");
     assert!(book.add_role(role("editor", &["memory.read", "policy.admin"])));
     assert!(
-        !book.allows("alice", &perm("memory.read")),
+        !book.allows("test-org", "alice", &perm("memory.read")),
         "re-creating a removed role must not resurrect its old holders"
     );
-    assert!(!book.allows("bob", &perm("policy.admin")));
+    assert!(!book.allows("test-org", "bob", &perm("policy.admin")));
     assert!(!book.remove_role("editor-that-never-was"));
 }
 
@@ -870,8 +879,11 @@ fn the_empty_string_is_neither_a_grantable_role_nor_a_grantable_principal() {
     let mut book = RoleBook::default();
 
     // Fail-closed while the empty role does not exist…
-    assert!(!book.assign("alice", ""), "unknown role, even empty");
-    assert!(!book.assign("", ""), "…for the empty actor too");
+    assert!(
+        !book.assign("test-org", "alice", ""),
+        "unknown role, even empty"
+    );
+    assert!(!book.assign("test-org", "", ""), "…for the empty actor too");
 
     // `Role::default()` has an empty name, and creating it is now refused —
     // which is what closes the whole family, because every later step
@@ -879,18 +891,24 @@ fn the_empty_string_is_neither_a_grantable_role_nor_a_grantable_principal() {
     assert!(!book.add_role(Role::default()), "'' must not be a role");
     assert!(!book.redefine_role(role("", &["policy.admin"])));
     assert!(!book.has_role(""));
-    assert!(!book.assign("alice", ""), "'' is still not grantable");
-    assert!(!book.allows("alice", &perm("policy.admin")));
+    assert!(
+        !book.assign("test-org", "alice", ""),
+        "'' is still not grantable"
+    );
+    assert!(!book.allows("test-org", "alice", &perm("policy.admin")));
 
     // The empty *actor* is refused too, even for a role that does exist.
     assert!(book.add_role(role("reader", &["memory.read"])));
-    assert!(!book.assign("", "reader"), "'' must not be a principal");
-    assert!(!book.allows("", &perm("memory.read")));
-    // A real actor is unaffected, and matching is still exact.
-    assert!(book.assign("alice", "reader"));
-    assert!(book.allows("alice", &perm("memory.read")));
     assert!(
-        !book.allows(" ", &perm("memory.read")),
+        !book.assign("test-org", "", "reader"),
+        "'' must not be a principal"
+    );
+    assert!(!book.allows("test-org", "", &perm("memory.read")));
+    // A real actor is unaffected, and matching is still exact.
+    assert!(book.assign("test-org", "alice", "reader"));
+    assert!(book.allows("test-org", "alice", &perm("memory.read")));
+    assert!(
+        !book.allows("test-org", " ", &perm("memory.read")),
         "a space is not a name either, and is not alice"
     );
 
@@ -916,7 +934,7 @@ fn the_empty_string_is_neither_a_grantable_role_nor_a_grantable_principal() {
     // The grant is refused too now — that is the second defence, at the
     // source rather than at the wire.
     assert!(
-        !d.assign("", "reader"),
+        !d.assign("test-org", "", "reader"),
         "the nameless principal must not be grantable"
     );
     let anon = request("acme", "", "memory.recall", "r-anon-2");
@@ -970,7 +988,7 @@ fn role_names_are_never_normalized_so_look_alikes_are_distinct_roles() {
     let _guard = serialized();
     let mut book = RoleBook::default();
     book.add_role(role("admin", &["policy.admin"]));
-    assert!(book.assign("root", "admin"));
+    assert!(book.assign("test-org", "root", "admin"));
 
     // Case, padding, control bytes, NFC/NFD, homoglyphs, zero-width joiners,
     // bidi overrides — none of these resolve to the granted role.
@@ -992,11 +1010,11 @@ fn role_names_are_never_normalized_so_look_alikes_are_distinct_roles() {
     ];
     for name in look_alikes {
         assert!(
-            !book.assign("root", name),
+            !book.assign("test-org", "root", name),
             "{name:?} must not resolve to the existing 'admin' role"
         );
         assert!(
-            !book.allows("root", &perm("nothing")),
+            !book.allows("test-org", "root", &perm("nothing")),
             "a refused assign grants nothing"
         );
     }
@@ -1005,10 +1023,10 @@ fn role_names_are_never_normalized_so_look_alikes_are_distinct_roles() {
     // powers — indistinguishable to a human reading the role list.
     book.add_role(role("\u{0430}dmin", &["memory.read"])); // Cyrillic а
     book.add_role(role("ａｄｍｉｎ", &["memory.read"])); // fullwidth
-    assert!(book.assign("mallory", "\u{0430}dmin"));
-    assert!(book.assign("mallory", "ａｄｍｉｎ"));
+    assert!(book.assign("test-org", "mallory", "\u{0430}dmin"));
+    assert!(book.assign("test-org", "mallory", "ａｄｍｉｎ"));
     assert!(
-        !book.allows("mallory", &perm("policy.admin")),
+        !book.allows("test-org", "mallory", &perm("policy.admin")),
         "the look-alikes confer only their own permissions (fail-closed)"
     );
     assert_eq!(
@@ -1020,16 +1038,16 @@ fn role_names_are_never_normalized_so_look_alikes_are_distinct_roles() {
     // NFC and NFD spellings of the same word are two roles.
     book.add_role(role("café", &["a"]));
     book.add_role(role("cafe\u{301}", &["b"]));
-    assert!(book.assign("u", "café"));
-    assert!(book.allows("u", &perm("a")));
+    assert!(book.assign("test-org", "u", "café"));
+    assert!(book.allows("test-org", "u", &perm("a")));
     assert!(
-        !book.allows("u", &perm("b")),
+        !book.allows("test-org", "u", &perm("b")),
         "NFD twin is a separate role, not the same one"
     );
 
     // Permissions are exact too: no wildcard, prefix, or case tolerance.
     book.add_role(role("p", &["memory.read"]));
-    assert!(book.assign("v", "p"));
+    assert!(book.assign("test-org", "v", "p"));
     for probe in [
         "memory.",
         "memory.*",
@@ -1041,7 +1059,7 @@ fn role_names_are_never_normalized_so_look_alikes_are_distinct_roles() {
         "",
     ] {
         assert!(
-            !book.allows("v", &perm(probe)),
+            !book.allows("test-org", "v", &perm(probe)),
             "{probe:?} must not match the granted 'memory.read'"
         );
     }
@@ -1064,7 +1082,7 @@ fn megabyte_names_are_accepted_and_every_assignment_copies_them_whole() {
 
     for i in 0..HOLDERS {
         assert!(
-            book.assign(&format!("holder-{i:03}"), &huge),
+            book.assign("test-org", &format!("holder-{i:03}"), &huge),
             "no length cap"
         );
     }
@@ -1080,14 +1098,14 @@ fn megabyte_names_are_accepted_and_every_assignment_copies_them_whole() {
         after_assignments > HOLDERS * MIB,
         "expected one full copy per assignment, got {after_assignments} B"
     );
-    assert!(book.allows("holder-000", &perm("memory.read")));
+    assert!(book.allows("test-org", "holder-000", &perm("memory.read")));
 
     // A megabyte actor name is accepted just as readily.
     let huge_actor = "y".repeat(MIB);
-    assert!(book.assign(&huge_actor, &huge));
-    assert!(book.allows(&huge_actor, &perm("memory.read")));
+    assert!(book.assign("test-org", &huge_actor, &huge));
+    assert!(book.allows("test-org", &huge_actor, &perm("memory.read")));
     assert!(
-        !book.allows(&huge_actor[..MIB - 1], &perm("memory.read")),
+        !book.allows("test-org", &huge_actor[..MIB - 1], &perm("memory.read")),
         "still exact: a truncated name is a different principal"
     );
 }
@@ -1112,16 +1130,16 @@ fn many_roles_confer_exactly_the_union_and_nothing_adjacent() {
             &format!("r{i:04}"),
             &[&format!("cap.{i:04}"), "cap.shared"],
         ));
-        assert!(book.assign("omni", &format!("r{i:04}")));
+        assert!(book.assign("test-org", "omni", &format!("r{i:04}")));
     }
 
     for i in 0..ROLES {
         assert!(
-            book.allows("omni", &perm(&format!("cap.{i:04}"))),
+            book.allows("test-org", "omni", &perm(&format!("cap.{i:04}"))),
             "member cap.{i:04} missing from the union"
         );
     }
-    assert!(book.allows("omni", &perm("cap.shared")));
+    assert!(book.allows("test-org", "omni", &perm("cap.shared")));
 
     // Nothing beyond the union, including systematic near-misses.
     for i in 0..ROLES {
@@ -1133,27 +1151,27 @@ fn many_roles_confer_exactly_the_union_and_nothing_adjacent() {
             format!("cap{i:04}"),
         ] {
             assert!(
-                !book.allows("omni", &perm(&near)),
+                !book.allows("test-org", "omni", &perm(&near)),
                 "{near:?} is not in the union"
             );
         }
     }
     for outside in ["cap.9999", "cap", "cap.", "", "shared", "cap.shared."] {
         assert!(
-            !book.allows("omni", &perm(outside)),
+            !book.allows("test-org", "omni", &perm(outside)),
             "{outside:?} leaked in"
         );
     }
 
     // A second actor holding one of those roles gets that role's set only —
     // holding a role alongside a super-user does not widen it.
-    assert!(book.assign("narrow", "r0007"));
-    assert!(book.allows("narrow", &perm("cap.0007")));
-    assert!(book.allows("narrow", &perm("cap.shared")));
+    assert!(book.assign("test-org", "narrow", "r0007"));
+    assert!(book.allows("test-org", "narrow", &perm("cap.0007")));
+    assert!(book.allows("test-org", "narrow", &perm("cap.shared")));
     for i in 0..ROLES {
         if i != 7 {
             assert!(
-                !book.allows("narrow", &perm(&format!("cap.{i:04}"))),
+                !book.allows("test-org", "narrow", &perm(&format!("cap.{i:04}"))),
                 "narrow bled cap.{i:04} from a co-holder"
             );
         }
@@ -1170,33 +1188,36 @@ fn re_adding_a_narrower_role_shrinks_the_grant_to_the_remaining_union() {
     let mut book = RoleBook::default();
     assert!(book.add_role(role("a", &["read", "write", "admin"])));
     assert!(book.add_role(role("b", &["read"])));
-    assert!(book.assign("dual", "a"));
-    assert!(book.assign("dual", "b"));
-    assert!(book.assign("solo", "a"));
+    assert!(book.assign("test-org", "dual", "a"));
+    assert!(book.assign("test-org", "dual", "b"));
+    assert!(book.assign("test-org", "solo", "a"));
 
     for p in ["read", "write", "admin"] {
-        assert!(book.allows("dual", &perm(p)));
-        assert!(book.allows("solo", &perm(p)));
+        assert!(book.allows("test-org", "dual", &perm(p)));
+        assert!(book.allows("test-org", "solo", &perm(p)));
     }
 
     // Shrink `a` to nothing — through the deliberate lever, which is now the
     // only way to reach this at all.
     assert!(book.redefine_role(role("a", &[])));
     // `dual` keeps exactly what `b` still grants…
-    assert!(book.allows("dual", &perm("read")), "b still grants read");
-    assert!(!book.allows("dual", &perm("write")));
-    assert!(!book.allows("dual", &perm("admin")));
+    assert!(
+        book.allows("test-org", "dual", &perm("read")),
+        "b still grants read"
+    );
+    assert!(!book.allows("test-org", "dual", &perm("write")));
+    assert!(!book.allows("test-org", "dual", &perm("admin")));
     // …and `solo` is left with nothing at all, still holding the role.
     for p in ["read", "write", "admin"] {
-        assert!(!book.allows("solo", &perm(p)), "solo lost {p}");
+        assert!(!book.allows("test-org", "solo", &perm(p)), "solo lost {p}");
     }
     assert!(
         stored_actors(&book).contains("solo"),
         "the assignment survives the permissions it conferred"
     );
     // Re-assigning changes nothing: the assignment was never the problem.
-    assert!(book.assign("solo", "a"));
-    assert!(!book.allows("solo", &perm("read")));
+    assert!(book.assign("test-org", "solo", "a"));
+    assert!(!book.allows("test-org", "solo", &perm("read")));
 }
 
 /// **FINDING (missing-behaviour) — REPAIRED.** There was no `unassign`,
@@ -1216,44 +1237,50 @@ fn a_grant_can_be_withdrawn_from_one_actor_without_touching_the_others() {
     let _guard = serialized();
     let mut book = RoleBook::default();
     assert!(book.add_role(role("oncall", &["policy.admin"])));
-    assert!(book.assign("leaver", "oncall"));
-    assert!(book.assign("stayer", "oncall"));
+    assert!(book.assign("test-org", "leaver", "oncall"));
+    assert!(book.assign("test-org", "stayer", "oncall"));
 
     // Offboarding one actor: precise, and reported.
-    assert!(book.unassign("leaver", "oncall"), "the grant existed");
     assert!(
-        !book.allows("leaver", &perm("policy.admin")),
+        book.unassign("test-org", "leaver", "oncall"),
+        "the grant existed"
+    );
+    assert!(
+        !book.allows("test-org", "leaver", &perm("policy.admin")),
         "the leaver is out"
     );
     assert!(
-        book.allows("stayer", &perm("policy.admin")),
+        book.allows("test-org", "stayer", &perm("policy.admin")),
         "…and the colleague is untouched"
     );
     assert!(
-        !book.unassign("leaver", "oncall"),
+        !book.unassign("test-org", "leaver", "oncall"),
         "withdrawing twice reports that there was nothing to withdraw"
     );
-    assert_eq!(book.roles_of("leaver"), Vec::<&str>::new());
-    assert_eq!(book.roles_of("stayer"), vec!["oncall"]);
+    assert_eq!(book.roles_of("test-org", "leaver"), Vec::<&str>::new());
+    assert_eq!(book.roles_of("test-org", "stayer"), vec!["oncall"]);
 
     // The offboarding survives unrelated repairs — this is the half that used
     // to fail. Redefining the role for the remaining holder must not bring the
     // departed actor back.
     assert!(book.redefine_role(role("oncall", &["policy.admin", "memory.read"])));
     assert!(
-        !book.allows("leaver", &perm("policy.admin")),
+        !book.allows("test-org", "leaver", &perm("policy.admin")),
         "a de-provisioned actor was re-granted by an unrelated repair"
     );
-    assert!(book.allows("stayer", &perm("memory.read")));
+    assert!(book.allows("test-org", "stayer", &perm("memory.read")));
 
     // De-provisioning a principal entirely, across every role it holds.
     assert!(book.add_role(role("auditor", &["audit.read"])));
-    assert!(book.assign("stayer", "auditor"));
-    assert_eq!(book.roles_of("stayer"), vec!["auditor", "oncall"]);
-    assert!(book.remove_actor("stayer"));
-    assert!(!book.allows("stayer", &perm("policy.admin")));
-    assert!(!book.allows("stayer", &perm("audit.read")));
-    assert!(!book.remove_actor("stayer"), "already gone");
+    assert!(book.assign("test-org", "stayer", "auditor"));
+    assert_eq!(
+        book.roles_of("test-org", "stayer"),
+        vec!["auditor", "oncall"]
+    );
+    assert!(book.remove_actor("test-org", "stayer"));
+    assert!(!book.allows("test-org", "stayer", &perm("policy.admin")));
+    assert!(!book.allows("test-org", "stayer", &perm("audit.read")));
+    assert!(!book.remove_actor("test-org", "stayer"), "already gone");
     // The roles themselves survive the actor.
     assert!(book.has_role("oncall") && book.has_role("auditor"));
 }
@@ -1271,7 +1298,10 @@ fn assigning_an_unknown_role_grants_nothing_now_or_later() {
     let _guard = serialized();
     let mut book = RoleBook::default();
 
-    assert!(!book.assign("mallory", "superuser"), "unknown role refused");
+    assert!(
+        !book.assign("memorithm", "mallory", "superuser"),
+        "unknown role refused"
+    );
     assert!(
         stored_actors(&book).is_empty(),
         "a refused assign must not even create an actor entry"
@@ -1280,7 +1310,7 @@ fn assigning_an_unknown_role_grants_nothing_now_or_later() {
     // Creating the role afterwards must not retro-grant it.
     book.add_role(role("superuser", &["policy.admin"]));
     assert!(
-        !book.allows("mallory", &perm("policy.admin")),
+        !book.allows("memorithm", "mallory", &perm("policy.admin")),
         "a refused assignment is not replayed when the role appears"
     );
     assert!(
@@ -1289,15 +1319,15 @@ fn assigning_an_unknown_role_grants_nothing_now_or_later() {
     );
 
     // Only an explicit, successful assign grants.
-    assert!(book.assign("mallory", "superuser"));
-    assert!(book.allows("mallory", &perm("policy.admin")));
+    assert!(book.assign("memorithm", "mallory", "superuser"));
+    assert!(book.allows("memorithm", "mallory", &perm("policy.admin")));
 
     // At scale, a hostile caller guessing role names costs nothing and
     // leaves nothing behind — this is the one place the book is bounded.
     let before = live_bytes();
     let mut refused = 0usize;
     for i in 0..10_000 {
-        if !book.assign("prober", &format!("guess-{i}")) {
+        if !book.assign("test-org", "prober", &format!("guess-{i}")) {
             refused += 1;
         }
     }
@@ -1312,12 +1342,12 @@ fn assigning_an_unknown_role_grants_nothing_now_or_later() {
         BTreeSet::from(["mallory".to_string()]),
         "the prober never became a principal"
     );
-    assert!(!book.allows("prober", &perm("policy.admin")));
+    assert!(!book.allows("test-org", "prober", &perm("policy.admin")));
 
     // Same, through the product path.
     let mut d = two_tenant_deployment();
     assert!(
-        !d.assign("mallory", "root"),
+        !d.assign("memorithm", "mallory", "root"),
         "a role-shaped guess is refused"
     );
     d.add_role("root", &["policy.admin"]);
@@ -1600,7 +1630,7 @@ fn admission_stays_exact_with_fifty_thousand_roles_and_tools() {
         let p = format!("cap.{i:05}");
         d.add_role(&format!("role-{i:05}"), &[&p]);
         d.govern_tool(&format!("memory.tool{i:05}"), &p);
-        assert!(d.assign("hoarder", &format!("role-{i:05}")));
+        assert!(d.assign("memorithm", "hoarder", &format!("role-{i:05}")));
     }
     // One permission is deliberately governed but never granted.
     d.govern_tool("memory.forbidden", "cap.never-granted");
@@ -1693,10 +1723,10 @@ fn rolebook_growth_has_no_ceiling_at_two_million() {
     let mut book = RoleBook::default();
     for i in 0..N {
         book.add_role(role(&format!("r{i:07}"), &[&format!("p{i:07}")]));
-        assert!(book.assign("mallory", &format!("r{i:07}")));
+        assert!(book.assign("test-org", "mallory", &format!("r{i:07}")));
     }
     let retained = live_bytes().saturating_sub(before);
     println!("[exhaustion] {N} roles on one actor: {retained} B, still no refusal");
-    assert!(book.allows("mallory", &perm(&format!("p{:07}", N - 1))));
-    assert!(!book.allows("mallory", &perm("p9999999")));
+    assert!(book.allows("test-org", "mallory", &perm(&format!("p{:07}", N - 1))));
+    assert!(!book.allows("test-org", "mallory", &perm("p9999999")));
 }

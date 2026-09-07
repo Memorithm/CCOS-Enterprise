@@ -182,7 +182,7 @@ fn concurrent_tenants_do_not_contaminate_each_other() {
         let mut t = TenantState::new(CALLS * COST);
         t.allow_model("claude-opus");
         d.add_tenant("memorithm", &format!("tenant-{i}"), t);
-        d.assign(&format!("agent-{i}"), "writer");
+        d.assign("memorithm", &format!("agent-{i}"), "writer");
     }
     let deployment = Arc::new(Mutex::new(d));
 

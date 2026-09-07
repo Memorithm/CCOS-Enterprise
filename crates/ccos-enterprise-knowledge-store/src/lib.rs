@@ -351,7 +351,10 @@ mod tests {
     fn invalid_batch_writes_nothing() {
         let dir = TestDir::new();
         let mut store = KnowledgeStore::open(&dir.0).unwrap();
-        let result = store.append(&[source(0, "acme", "source:1"), source(2, "acme", "source:2")]);
+        let result = store.append(&[
+            source(0, "acme", "source:1"),
+            source(2, "acme", "source:2"),
+        ]);
         assert!(matches!(result, Err(StoreError::Knowledge(_))));
         assert_eq!(store.next_sequence(), 0);
         drop(store);

@@ -1,0 +1,81 @@
+name: Apply scoped runtime cell accounting repair
+
+on:
+  push:
+    branches:
+      - fix/runtime-cell-shrink-accounting
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: fix/runtime-cell-shrink-accounting
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Replace exactly the unsafe unsigned delta block
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("crates/ccos-enterprise-runtime/src/lib.rs")
+          text = path.read_text()
+          old = '''        let delta = (key.len() + value.len()) as u64
+              - cells
+                  .get(key)
+                  .map_or(0, |old| (key.len() + old.len()) as u64);
+          if delta > 0 && self.store_bytes + delta > MAX_TOTAL_CELL_BYTES {
+              return Err(Refusal::StorageExhausted);
+          }
+          cells.insert(key.to_string(), value.to_string());
+          self.store_bytes = self.store_bytes.saturating_add(delta);
+'''
+          new = '''        let old_bytes = cells
+              .get(key)
+              .map_or(0, |old| (key.len() + old.len()) as u64);
+          let new_bytes = (key.len() + value.len()) as u64;
+          if new_bytes > old_bytes {
+              let growth = new_bytes - old_bytes;
+              if growth > MAX_TOTAL_CELL_BYTES.saturating_sub(self.store_bytes) {
+                  return Err(Refusal::StorageExhausted);
+              }
+              self.store_bytes += growth;
+          } else {
+              self.store_bytes = self.store_bytes.saturating_sub(old_bytes - new_bytes);
+          }
+          cells.insert(key.to_string(), value.to_string());
+'''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f"expected exactly one target block, found {count}")
+          path.write_text(text.replace(old, new, 1))
+
+      - name: Verify formatting and focused regression
+        run: |
+          cargo fmt --all -- --check
+          cargo test -p ccos-enterprise-conformance --release --test storage_overwrite_regression
+
+      - name: Re-run the exact concurrency invariant that blocked CI
+        run: |
+          cargo test -p ccos-enterprise-conformance --release --test stress_concurrency_chaos chaos_storm_thirty_two_threads_holds_every_global_invariant -- --exact
+
+      - name: Commit only the runtime repair
+        run: |
+          git diff --check
+          git diff -- crates/ccos-enterprise-runtime/src/lib.rs
+          git config user.name "MEMOPERF"
+          git config user.email "memoperf@users.noreply.github.com"
+          git add crates/ccos-enterprise-runtime/src/lib.rs
+          test -n "$(git diff --cached --name-only)"
+          test "$(git diff --cached --name-only | wc -l)" -eq 1
+          git commit -m "fix(runtime): account shrinking cell overwrites safely"
+          git push origin HEAD:fix/runtime-cell-shrink-accounting

@@ -29,7 +29,7 @@ jobs:
 
           path = Path("crates/ccos-enterprise-runtime/src/lib.rs")
           text = path.read_text()
-          old = '''        let delta = (key.len() + value.len()) as u64
+          old = """        let delta = (key.len() + value.len()) as u64
               - cells
                   .get(key)
                   .map_or(0, |old| (key.len() + old.len()) as u64);
@@ -38,8 +38,8 @@ jobs:
           }
           cells.insert(key.to_string(), value.to_string());
           self.store_bytes = self.store_bytes.saturating_add(delta);
-'''
-          new = '''        let old_bytes = cells
+          """
+          new = """        let old_bytes = cells
               .get(key)
               .map_or(0, |old| (key.len() + old.len()) as u64);
           let new_bytes = (key.len() + value.len()) as u64;
@@ -53,7 +53,7 @@ jobs:
               self.store_bytes = self.store_bytes.saturating_sub(old_bytes - new_bytes);
           }
           cells.insert(key.to_string(), value.to_string());
-'''
+          """
           count = text.count(old)
           if count != 1:
               raise SystemExit(f"expected exactly one target block, found {count}")

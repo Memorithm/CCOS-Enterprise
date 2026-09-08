@@ -402,7 +402,8 @@ fn main() {
 
     let report = BenchmarkReport {
         schema_version: SCHEMA_VERSION,
-        claim_scope: "retrieval/selection necessary condition only; not end-to-end LLM answer quality",
+        claim_scope:
+            "retrieval/selection necessary condition only; not end-to-end LLM answer quality",
         token_budget_kind: "ceil(chars/4) estimate; not a provider tokenizer count",
         budget_tokens: BUDGET_TOKENS,
         tasks_per_diameter: TASKS_PER_DIAMETER,

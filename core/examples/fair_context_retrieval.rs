@@ -9,7 +9,7 @@
 //! - opaque document ids: no `chain`/answer-bearing filename convention;
 //! - identical natural-language query for every query-driven strategy;
 //! - real in-tree BM25, TF-IDF dense retrieval and BM25+TF-IDF RRF baselines;
-//! - GraphRAG-style and CCOS query-driven strategies start from the same BM25 hit;
+//! - graph-walk and CCOS query-driven strategies start from the same BM25 hit;
 //! - workspace-anchor CCOS is reported separately and explicitly marked assisted;
 //! - budget enforcement is strict: no first-document overshoot exception;
 //! - the token budget is labelled as an estimate (`ceil(chars / 4)`), not a model
@@ -32,8 +32,8 @@ const STRATEGIES: [(&str, bool); 7] = [
     ("bm25", false),
     ("tfidf-dense", false),
     ("bm25-tfidf-rrf", false),
-    ("graphrag-1hop", false),
-    ("graphrag-bfs", false),
+    ("graph-1hop", false),
+    ("graph-bfs", false),
     ("ccos-query-region", false),
     ("ccos-workspace-anchor", true),
 ];
@@ -89,7 +89,7 @@ fn opaque_id(task: usize, kind: &str, ordinal: usize) -> String {
 }
 
 fn estimate_tokens(text: &str) -> usize {
-    text.chars().count().div_ceil(4)
+    (text.chars().count() + 3) / 4
 }
 
 fn filler(task: usize, ordinal: usize) -> String {
@@ -107,7 +107,7 @@ fn build_task(task_no: usize, diameter: u32) -> Task {
     let mut chain_ids = Vec::with_capacity(chain_len);
 
     let base = 3 + (task_no % 17) as i64;
-    let mut previous_symbol = format!("base_value_{task_no}");
+    let base_symbol = format!("base_value_{task_no}");
 
     for i in 0..chain_len {
         let id = opaque_id(task_no, "evidence", i);
@@ -118,13 +118,18 @@ fn build_task(task_no: usize, diameter: u32) -> Task {
         };
         let text = if i == 0 {
             format!(
-                "pub const {previous_symbol}: i64 = {base};\n{}",
+                "pub const {base_symbol}: i64 = {base};\n{}",
                 filler(task_no, i)
             )
         } else {
             let delta = 1 + ((task_no + i) % 7) as i64;
+            let previous = if i == 1 {
+                base_symbol.clone()
+            } else {
+                format!("stage_{task_no}_{}()", i - 1)
+            };
             format!(
-                "pub fn {symbol}() -> i64 {{ {previous_symbol}() + {delta} }}\n{}",
+                "pub fn {symbol}() -> i64 {{ {previous} + {delta} }}\n{}",
                 filler(task_no, i)
             )
         };
@@ -135,7 +140,6 @@ fn build_task(task_no: usize, diameter: u32) -> Task {
         required.insert(id.clone());
         chain_ids.push(id.clone());
         docs.push(Doc { id, text });
-        previous_symbol = symbol;
     }
 
     // Add unrelated files. One noisy decoy mentions the requested symbol several
@@ -195,19 +199,16 @@ fn build_graph(task: &Task) -> MemoryGraph {
     graph
 }
 
-fn id_map(task: &Task) -> (BTreeMap<u64, String>, BTreeMap<String, u64>) {
-    let mut by_num = BTreeMap::new();
-    let mut by_id = BTreeMap::new();
-    for (index, doc) in task.docs.iter().enumerate() {
-        let n = index as u64;
-        by_num.insert(n, doc.id.clone());
-        by_id.insert(doc.id.clone(), n);
-    }
-    (by_num, by_id)
+fn id_map(task: &Task) -> BTreeMap<u64, String> {
+    task.docs
+        .iter()
+        .enumerate()
+        .map(|(index, doc)| (index as u64, doc.id.clone()))
+        .collect()
 }
 
 fn bm25_order(task: &Task) -> Vec<String> {
-    let (by_num, _) = id_map(task);
+    let by_num = id_map(task);
     let mut index = Bm25Index::default();
     for (n, doc) in task.docs.iter().enumerate() {
         index.add(n as u64, &doc.text);
@@ -220,7 +221,7 @@ fn bm25_order(task: &Task) -> Vec<String> {
 }
 
 fn dense_order(task: &Task) -> Vec<String> {
-    let (by_num, _) = id_map(task);
+    let by_num = id_map(task);
     let corpus: Vec<String> = task.docs.iter().map(|d| d.text.clone()).collect();
     let encoder = CcosEncoder::fit(&corpus, EMBEDDING_DIM);
     let mut retriever = SemanticRetriever::new(encoder);
@@ -237,7 +238,7 @@ fn dense_order(task: &Task) -> Vec<String> {
 }
 
 fn hybrid_order(task: &Task) -> Vec<String> {
-    let (by_num, _) = id_map(task);
+    let by_num = id_map(task);
     let corpus: Vec<String> = task.docs.iter().map(|d| d.text.clone()).collect();
     let encoder = CcosEncoder::fit(&corpus, EMBEDDING_DIM);
     let mut retriever = HybridRetriever::new(encoder, 60.0);
@@ -291,7 +292,10 @@ fn one_hop_order(graph: &MemoryGraph, seed: &str) -> Vec<String> {
 
 fn region_order(graph: &MemoryGraph, seed: &str) -> Vec<String> {
     let clusters = ContextRegionEngine::cluster_nodes(graph);
-    let Some(members) = clusters.values().find(|members| members.iter().any(|id| id == seed)) else {
+    let Some(members) = clusters
+        .values()
+        .find(|members| members.iter().any(|id| id == seed))
+    else {
         return vec![seed.to_owned()];
     };
     let allowed: BTreeSet<String> = members.iter().cloned().collect();
@@ -320,13 +324,16 @@ fn strict_budget(task: &Task, ordered: Vec<String>) -> Vec<String> {
 }
 
 fn select(strategy: &str, task: &Task, graph: &MemoryGraph, bm25: &[String]) -> Vec<String> {
-    let seed = bm25.first().map(String::as_str).unwrap_or(task.anchor.as_str());
+    let seed = bm25
+        .first()
+        .map(String::as_str)
+        .unwrap_or(task.anchor.as_str());
     let ordered = match strategy {
         "bm25" => bm25.to_vec(),
         "tfidf-dense" => dense_order(task),
         "bm25-tfidf-rrf" => hybrid_order(task),
-        "graphrag-1hop" => one_hop_order(graph, seed),
-        "graphrag-bfs" => bfs_order(graph, seed),
+        "graph-1hop" => one_hop_order(graph, seed),
+        "graph-bfs" => bfs_order(graph, seed),
         "ccos-query-region" => region_order(graph, seed),
         "ccos-workspace-anchor" => region_order(graph, &task.anchor),
         _ => Vec::new(),

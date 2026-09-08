@@ -29,35 +29,46 @@ jobs:
 
           path = Path("crates/ccos-enterprise-runtime/src/lib.rs")
           text = path.read_text()
-          old = """        let delta = (key.len() + value.len()) as u64
-              - cells
-                  .get(key)
-                  .map_or(0, |old| (key.len() + old.len()) as u64);
-          if delta > 0 && self.store_bytes + delta > MAX_TOTAL_CELL_BYTES {
-              return Err(Refusal::StorageExhausted);
-          }
-          cells.insert(key.to_string(), value.to_string());
-          self.store_bytes = self.store_bytes.saturating_add(delta);
-          """
-          new = """        let old_bytes = cells
-              .get(key)
-              .map_or(0, |old| (key.len() + old.len()) as u64);
-          let new_bytes = (key.len() + value.len()) as u64;
-          if new_bytes > old_bytes {
-              let growth = new_bytes - old_bytes;
-              if growth > MAX_TOTAL_CELL_BYTES.saturating_sub(self.store_bytes) {
-                  return Err(Refusal::StorageExhausted);
-              }
-              self.store_bytes += growth;
-          } else {
-              self.store_bytes = self.store_bytes.saturating_sub(old_bytes - new_bytes);
-          }
-          cells.insert(key.to_string(), value.to_string());
-          """
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f"expected exactly one target block, found {count}")
-          path.write_text(text.replace(old, new, 1))
+          start_marker = "        let delta = (key.len() + value.len()) as u64\n"
+          end_marker = "        self.store_bytes = self.store_bytes.saturating_add(delta);\n"
+          if text.count(start_marker) != 1:
+              raise SystemExit(f"expected one start marker, found {text.count(start_marker)}")
+          start = text.index(start_marker)
+          end = text.find(end_marker, start)
+          if end < 0:
+              raise SystemExit("target end marker not found after start marker")
+          end += len(end_marker)
+          old = text[start:end]
+          required_lines = [
+              "            - cells",
+              "                .get(key)",
+              "                .map_or(0, |old| (key.len() + old.len()) as u64);",
+              "        if delta > 0 && self.store_bytes + delta > MAX_TOTAL_CELL_BYTES {",
+              "            return Err(Refusal::StorageExhausted);",
+              "        }",
+              "        cells.insert(key.to_string(), value.to_string());",
+          ]
+          for line in required_lines:
+              if line not in old:
+                  raise SystemExit(f"target block changed unexpectedly; missing {line!r}")
+          new = "\n".join([
+              "        let old_bytes = cells",
+              "            .get(key)",
+              "            .map_or(0, |old| (key.len() + old.len()) as u64);",
+              "        let new_bytes = (key.len() + value.len()) as u64;",
+              "        if new_bytes > old_bytes {",
+              "            let growth = new_bytes - old_bytes;",
+              "            if growth > MAX_TOTAL_CELL_BYTES.saturating_sub(self.store_bytes) {",
+              "                return Err(Refusal::StorageExhausted);",
+              "            }",
+              "            self.store_bytes += growth;",
+              "        } else {",
+              "            self.store_bytes = self.store_bytes.saturating_sub(old_bytes - new_bytes);",
+              "        }",
+              "        cells.insert(key.to_string(), value.to_string());",
+              "",
+          ])
+          path.write_text(text[:start] + new + text[end:])
 
       - name: Verify formatting and focused regression
         run: |

@@ -231,10 +231,15 @@ fn stored_role_names(book: &RoleBook) -> BTreeSet<String> {
 
 fn stored_actors(book: &RoleBook) -> BTreeSet<String> {
     snapshot(book)["assignments"]
-        .as_object()
-        .expect("assignments is a map")
-        .keys()
-        .cloned()
+        .as_array()
+        .expect("assignments is a row list")
+        .iter()
+        .map(|row| {
+            row["actor"]
+                .as_str()
+                .expect("assignment actor is a string")
+                .to_string()
+        })
         .collect()
 }
 
@@ -804,7 +809,7 @@ fn redefining_a_role_is_journaled_with_its_blast_radius() {
         "and after — the escalation is legible without reading the code"
     );
     assert!(
-        holders.contains(&"bob".to_string()),
+        holders.contains(&"memorithm/bob".to_string()),
         "the blast radius names the principals whose rights moved: {holders:?}"
     );
 

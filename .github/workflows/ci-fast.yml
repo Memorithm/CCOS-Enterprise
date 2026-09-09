@@ -31,6 +31,16 @@ jobs:
           # range up to the PR's real head instead.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             scripts/check-author-policy.sh "origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            # A push must validate the commits introduced by that push, not
+            # re-scan the repository's entire historical ancestry forever.
+            before="${{ github.event.before }}"
+            after="${{ github.sha }}"
+            if [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ]; then
+              scripts/check-author-policy.sh "$before..$after"
+            else
+              scripts/check-author-policy.sh "$after"
+            fi
           else
             scripts/check-author-policy.sh HEAD
           fi

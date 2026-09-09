@@ -1491,18 +1491,19 @@ impl Deployment {
         let Some(cells) = self.store.get_mut(tenant) else {
             return false;
         };
-        let removed = Self::map_bytes(cells);
-        let existed = cells.remove(key).is_some();
-        if cells.is_empty() {
-            // Drop the tenant's map with it, so an emptied tenant costs
-            // nothing — the map, its keys and the tenant name held once.
-            self.store.remove(tenant);
-        } else if existed {
-            self.store_bytes = self
-                .store_bytes
-                .saturating_sub(removed - Self::map_bytes(cells));
+        let before = Self::map_bytes(cells);
+        if cells.remove(key).is_none() {
+            return false;
         }
-        existed
+        let after = Self::map_bytes(cells);
+        let empty = cells.is_empty();
+        self.store_bytes = self.store_bytes.saturating_sub(before - after);
+        if empty {
+            // Drop the empty per-tenant map after releasing the exact bytes
+            // that the removed final cell contributed to the global budget.
+            self.store.remove(tenant);
+        }
+        true
     }
 
     /// Delete a cell directly. Returns whether it existed.
@@ -3031,6 +3032,53 @@ pub fn two_tenant_deployment() -> Deployment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_last_cell_releases_incremental_storage_accounting() {
+        let mut d = Deployment::new();
+        let mut tenant = TenantState::new(0);
+        tenant.allow_model("model");
+        assert!(d.add_tenant("org", "tenant", tenant));
+
+        let scope = ccos_enterprise_tenancy::TenantScope::new(
+            ccos_enterprise_tenancy::TenantId("tenant".into()),
+            "key".to_string(),
+        );
+        assert!(d.put(&scope, "value"));
+        assert!(d.store_bytes > 0);
+        assert_eq!(d.store_bytes, d.total_cell_bytes());
+
+        assert!(d.remove(&scope));
+        assert_eq!(d.cell_count("tenant"), 0);
+        assert_eq!(d.store_bytes, 0);
+        assert_eq!(d.store_bytes, d.total_cell_bytes());
+    }
+
+    #[test]
+    fn deleting_one_of_multiple_cells_keeps_storage_accounting_exact() {
+        let mut d = Deployment::new();
+        let mut tenant = TenantState::new(0);
+        tenant.allow_model("model");
+        assert!(d.add_tenant("org", "tenant", tenant));
+
+        let first = ccos_enterprise_tenancy::TenantScope::new(
+            ccos_enterprise_tenancy::TenantId("tenant".into()),
+            "first".to_string(),
+        );
+        let second = ccos_enterprise_tenancy::TenantScope::new(
+            ccos_enterprise_tenancy::TenantId("tenant".into()),
+            "second".to_string(),
+        );
+        assert!(d.put(&first, "longer-value"));
+        assert!(d.put(&second, "kept"));
+        let before = d.store_bytes;
+        assert_eq!(before, d.total_cell_bytes());
+
+        assert!(d.remove(&first));
+        assert_eq!(d.get(&second), Some("kept"));
+        assert!(d.store_bytes < before);
+        assert_eq!(d.store_bytes, d.total_cell_bytes());
+    }
 
     #[test]
     fn a_request_cannot_name_an_actor_the_credential_does_not_prove() {

@@ -1451,15 +1451,24 @@ impl Deployment {
         if new_key && cells.len() >= MAX_CELLS_PER_TENANT {
             return Err(Refusal::StorageExhausted);
         }
-        let delta = (key.len() + value.len()) as u64
-            - cells
-                .get(key)
-                .map_or(0, |old| (key.len() + old.len()) as u64);
-        if delta > 0 && self.store_bytes + delta > MAX_TOTAL_CELL_BYTES {
-            return Err(Refusal::StorageExhausted);
-        }
+        let new_bytes = (key.len() + value.len()) as u64;
+        let old_bytes = cells
+            .get(key)
+            .map_or(0, |old| (key.len() + old.len()) as u64);
+        let updated_store_bytes = if new_bytes >= old_bytes {
+            let growth = new_bytes - old_bytes;
+            self.store_bytes
+                .checked_add(growth)
+                .filter(|total| *total <= MAX_TOTAL_CELL_BYTES)
+                .ok_or(Refusal::StorageExhausted)?
+        } else {
+            let shrink = old_bytes - new_bytes;
+            self.store_bytes
+                .checked_sub(shrink)
+                .ok_or(Refusal::StorageExhausted)?
+        };
         cells.insert(key.to_string(), value.to_string());
-        self.store_bytes = self.store_bytes.saturating_add(delta);
+        self.store_bytes = updated_store_bytes;
         Ok(())
     }
 

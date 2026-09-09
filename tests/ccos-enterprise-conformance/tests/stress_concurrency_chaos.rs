@@ -863,7 +863,7 @@ fn run_thread(deployment: &Mutex<Deployment>, ops: &[Op], start: &Barrier) -> Th
                 }
             }
             Op::Assign { actor, role } => {
-                let ok = guard(deployment).assign("test-org", actor, role);
+                let ok = guard(deployment).assign(HOME_ORG, actor, role);
                 if *role == GHOST_ROLE && ok {
                     report.problems.push(format!(
                         "{actor} was granted the never-declared {GHOST_ROLE}"

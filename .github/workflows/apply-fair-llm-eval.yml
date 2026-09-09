@@ -1,0 +1,433 @@
+name: Apply fair LLM evaluation sanitation
+
+on:
+  push:
+    branches:
+      - audit/fair-llm-eval
+    paths:
+      - .github/workflows/apply-fair-llm-eval.yml
+
+permissions:
+  contents: write
+
+jobs:
+  sanitize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/fair-llm-eval
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Sanitize legacy LLM evaluation semantics
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('core/src/eval.rs')
+          text = path.read_text()
+
+          text = text.replace(
+              '/// ≈4 chars per token, the standard rough estimate.\nfn estimate_tokens(text: &str) -> usize {\n    text.chars().count() / 4\n}',
+              '/// Conservative rough estimate used only for benchmark selection.\n/// This is explicitly not a provider-tokenizer count.\nfn estimate_tokens(text: &str) -> usize {\n    (text.chars().count() + 3) / 4\n}',
+              1,
+          )
+
+          old_strats = '''const STRATEGIES: [&str; 6] = [
+              "rag-dense",
+              "rag-hybrid",
+              "graphrag-1hop",
+              "graphrag-bfs",
+              "ccos-from-query",
+              "ccos-region",
+          ];'''
+          new_strats = '''const STRATEGIES: [&str; 6] = [
+              "token-jaccard",
+              "token-jaccard-popularity",
+              "graph-1hop",
+              "graph-bfs",
+              "ccos-query-region",
+              "ccos-workspace-anchor",
+          ];'''
+          if old_strats not in text:
+              raise SystemExit('strategy block not found')
+          text = text.replace(old_strats, new_strats, 1)
+
+          text = text.replace(
+              'struct Task {\n    diameter: u32,\n    files: Vec<SrcFile>,',
+              'struct Task {\n    diameter: u32,\n    files: Vec<SrcFile>,\n    /// Explicit generated dependency edges; document ids carry no topology.\n    edges: Vec<(String, String)>,',
+              1,
+          )
+
+          build_start = text.index('fn build_graph(task: &Task) -> (MemoryGraph, BTreeMap<String, String>) {')
+          build_end = text.index('\n\n/// Generate `tasks` arithmetic-chain tasks.', build_start)
+          build_graph = r'''fn build_graph(task: &Task) -> (MemoryGraph, BTreeMap<String, String>) {
+              let mut g = MemoryGraph::new(0.0, usize::MAX);
+              let mut text: BTreeMap<String, String> = BTreeMap::new();
+              for f in &task.files {
+                  g.upsert_node(
+                      f.id.clone().into(),
+                      f.id.clone(),
+                      String::new(),
+                      NodeType::Module,
+                  );
+                  text.insert(f.id.clone(), f.text.clone());
+              }
+              for (source, target) in &task.edges {
+                  g.add_edge(
+                      source.clone().into(),
+                      target.clone().into(),
+                      0.9,
+                      EdgeType::DependsOn,
+                  );
+              }
+              (g, text)
+          }'''
+          text = text[:build_start] + build_graph + text[build_end:]
+
+          gen_start = text.index('fn generate(cfg: &EvalConfig, rng: &mut StdRng) -> Vec<Task> {')
+          gen_end = text.index('\n\nfn sim(file: &SrcFile, query: &BTreeSet<String>) -> f32 {', gen_start)
+          generate = r'''fn opaque_id(seed: u64, task_index: usize, kind: &str, ordinal: usize) -> String {
+              let digest = crate::util::sha256_hex(&format!(
+                  "llm-eval:v2:{seed}:{task_index}:{kind}:{ordinal}"
+              ));
+              format!("doc:{}", &digest[..20])
+          }
+
+          /// Generate `tasks` arithmetic-chain tasks with opaque document ids.
+          /// Dependency topology is retained separately in `Task::edges`.
+          fn generate(cfg: &EvalConfig, rng: &mut StdRng) -> Vec<Task> {
+              let ops = [('+', 1, 9), ('*', 2, 4), ('-', 1, 7)];
+              let mut tasks = Vec::new();
+              for task_index in 0..cfg.tasks {
+                  let d = cfg.diameters[rng.gen_range(0..cfg.diameters.len())];
+                  let len = (d + 1) as usize;
+                  let base: i64 = rng.gen_range(1..20);
+
+                  let mut files: Vec<SrcFile> = Vec::new();
+                  let mut required: BTreeSet<String> = BTreeSet::new();
+                  let mut symbols: BTreeSet<String> = BTreeSet::new();
+                  let mut chain_ids: Vec<String> = Vec::with_capacity(len);
+                  let mut edges: Vec<(String, String)> = Vec::with_capacity(len.saturating_sub(1));
+                  let mut value = base;
+
+                  let first_id = opaque_id(cfg.seed, task_index, "evidence", 0);
+                  files.push(SrcFile {
+                      id: first_id.clone(),
+                      text: format!("pub const BASE: i64 = {base};\n{FILLER}"),
+                      tokens: BTreeSet::from(["BASE".to_string()]),
+                      popularity: 0.0,
+                  });
+                  required.insert(first_id.clone());
+                  chain_ids.push(first_id);
+                  symbols.insert("BASE".to_string());
+
+                  for i in 1..len {
+                      let (op, lo, hi) = ops[rng.gen_range(0..ops.len())];
+                      let c: i64 = rng.gen_range(lo..=hi);
+                      value = match op {
+                          '+' => value + c,
+                          '*' => value * c,
+                          _ => value - c,
+                      };
+                      let name = format!("s{i}");
+                      let prev = if i == 1 {
+                          "BASE".to_string()
+                      } else {
+                          format!("s{}()", i - 1)
+                      };
+                      let id = opaque_id(cfg.seed, task_index, "evidence", i);
+                      files.push(SrcFile {
+                          id: id.clone(),
+                          text: format!("pub fn {name}() -> i64 {{ {prev} {op} {c} }}\n{FILLER}"),
+                          tokens: BTreeSet::from([name.clone()]),
+                          popularity: 0.0,
+                      });
+                      let previous = chain_ids
+                          .last()
+                          .expect("every non-first evidence document has a predecessor")
+                          .clone();
+                      edges.push((previous, id.clone()));
+                      chain_ids.push(id.clone());
+                      required.insert(id);
+                      symbols.insert(name);
+                  }
+
+                  let last = len - 1;
+                  let last_name = format!("s{last}");
+                  let anchor = chain_ids[last].clone();
+
+                  for k in 0..cfg.decoys {
+                      let dname = format!("util{k}");
+                      files.push(SrcFile {
+                          id: opaque_id(cfg.seed, task_index, "decoy", k),
+                          text: format!(
+                              "pub fn {dname}_run(x: i64) -> i64 {{ x + {k} }}\n{FILLER}"
+                          ),
+                          tokens: BTreeSet::from([format!("{dname}_run")]),
+                          popularity: 1.0,
+                      });
+                      symbols.insert(format!("{dname}_run"));
+                  }
+
+                  let query: BTreeSet<String> =
+                      BTreeSet::from([last_name.clone(), "return".into(), "value".into()]);
+                  if cfg.noisy {
+                      // The corpus becomes ambiguous; the user query itself is unchanged.
+                      // This decoy matches all query tokens but carries no live dependency edge.
+                      files.push(SrcFile {
+                          id: opaque_id(cfg.seed, task_index, "noisy-decoy", 0),
+                          text: format!(
+                              "// historical compatibility note for {last_name}; not the live implementation\n\
+                               pub fn {last_name}_legacy() -> i64 {{ 0 }}\n{FILLER}"
+                          ),
+                          tokens: query.clone(),
+                          popularity: 0.0,
+                      });
+                      symbols.insert(format!("{last_name}_legacy"));
+                  }
+
+                  tasks.push(Task {
+                      diameter: d,
+                      files,
+                      edges,
+                      required,
+                      anchor,
+                      question: format!(
+                          "What integer does {last_name}() return? Reply with ONLY the integer, nothing else."
+                      ),
+                      query,
+                      answer: value,
+                      symbols,
+                  });
+              }
+              tasks
+          }'''
+          text = text[:gen_start] + generate + text[gen_end:]
+
+          select_start = text.index('fn select(strategy: &str, task: &Task, g: &MemoryGraph, budget: usize) -> Vec<String> {')
+          select_end = text.index('\n\n/// Region members ordered', select_start)
+          select_fn = r'''fn select(strategy: &str, task: &Task, g: &MemoryGraph, budget: usize) -> Vec<String> {
+              let by_id: BTreeMap<&str, &SrcFile> = task.files.iter().map(|f| (f.id.as_str(), f)).collect();
+              let take_budget = |ordered: Vec<String>| -> Vec<String> {
+                  let mut out = Vec::new();
+                  let mut used = 0usize;
+                  for id in ordered {
+                      let t = by_id
+                          .get(id.as_str())
+                          .map(|f| estimate_tokens(&f.text))
+                          .unwrap_or(0);
+                      if used + t > budget {
+                          continue;
+                      }
+                      used += t;
+                      out.push(id);
+                      if used >= budget {
+                          break;
+                      }
+                  }
+                  out
+              };
+              match strategy {
+                  "token-jaccard" => {
+                      let mut v: Vec<&SrcFile> = task.files.iter().collect();
+                      v.sort_by(|a, b| {
+                          sim(b, &task.query)
+                              .partial_cmp(&sim(a, &task.query))
+                              .unwrap_or(std::cmp::Ordering::Equal)
+                              .then_with(|| idhash(&a.id).cmp(&idhash(&b.id)))
+                      });
+                      take_budget(v.into_iter().map(|f| f.id.clone()).collect())
+                  }
+                  "token-jaccard-popularity" => {
+                      // A deliberately simple synthetic baseline: token-set
+                      // Jaccard blended with a query-independent popularity prior.
+                      let mut v: Vec<&SrcFile> = task.files.iter().collect();
+                      let key = |f: &SrcFile| 0.65 * sim(f, &task.query) + 0.35 * f.popularity;
+                      v.sort_by(|a, b| {
+                          key(b)
+                              .partial_cmp(&key(a))
+                              .unwrap_or(std::cmp::Ordering::Equal)
+                              .then_with(|| idhash(&a.id).cmp(&idhash(&b.id)))
+                      });
+                      take_budget(v.into_iter().map(|f| f.id.clone()).collect())
+                  }
+                  "graph-1hop" => {
+                      let seed = best_hit(task);
+                      let mut ids: BTreeSet<String> = BTreeSet::from([seed.clone()]);
+                      for e in &g.edges {
+                          if e.source.0 == seed {
+                              ids.insert(e.target.0.clone());
+                          } else if e.target.0 == seed {
+                              ids.insert(e.source.0.clone());
+                          }
+                      }
+                      take_budget(ids.into_iter().collect())
+                  }
+                  "graph-bfs" => take_budget(bfs(g, &best_hit(task))),
+                  "ccos-query-region" =>
+                      take_budget(region_ordered(g, &region_of(g, &best_hit(task)))),
+                  "ccos-workspace-anchor" =>
+                      take_budget(region_ordered(g, &region_of(g, &task.anchor))),
+                  _ => Vec::new(),
+              }
+          }'''
+          text = text[:select_start] + select_fn + text[select_end:]
+
+          region_start = text.index('/// Region members ordered', select_start)
+          region_end = text.index('\n\nfn bfs(', region_start)
+          region_fn = r'''/// Region members in deterministic, topology-neutral order.
+          fn region_ordered(_g: &MemoryGraph, members: &BTreeSet<String>) -> Vec<String> {
+              let mut v: Vec<String> = members.iter().cloned().collect();
+              v.sort_by_key(|id| (idhash(id), id.clone()));
+              v
+          }'''
+          text = text[:region_start] + region_fn + text[region_end:]
+
+          text = text.replace(
+              'pub struct EvalStrategy {\n    pub strategy: String,',
+              'pub struct EvalStrategy {\n    pub strategy: String,\n    /// True only when selection receives the task\'s workspace anchor directly.\n    pub assisted_anchor: bool,',
+              1,
+          )
+          text = text.replace(
+              'pub struct EvalReport {\n    pub provider: String,',
+              'pub struct EvalReport {\n    pub schema_version: u32,\n    pub claim_scope: String,\n    pub token_budget_kind: String,\n    pub provider: String,',
+              1,
+          )
+          text = text.replace(
+              'strategy: name.to_string(),\n            tasks: n,',
+              'strategy: name.to_string(),\n            assisted_anchor: name == "ccos-workspace-anchor",\n            tasks: n,',
+              1,
+          )
+          text = text.replace(
+              '    EvalReport {\n        provider,',
+              '    EvalReport {\n        schema_version: 2,\n        claim_scope: "synthetic end-to-end LLM mechanism study; not evidence of general superiority over modern RAG".into(),\n        token_budget_kind: "ceil(chars/4) estimate; not a provider tokenizer count".into(),\n        provider,',
+              1,
+          )
+
+          # Truthful terminology throughout executable code/tests.
+          for old, new in [
+              ('"rag-dense"', '"token-jaccard"'),
+              ('"rag-hybrid"', '"token-jaccard-popularity"'),
+              ('"graphrag-1hop"', '"graph-1hop"'),
+              ('"graphrag-bfs"', '"graph-bfs"'),
+              ('"ccos-from-query"', '"ccos-query-region"'),
+              ('"ccos-region"', '"ccos-workspace-anchor"'),
+          ]:
+              text = text.replace(old, new)
+
+          # Replace the legacy noisy-fixture test and add fairness regressions.
+          old_test_start = text.index('    #[test]\n    fn noisy_query_traps_lexical_selection_but_not_the_anchor() {')
+          old_test_end = text.index('\n\n    #[test]\n    fn parse_answer_extracts_integers()', old_test_start)
+          fairness_tests = r'''    #[test]
+              fn noisy_corpus_can_trap_query_selection_without_mutating_the_query() {
+                  let clean = one_task(false);
+                  let task = one_task(true);
+                  assert_eq!(clean.query, task.query, "noise must change the corpus, not the user query");
+                  let (g, _) = build_graph(&task);
+                  let hit = best_hit(&task);
+                  assert!(
+                      !task.required.contains(&hit),
+                      "the noisy corpus should make an unrelated decoy the best token match"
+                  );
+                  let region: BTreeSet<String> = select("ccos-workspace-anchor", &task, &g, 100_000)
+                      .into_iter()
+                      .collect();
+                  assert!(task.required.iter().all(|r| region.contains(r)));
+              }
+
+              #[test]
+              fn generated_document_ids_are_opaque_and_topology_free() {
+                  let task = one_task(true);
+                  for file in &task.files {
+                      assert!(file.id.starts_with("doc:"));
+                      assert!(!file.id.contains("chain"));
+                      assert!(!file.id.contains("trap"));
+                      assert!(!file.id.contains("legacy"));
+                  }
+                  assert_eq!(task.edges.len(), task.required.len().saturating_sub(1));
+              }
+
+              #[test]
+              fn strict_budget_never_admits_an_oversized_first_document() {
+                  let task = one_task(false);
+                  let (g, _) = build_graph(&task);
+                  for strategy in strategies() {
+                      assert!(
+                          select(strategy, &task, &g, 1).is_empty(),
+                          "{strategy} must not overshoot a one-token budget"
+                      );
+                  }
+              }'''
+          text = text[:old_test_start] + fairness_tests + text[old_test_end:]
+
+          # Tighten the module-level framing without rewriting historical papers.
+          text = text.replace(
+              '/// ≈4 chars per token, the standard rough estimate.',
+              '/// Conservative rough token estimate.',
+          )
+          text = text.replace(
+              'RAG/GraphRAG locate code from the question; CCOS anchors',
+              'Query-driven baselines locate code from the question; assisted CCOS anchors',
+          )
+
+          path.write_text(text)
+
+          # Keep the human CLI aligned with the executable strategy names, but
+          # leave the separate historical experiment command untouched.
+          main_path = Path('core/src/main.rs')
+          main = main_path.read_text()
+          fn_start = main.index('async fn run_eval_cmd(args: &[String]) -> CliResult {')
+          fn_end = main.find('\nfn ', fn_start + 1)
+          if fn_end == -1:
+              fn_end = len(main)
+          chunk = main[fn_start:fn_end]
+          for old, new in [
+              ('"rag-dense"', '"token-jaccard"'),
+              ('"rag-hybrid"', '"token-jaccard-popularity"'),
+              ('"graphrag-1hop"', '"graph-1hop"'),
+              ('"graphrag-bfs"', '"graph-bfs"'),
+              ('"ccos-from-query"', '"ccos-query-region"'),
+              ('"ccos-region"', '"ccos-workspace-anchor"'),
+          ]:
+              chunk = chunk.replace(old, new)
+          main = main[:fn_start] + chunk + main[fn_end:]
+          main_path.write_text(main)
+          PY
+          cargo fmt --all
+      - name: Core evaluation unit tests
+        run: cargo test -p ccos-core eval::tests
+      - name: Core check and clippy
+        run: |
+          cargo check -p ccos-core
+          cargo clippy -p ccos-core --all-targets -- -D warnings
+      - name: Offline CLI eval smoke test
+        run: cargo run -p ccos-core -- eval --tasks 2 --json > /tmp/eval.json
+      - name: Verify sanitized report schema
+        run: |
+          python3 - <<'PY'
+          import json
+          report = json.load(open('/tmp/eval.json'))
+          for scenario in ('clean', 'noisy'):
+              r = report[scenario]
+              assert r['schema_version'] == 2
+              assert 'not evidence of general superiority' in r['claim_scope']
+              assert 'estimate' in r['token_budget_kind']
+              names = {row['strategy'] for row in r['overall']}
+              assert 'rag-dense' not in names
+              assert 'graphrag-bfs' not in names
+              assert 'token-jaccard' in names
+              assert 'graph-bfs' in names
+              assisted = [row for row in r['overall'] if row['assisted_anchor']]
+              assert [row['strategy'] for row in assisted] == ['ccos-workspace-anchor']
+          PY
+      - name: Commit validated sanitation
+        run: |
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add core/src/eval.rs core/src/main.rs
+          git diff --cached --exit-code && exit 1 || true
+          git commit -m "eval: sanitize legacy LLM benchmark semantics"
+          git push origin HEAD:audit/fair-llm-eval

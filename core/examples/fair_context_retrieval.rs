@@ -104,7 +104,7 @@ fn build_task(task_no: usize, diameter: u32) -> Task {
     let mut docs = Vec::with_capacity(chain_len + DECOYS + 1);
     let mut required = BTreeSet::new();
     let mut edges = Vec::with_capacity(chain_len.saturating_sub(1));
-    let mut chain_ids = Vec::with_capacity(chain_len);
+    let mut chain_ids: Vec<String> = Vec::with_capacity(chain_len);
 
     let base = 3 + (task_no % 17) as i64;
     let base_symbol = format!("base_value_{task_no}");

@@ -1,0 +1,54 @@
+name: Repair fair benchmark clippy and retrigger sanitation
+
+on:
+  push:
+    branches:
+      - audit/fair-llm-eval
+    paths:
+      - .github/workflows/repair-fair-clippy-and-retrigger.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/fair-llm-eval
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Use the standard integer ceiling operation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          example = Path('core/examples/fair_context_retrieval.rs')
+          text = example.read_text()
+          old = '(text.chars().count() + 3) / 4'
+          new = 'text.chars().count().div_ceil(4)'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one manual div-ceil expression, found {text.count(old)}')
+          example.write_text(text.replace(old, new, 1))
+
+          # Changing the sanitation workflow file deliberately retriggers it on
+          # the new branch head, where the pre-existing example warning is gone.
+          workflow = Path('.github/workflows/apply-fair-llm-eval.yml')
+          body = workflow.read_text()
+          marker = '# retrigger: fair-context div_ceil repaired\n'
+          if marker not in body:
+              workflow.write_text(body + '\n' + marker)
+          PY
+          cargo fmt --all
+          cargo clippy -p ccos-core --example fair_context_retrieval -- -D warnings
+      - name: Commit repair and retrigger marker
+        run: |
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add core/examples/fair_context_retrieval.rs .github/workflows/apply-fair-llm-eval.yml
+          git diff --cached --exit-code && exit 1 || true
+          git commit -m "fix(eval): use div_ceil for estimated token budget"
+          git push origin HEAD:audit/fair-llm-eval

@@ -352,13 +352,9 @@ mod tests {
     #[test]
     fn strict_qrels_import_rejects_malformed_rows_and_scores() {
         let (docs, queries) = fixtures();
-        let malformed = parse_qrels(
-            "query-id\tcorpus-id\tscore\nq1\td1\n",
-            &docs,
-            &queries,
-        )
-        .err()
-        .unwrap();
+        let malformed = parse_qrels("query-id\tcorpus-id\tscore\nq1\td1\n", &docs, &queries)
+            .err()
+            .unwrap();
         assert!(malformed.contains("expected exactly 3"));
 
         let bad_score = parse_qrels(
@@ -405,13 +401,9 @@ mod tests {
         .unwrap();
         assert!(duplicate.contains("duplicates judgment"));
 
-        let non_finite = parse_qrels(
-            "query-id\tcorpus-id\tscore\nq1\td1\tNaN\n",
-            &docs,
-            &queries,
-        )
-        .err()
-        .unwrap();
+        let non_finite = parse_qrels("query-id\tcorpus-id\tscore\nq1\td1\tNaN\n", &docs, &queries)
+            .err()
+            .unwrap();
         assert!(non_finite.contains("non-finite relevance score"));
 
         let no_positive = parse_qrels(

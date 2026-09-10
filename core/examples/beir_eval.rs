@@ -50,6 +50,103 @@ fn jsonl(path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct QrelImportStats {
+    data_rows: usize,
+    positive_rows: usize,
+    non_positive_rows: usize,
+    positive_queries: usize,
+    /// Strict mode aborts on the first rejected row, so a successful import is always zero.
+    rejected_rows: usize,
+}
+
+struct QrelImport {
+    qrels: HashMap<String, HashMap<u64, f64>>,
+    stats: QrelImportStats,
+}
+
+fn parse_qrels(
+    raw: &str,
+    doc_ids: &HashMap<String, u64>,
+    queries: &HashMap<String, String>,
+) -> Result<QrelImport, String> {
+    let mut lines = raw.lines();
+    let header = lines
+        .next()
+        .ok_or_else(|| "qrels file is empty".to_string())?;
+    if header != "query-id\tcorpus-id\tscore" {
+        return Err(format!(
+            "qrels header must be exactly `query-id\\tcorpus-id\\tscore`, found {header:?}"
+        ));
+    }
+
+    let mut qrels: HashMap<String, HashMap<u64, f64>> = HashMap::new();
+    let mut seen: HashSet<(String, u64)> = HashSet::new();
+    let mut stats = QrelImportStats::default();
+
+    for (offset, line) in lines.enumerate() {
+        let line_number = offset + 2;
+        stats.data_rows += 1;
+        if line.is_empty() {
+            return Err(format!("qrels line {line_number} is empty"));
+        }
+
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 3 {
+            return Err(format!(
+                "qrels line {line_number} has {} fields; expected exactly 3",
+                fields.len()
+            ));
+        }
+        let qid = fields[0];
+        let did = fields[1];
+        if qid.is_empty() || did.is_empty() {
+            return Err(format!(
+                "qrels line {line_number} contains an empty query or document id"
+            ));
+        }
+        if !queries.contains_key(qid) {
+            return Err(format!(
+                "qrels line {line_number} references unknown query id {qid:?}"
+            ));
+        }
+        let &doc = doc_ids.get(did).ok_or_else(|| {
+            format!("qrels line {line_number} references unknown document id {did:?}")
+        })?;
+        let gain: f64 = fields[2].parse().map_err(|_| {
+            format!(
+                "qrels line {line_number} has non-numeric relevance score {:?}",
+                fields[2]
+            )
+        })?;
+        if !gain.is_finite() {
+            return Err(format!(
+                "qrels line {line_number} has non-finite relevance score {:?}",
+                fields[2]
+            ));
+        }
+
+        if !seen.insert((qid.to_string(), doc)) {
+            return Err(format!(
+                "qrels line {line_number} duplicates judgment for query {qid:?}, document {did:?}"
+            ));
+        }
+
+        if gain > 0.0 {
+            qrels.entry(qid.to_string()).or_default().insert(doc, gain);
+            stats.positive_rows += 1;
+        } else {
+            stats.non_positive_rows += 1;
+        }
+    }
+
+    if qrels.is_empty() {
+        return Err("qrels contain no positive relevance judgments".into());
+    }
+    stats.positive_queries = qrels.len();
+    Ok(QrelImport { qrels, stats })
+}
+
 fn main() {
     let dir = std::env::args()
         .nth(1)
@@ -69,7 +166,7 @@ fn main() {
         docs.push(format!("{title} {text}"));
     }
 
-    // ── Queries + graded qrels (test split). Only judged queries are evaluated. ──────────────────
+    // ── Queries + graded qrels (test split). Strict import prevents silent population drift. ─────
     let queries: HashMap<String, String> = jsonl(&dir.join("queries.jsonl"))
         .into_iter()
         .map(|q| {
@@ -79,22 +176,22 @@ fn main() {
             )
         })
         .collect();
-    let mut qrels: HashMap<String, HashMap<u64, f64>> = HashMap::new(); // qid → doc → gain
     let raw = fs::read_to_string(dir.join("qrels/test.tsv")).expect("qrels/test.tsv");
-    for line in raw.lines().skip(1) {
-        let mut f = line.split('\t');
-        let (Some(qid), Some(did), Some(score)) = (f.next(), f.next(), f.next()) else {
-            continue;
-        };
-        let gain: f64 = score.trim().parse().unwrap_or(0.0);
-        if gain > 0.0 {
-            if let Some(&d) = doc_ids.get(did) {
-                qrels.entry(qid.to_string()).or_default().insert(d, gain);
-            }
-        }
-    }
-    let mut qids: Vec<&String> = qrels.keys().filter(|q| queries.contains_key(*q)).collect();
+    let imported = parse_qrels(&raw, &doc_ids, &queries).unwrap_or_else(|error| {
+        eprintln!("invalid BEIR qrels: {error}");
+        std::process::exit(2);
+    });
+    let QrelImport { qrels, stats } = imported;
+    let mut qids: Vec<&String> = qrels.keys().collect();
     qids.sort(); // deterministic evaluation order
+    eprintln!(
+        "qrels import: {} data rows, {} positive, {} non-positive, {} rejected; {} positively judged queries",
+        stats.data_rows,
+        stats.positive_rows,
+        stats.non_positive_rows,
+        stats.rejected_rows,
+        stats.positive_queries,
+    );
     eprintln!("load: {:.1?}", t0.elapsed());
 
     println!(
@@ -102,7 +199,7 @@ fn main() {
         dir.display()
     );
     println!(
-        "\ncorpus: {} docs   queries: {} judged (of {} shipped)   qrels: graded, test split\n",
+        "\ncorpus: {} docs   queries: {} judged (of {} shipped)   qrels: graded, test split, strict import\n",
         docs.len(),
         qids.len(),
         queries.len(),
@@ -217,4 +314,105 @@ fn main() {
          stopwords) lands in that neighbourhood with zero dependencies and bit-for-bit reproducible\n\
          output (rerun and diff: identical). See docs/MEASUREMENT_beir.md."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixtures() -> (HashMap<String, u64>, HashMap<String, String>) {
+        (
+            HashMap::from([("d1".into(), 0), ("d2".into(), 1)]),
+            HashMap::from([("q1".into(), "question".into())]),
+        )
+    }
+
+    #[test]
+    fn strict_qrels_import_counts_positive_and_non_positive_rows() {
+        let (docs, queries) = fixtures();
+        let imported = parse_qrels(
+            "query-id\tcorpus-id\tscore\nq1\td1\t1\nq1\td2\t0\n",
+            &docs,
+            &queries,
+        )
+        .unwrap();
+        assert_eq!(imported.qrels["q1"].get(&0), Some(&1.0));
+        assert_eq!(
+            imported.stats,
+            QrelImportStats {
+                data_rows: 2,
+                positive_rows: 1,
+                non_positive_rows: 1,
+                positive_queries: 1,
+                rejected_rows: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn strict_qrels_import_rejects_malformed_rows_and_scores() {
+        let (docs, queries) = fixtures();
+        let malformed = parse_qrels("query-id\tcorpus-id\tscore\nq1\td1\n", &docs, &queries)
+            .err()
+            .unwrap();
+        assert!(malformed.contains("expected exactly 3"));
+
+        let bad_score = parse_qrels(
+            "query-id\tcorpus-id\tscore\nq1\td1\tnot-a-number\n",
+            &docs,
+            &queries,
+        )
+        .err()
+        .unwrap();
+        assert!(bad_score.contains("non-numeric relevance score"));
+    }
+
+    #[test]
+    fn strict_qrels_import_rejects_unknown_references() {
+        let (docs, queries) = fixtures();
+        let unknown_query = parse_qrels(
+            "query-id\tcorpus-id\tscore\nmissing\td1\t1\n",
+            &docs,
+            &queries,
+        )
+        .err()
+        .unwrap();
+        assert!(unknown_query.contains("unknown query id"));
+
+        let unknown_doc = parse_qrels(
+            "query-id\tcorpus-id\tscore\nq1\tmissing\t1\n",
+            &docs,
+            &queries,
+        )
+        .err()
+        .unwrap();
+        assert!(unknown_doc.contains("unknown document id"));
+    }
+
+    #[test]
+    fn strict_qrels_import_rejects_duplicates_non_finite_and_no_positive_set() {
+        let (docs, queries) = fixtures();
+        let duplicate = parse_qrels(
+            "query-id\tcorpus-id\tscore\nq1\td1\t1\nq1\td1\t2\n",
+            &docs,
+            &queries,
+        )
+        .err()
+        .unwrap();
+        assert!(duplicate.contains("duplicates judgment"));
+
+        let non_finite = parse_qrels("query-id\tcorpus-id\tscore\nq1\td1\tNaN\n", &docs, &queries)
+            .err()
+            .unwrap();
+        assert!(non_finite.contains("non-finite relevance score"));
+
+        let no_positive = parse_qrels(
+            "query-id\tcorpus-id\tscore\nq1\td1\t0\nq1\td2\t-1\n",
+            &docs,
+            &queries,
+        )
+        .err()
+        .unwrap();
+        assert!(no_positive.contains("no positive relevance judgments"));
+    }
 }

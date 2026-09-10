@@ -137,7 +137,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["kept-a", "kept-b"]
         );
-        assert_eq!(recalled.iter().map(|item| item.payload.len()).sum::<usize>(), 5);
+        assert_eq!(
+            recalled
+                .iter()
+                .map(|item| item.payload.len())
+                .sum::<usize>(),
+            5
+        );
     }
 
     #[test]

@@ -134,7 +134,11 @@ mod tests {
             &self,
             scoped: TenantScope<LoadoutMemoryQuery<'_>>,
         ) -> Result<Vec<GovernedMemoryObservation>, MemoryError> {
-            assert!(scoped.inner.loadout.spaces().all(|space| space == &MemorySpace::Tenant));
+            assert!(scoped
+                .inner
+                .loadout
+                .spaces()
+                .all(|space| space == &MemorySpace::Tenant));
             Ok(self.observations.clone())
         }
     }
@@ -169,9 +173,9 @@ mod tests {
     }
 
     fn plan(usage: MemoryUsageMode) -> MemoryLoadoutPlan {
-        MemoryLoadoutPlan::new([
-            MemoryLoadoutBinding::new(MemorySpace::Tenant, 100, usage).unwrap(),
-        ])
+        MemoryLoadoutPlan::new(
+            [MemoryLoadoutBinding::new(MemorySpace::Tenant, 100, usage).unwrap()],
+        )
         .unwrap()
     }
 

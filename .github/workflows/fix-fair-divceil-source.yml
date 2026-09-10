@@ -1,0 +1,45 @@
+name: Apply fair benchmark div_ceil repair
+
+on:
+  push:
+    branches:
+      - audit/fair-llm-eval
+    paths:
+      - .github/workflows/fix-fair-divceil-source.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair-source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/fair-llm-eval
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply source-only repair
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('core/examples/fair_context_retrieval.rs')
+          text = path.read_text()
+          old = '(text.chars().count() + 3) / 4'
+          new = 'text.chars().count().div_ceil(4)'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one manual div-ceil expression, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          cargo fmt --all
+          cargo clippy -p ccos-core --example fair_context_retrieval -- -D warnings
+      - name: Commit source only
+        run: |
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add core/examples/fair_context_retrieval.rs
+          git diff --cached --exit-code && exit 1 || true
+          git commit -m "fix(eval): use div_ceil for estimated token budget"
+          git push origin HEAD:audit/fair-llm-eval

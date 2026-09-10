@@ -19,7 +19,7 @@
 //!
 //! The same six strategies as [`crate::experiment`] assemble the window from a
 //! token budget; in the **noisy** scenario a decoy file out-matches the queried
-//! function lexically. RAG/GraphRAG locate code from the question; CCOS anchors
+//! function lexically. Query-driven baselines locate code from the question; assisted CCOS anchors
 //! on the queried file (the workspace signal). We measure **task-success rate**,
 //! **input tokens**, and **symbol-hallucination rate** (answers/reasoning citing
 //! a function not in the project), per causal diameter.
@@ -46,9 +46,10 @@ use rand::{Rng, SeedableRng};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-/// ≈4 chars per token, the standard rough estimate.
+/// Conservative rough estimate used only for benchmark selection.
+/// This is explicitly not a provider-tokenizer count.
 fn estimate_tokens(text: &str) -> usize {
-    text.chars().count() / 4
+    (text.chars().count() + 3) / 4
 }
 
 /// Filler that pads each file to a realistic size (so the token budget actually
@@ -69,12 +70,12 @@ fn idhash(id: &str) -> u64 {
 }
 
 const STRATEGIES: [&str; 6] = [
-    "rag-dense",
-    "rag-hybrid",
-    "graphrag-1hop",
-    "graphrag-bfs",
-    "ccos-from-query",
-    "ccos-region",
+    "token-jaccard",
+    "token-jaccard-popularity",
+    "graph-1hop",
+    "graph-bfs",
+    "ccos-query-region",
+    "ccos-workspace-anchor",
 ];
 
 /// The strategies to evaluate.
@@ -130,6 +131,8 @@ struct SrcFile {
 struct Task {
     diameter: u32,
     files: Vec<SrcFile>,
+    /// Explicit generated dependency edges; document ids carry no topology.
+    edges: Vec<(String, String)>,
     /// Files that must be in the window to answer (the whole chain).
     required: BTreeSet<String>,
     /// The queried file (the workspace anchor for CCOS).
@@ -156,16 +159,10 @@ fn build_graph(task: &Task) -> (MemoryGraph, BTreeMap<String, String>) {
         );
         text.insert(f.id.clone(), f.text.clone());
     }
-    // Chain dependency edges f{i-1} → f{i} (ids carry the chain index).
-    let chain: Vec<&SrcFile> = task
-        .files
-        .iter()
-        .filter(|f| f.id.contains("chain"))
-        .collect();
-    for w in chain.windows(2) {
+    for (source, target) in &task.edges {
         g.add_edge(
-            w[0].id.clone().into(),
-            w[1].id.clone().into(),
+            source.clone().into(),
+            target.clone().into(),
             0.9,
             EdgeType::DependsOn,
         );
@@ -174,28 +171,38 @@ fn build_graph(task: &Task) -> (MemoryGraph, BTreeMap<String, String>) {
 }
 
 /// Generate `tasks` arithmetic-chain tasks.
+fn opaque_id(seed: u64, task_index: usize, kind: &str, ordinal: usize) -> String {
+    let digest =
+        crate::util::sha256_hex(&format!("llm-eval:v2:{seed}:{task_index}:{kind}:{ordinal}"));
+    format!("doc:{}", &digest[..20])
+}
+
+/// Generate `tasks` arithmetic-chain tasks with opaque document ids.
+/// Dependency topology is retained separately in `Task::edges`.
 fn generate(cfg: &EvalConfig, rng: &mut StdRng) -> Vec<Task> {
     let ops = [('+', 1, 9), ('*', 2, 4), ('-', 1, 7)];
     let mut tasks = Vec::new();
-    for _ in 0..cfg.tasks {
+    for task_index in 0..cfg.tasks {
         let d = cfg.diameters[rng.gen_range(0..cfg.diameters.len())];
-        let len = (d + 1) as usize; // chain files: f0..f{d}
+        let len = (d + 1) as usize;
         let base: i64 = rng.gen_range(1..20);
 
         let mut files: Vec<SrcFile> = Vec::new();
         let mut required: BTreeSet<String> = BTreeSet::new();
         let mut symbols: BTreeSet<String> = BTreeSet::new();
+        let mut chain_ids: Vec<String> = Vec::with_capacity(len);
+        let mut edges: Vec<(String, String)> = Vec::with_capacity(len.saturating_sub(1));
         let mut value = base;
 
-        // f0: the distant cause.
-        let f0 = "chain0".to_string();
+        let first_id = opaque_id(cfg.seed, task_index, "evidence", 0);
         files.push(SrcFile {
-            id: format!("file:{f0}.rs"),
-            text: format!("// {f0}.rs\npub const BASE: i64 = {base};\n{FILLER}"),
+            id: first_id.clone(),
+            text: format!("pub const BASE: i64 = {base};\n{FILLER}"),
             tokens: BTreeSet::from(["BASE".to_string()]),
             popularity: 0.0,
         });
-        required.insert(format!("file:{f0}.rs"));
+        required.insert(first_id.clone());
+        chain_ids.push(first_id);
         symbols.insert("BASE".to_string());
 
         for i in 1..len {
@@ -212,61 +219,59 @@ fn generate(cfg: &EvalConfig, rng: &mut StdRng) -> Vec<Task> {
             } else {
                 format!("s{}()", i - 1)
             };
-            let id = format!("file:chain{i}.rs");
+            let id = opaque_id(cfg.seed, task_index, "evidence", i);
             files.push(SrcFile {
                 id: id.clone(),
-                text: format!(
-                    "// chain{i}.rs\npub fn {name}() -> i64 {{ {prev} {op} {c} }}\n{FILLER}"
-                ),
+                text: format!("pub fn {name}() -> i64 {{ {prev} {op} {c} }}\n{FILLER}"),
                 tokens: BTreeSet::from([name.clone()]),
                 popularity: 0.0,
             });
+            let previous = chain_ids
+                .last()
+                .expect("every non-first evidence document has a predecessor")
+                .clone();
+            edges.push((previous, id.clone()));
+            chain_ids.push(id.clone());
             required.insert(id);
             symbols.insert(name);
         }
 
         let last = len - 1;
         let last_name = format!("s{last}");
-        let anchor = format!("file:chain{last}.rs");
+        let anchor = chain_ids[last].clone();
 
-        // Decoys: unrelated, high-lure files.
         for k in 0..cfg.decoys {
             let dname = format!("util{k}");
             files.push(SrcFile {
-                id: format!("file:{dname}.rs"),
-                text: format!(
-                    "// {dname}.rs\npub fn {dname}_run(x: i64) -> i64 {{ x + {k} }}\n{FILLER}"
-                ),
+                id: opaque_id(cfg.seed, task_index, "decoy", k),
+                text: format!("pub fn {dname}_run(x: i64) -> i64 {{ x + {k} }}\n{FILLER}"),
                 tokens: BTreeSet::from([format!("{dname}_run")]),
                 popularity: 1.0,
             });
             symbols.insert(format!("{dname}_run"));
         }
 
-        // Query: the user asks about the last function.
-        let mut query: BTreeSet<String> =
+        let query: BTreeSet<String> =
             BTreeSet::from([last_name.clone(), "return".into(), "value".into()]);
         if cfg.noisy {
-            // A trap decoy is named exactly like the queried function → it wins
-            // the lexical match while being causally irrelevant.
-            let trap = format!("file:trap_{last_name}.rs");
+            // The corpus becomes ambiguous; the user query itself is unchanged.
+            // This decoy matches all query tokens but carries no live dependency edge.
             files.push(SrcFile {
-                id: trap.clone(),
+                id: opaque_id(cfg.seed, task_index, "noisy-decoy", 0),
                 text: format!(
-                    "// trap_{last_name}.rs\n// NOTE: legacy helper, unrelated to the live pipeline\npub fn {last_name}_legacy() -> i64 {{ 0 }}\n{FILLER}"
+                    "// historical compatibility note for {last_name}; not the live implementation\n\
+                     pub fn {last_name}_legacy() -> i64 {{ 0 }}\n{FILLER}"
                 ),
-                // Indexed on both the queried name and "legacy" → out-scores the
-                // real chain tail (which matches only the name) lexically.
-                tokens: BTreeSet::from([last_name.clone(), "legacy".to_string()]),
+                tokens: query.clone(),
                 popularity: 0.0,
             });
             symbols.insert(format!("{last_name}_legacy"));
-            query.insert("legacy".into());
         }
 
         tasks.push(Task {
             diameter: d,
             files,
+            edges,
             required,
             anchor,
             question: format!(
@@ -324,7 +329,7 @@ fn select(strategy: &str, task: &Task, g: &MemoryGraph, budget: usize) -> Vec<St
                 .get(id.as_str())
                 .map(|f| estimate_tokens(&f.text))
                 .unwrap_or(0);
-            if used + t > budget && !out.is_empty() {
+            if used + t > budget {
                 continue;
             }
             used += t;
@@ -336,7 +341,7 @@ fn select(strategy: &str, task: &Task, g: &MemoryGraph, budget: usize) -> Vec<St
         out
     };
     match strategy {
-        "rag-dense" => {
+        "token-jaccard" => {
             let mut v: Vec<&SrcFile> = task.files.iter().collect();
             v.sort_by(|a, b| {
                 sim(b, &task.query)
@@ -346,9 +351,9 @@ fn select(strategy: &str, task: &Task, g: &MemoryGraph, budget: usize) -> Vec<St
             });
             take_budget(v.into_iter().map(|f| f.id.clone()).collect())
         }
-        "rag-hybrid" => {
-            // Similarity blended with a query-independent popularity prior, which
-            // lures the retriever toward popular-but-irrelevant decoys.
+        "token-jaccard-popularity" => {
+            // A deliberately simple synthetic baseline: token-set
+            // Jaccard blended with a query-independent popularity prior.
             let mut v: Vec<&SrcFile> = task.files.iter().collect();
             let key = |f: &SrcFile| 0.65 * sim(f, &task.query) + 0.35 * f.popularity;
             v.sort_by(|a, b| {
@@ -359,7 +364,7 @@ fn select(strategy: &str, task: &Task, g: &MemoryGraph, budget: usize) -> Vec<St
             });
             take_budget(v.into_iter().map(|f| f.id.clone()).collect())
         }
-        "graphrag-1hop" => {
+        "graph-1hop" => {
             let seed = best_hit(task);
             let mut ids: BTreeSet<String> = BTreeSet::from([seed.clone()]);
             for e in &g.edges {
@@ -371,17 +376,17 @@ fn select(strategy: &str, task: &Task, g: &MemoryGraph, budget: usize) -> Vec<St
             }
             take_budget(ids.into_iter().collect())
         }
-        "graphrag-bfs" => take_budget(bfs(g, &best_hit(task))),
-        "ccos-from-query" => take_budget(region_ordered(g, &region_of(g, &best_hit(task)))),
-        "ccos-region" => take_budget(region_ordered(g, &region_of(g, &task.anchor))),
+        "graph-bfs" => take_budget(bfs(g, &best_hit(task))),
+        "ccos-query-region" => take_budget(region_ordered(g, &region_of(g, &best_hit(task)))),
+        "ccos-workspace-anchor" => take_budget(region_ordered(g, &region_of(g, &task.anchor))),
         _ => Vec::new(),
     }
 }
 
-/// Region members ordered chain-first (so a truncating budget keeps the chain).
+/// Region members in deterministic, topology-neutral order.
 fn region_ordered(_g: &MemoryGraph, members: &BTreeSet<String>) -> Vec<String> {
     let mut v: Vec<String> = members.iter().cloned().collect();
-    v.sort_by_key(|id| (!id.contains("chain"), id.clone()));
+    v.sort_by_key(|id| (idhash(id), id.clone()));
     v
 }
 
@@ -429,6 +434,8 @@ fn assemble_prompt(task: &Task, selected: &[String]) -> (String, usize) {
 #[derive(Debug, Clone, Serialize)]
 pub struct EvalStrategy {
     pub strategy: String,
+    /// True only when selection receives the task's workspace anchor directly.
+    pub assisted_anchor: bool,
     pub tasks: usize,
     pub solved: usize,
     pub success_rate: f32,
@@ -442,6 +449,9 @@ pub struct EvalStrategy {
 /// Full evaluation report for one scenario.
 #[derive(Debug, Clone, Serialize)]
 pub struct EvalReport {
+    pub schema_version: u32,
+    pub claim_scope: String,
+    pub token_budget_kind: String,
     pub provider: String,
     pub model: String,
     pub seed: u64,
@@ -730,6 +740,7 @@ pub async fn run_eval(cfg: &EvalConfig) -> EvalReport {
     let mk =
         |solved: usize, halluc: usize, cov: usize, toks: f32, n: usize, name: &str| EvalStrategy {
             strategy: name.to_string(),
+            assisted_anchor: name == "ccos-workspace-anchor",
             tasks: n,
             solved,
             success_rate: if n == 0 {
@@ -778,6 +789,9 @@ pub async fn run_eval(cfg: &EvalConfig) -> EvalReport {
     }
 
     EvalReport {
+        schema_version: 2,
+        claim_scope: "synthetic end-to-end LLM mechanism study; not evidence of general superiority over modern RAG".into(),
+        token_budget_kind: "ceil(chars/4) estimate; not a provider tokenizer count".into(),
         provider,
         model,
         seed: cfg.seed,
@@ -818,7 +832,7 @@ mod tests {
     fn region_selects_the_whole_chain() {
         let task = one_task(false);
         let (g, _) = build_graph(&task);
-        let sel: BTreeSet<String> = select("ccos-region", &task, &g, 100_000)
+        let sel: BTreeSet<String> = select("ccos-workspace-anchor", &task, &g, 100_000)
             .into_iter()
             .collect();
         for r in &task.required {
@@ -830,20 +844,47 @@ mod tests {
     }
 
     #[test]
-    fn noisy_query_traps_lexical_selection_but_not_the_anchor() {
+    fn noisy_corpus_can_trap_query_selection_without_mutating_the_query() {
+        let clean = one_task(false);
         let task = one_task(true);
+        assert_eq!(
+            clean.query, task.query,
+            "noise must change the corpus, not the user query"
+        );
         let (g, _) = build_graph(&task);
-        // The best lexical hit is the trap (legacy) file, not the real chain tail.
         let hit = best_hit(&task);
         assert!(
-            hit.contains("trap"),
-            "noisy query must lure to the trap file, got {hit}"
+            !task.required.contains(&hit),
+            "the noisy corpus should make an unrelated decoy the best token match"
         );
-        // The anchored region still covers the whole chain.
-        let region: BTreeSet<String> = select("ccos-region", &task, &g, 100_000)
+        let region: BTreeSet<String> = select("ccos-workspace-anchor", &task, &g, 100_000)
             .into_iter()
             .collect();
         assert!(task.required.iter().all(|r| region.contains(r)));
+    }
+
+    #[test]
+    fn generated_document_ids_are_opaque_and_topology_free() {
+        let task = one_task(true);
+        for file in &task.files {
+            assert!(file.id.starts_with("doc:"));
+            assert!(!file.id.contains("chain"));
+            assert!(!file.id.contains("trap"));
+            assert!(!file.id.contains("legacy"));
+        }
+        assert_eq!(task.edges.len(), task.required.len().saturating_sub(1));
+    }
+
+    #[test]
+    fn strict_budget_never_admits_an_oversized_first_document() {
+        let task = one_task(false);
+        let (g, _) = build_graph(&task);
+        for strategy in strategies() {
+            assert!(
+                select(strategy, &task, &g, 1).is_empty(),
+                "{strategy} must not overshoot a one-token budget"
+            );
+        }
     }
 
     #[test]

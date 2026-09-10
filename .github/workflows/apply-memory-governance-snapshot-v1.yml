@@ -1,0 +1,100 @@
+name: Validate governed memory snapshot projection
+
+on:
+  push:
+    branches:
+      - feat/memory-governance-snapshot-v1
+    paths:
+      - .github/workflows/apply-memory-governance-snapshot-v1.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/memory-governance-snapshot-v1
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Wire governed-memory projection
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          lineage = Path('crates/ccos-enterprise-memory/src/lineage_graph.rs')
+          text = lineage.read_text()
+          needle = '''    pub fn state(&self, id: &MemoryAssetId) -> Option<MemoryAssetState> {
+        self.states.get(id).copied()
+    }
+'''
+          replacement = needle + '''
+    /// Iterate over every registered descriptor in deterministic asset-id order.
+    ///
+    /// Unlike `active_descriptors`, this metadata view includes stale and
+    /// explicitly invalidated assets so a governance store can reconstruct the
+    /// exact recall-admission state without serializing graph internals.
+    pub fn descriptors(&self) -> impl Iterator<Item = &MemoryAssetDescriptor> {
+        self.assets.values()
+    }
+
+    /// Iterate over exactly the assets explicitly invalidated by governance.
+    ///
+    /// Stale descendants are derived from these invalidations on restore and are
+    /// therefore not a second source of truth.
+    pub fn invalidated_asset_ids(&self) -> impl Iterator<Item = &MemoryAssetId> {
+        self.states.iter().filter_map(|(id, state)| {
+            (*state == MemoryAssetState::Invalidated).then_some(id)
+        })
+    }
+'''
+          if text.count(needle) != 1:
+              raise SystemExit('lineage state accessor block changed')
+          lineage.write_text(text.replace(needle, replacement, 1))
+
+          cargo = Path('crates/ccos-enterprise-store/Cargo.toml')
+          text = cargo.read_text()
+          needle = 'ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }\n'
+          replacement = needle + 'ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }\nccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }\n'
+          if text.count(needle) != 1:
+              raise SystemExit('store runtime dependency block changed')
+          cargo.write_text(text.replace(needle, replacement, 1))
+
+          store = Path('crates/ccos-enterprise-store/src/lib.rs')
+          text = store.read_text()
+          needle = 'use ccos_enterprise_runtime::{AuditRecord, DeploymentSnapshot, GovernanceRecord};\n'
+          replacement = needle + '''
+mod memory_governance;
+pub use memory_governance::{
+    MemoryGovernanceState, MemoryGovernanceStoreError, MEMORY_GOVERNANCE_FILE,
+};
+'''
+          if text.count(needle) != 1:
+              raise SystemExit('store runtime import block changed')
+          store.write_text(text.replace(needle, replacement, 1))
+          PY
+          cargo fmt --all
+      - name: Focused tests
+        run: |
+          cargo test -p ccos-enterprise-memory lineage_graph
+          cargo test -p ccos-enterprise-store memory_governance
+      - name: Check and clippy
+        run: |
+          cargo check -p ccos-enterprise-memory -p ccos-enterprise-store
+          cargo clippy -p ccos-enterprise-memory -p ccos-enterprise-store --all-targets -- -D warnings
+      - name: Commit product sources only
+        run: |
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add Cargo.lock \
+            crates/ccos-enterprise-memory/src/lineage_graph.rs \
+            crates/ccos-enterprise-store/Cargo.toml \
+            crates/ccos-enterprise-store/src/lib.rs \
+            crates/ccos-enterprise-store/src/memory_governance.rs
+          git diff --cached --exit-code && exit 1 || true
+          git commit -m "feat(store): persist governed memory authority state"
+          git push origin HEAD:feat/memory-governance-snapshot-v1

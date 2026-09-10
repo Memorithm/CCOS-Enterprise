@@ -28,54 +28,27 @@ jobs:
 
           lineage = Path('crates/ccos-enterprise-memory/src/lineage_graph.rs')
           text = lineage.read_text()
-          needle = '''    pub fn state(&self, id: &MemoryAssetId) -> Option<MemoryAssetState> {
-        self.states.get(id).copied()
-    }
-'''
-          replacement = needle + '''
-    /// Iterate over every registered descriptor in deterministic asset-id order.
-    ///
-    /// Unlike `active_descriptors`, this metadata view includes stale and
-    /// explicitly invalidated assets so a governance store can reconstruct the
-    /// exact recall-admission state without serializing graph internals.
-    pub fn descriptors(&self) -> impl Iterator<Item = &MemoryAssetDescriptor> {
-        self.assets.values()
-    }
-
-    /// Iterate over exactly the assets explicitly invalidated by governance.
-    ///
-    /// Stale descendants are derived from these invalidations on restore and are
-    /// therefore not a second source of truth.
-    pub fn invalidated_asset_ids(&self) -> impl Iterator<Item = &MemoryAssetId> {
-        self.states.iter().filter_map(|(id, state)| {
-            (*state == MemoryAssetState::Invalidated).then_some(id)
-        })
-    }
-'''
+          needle = "    pub fn state(&self, id: &MemoryAssetId) -> Option<MemoryAssetState> {\n        self.states.get(id).copied()\n    }\n"
+          addition = "\n    /// Iterate over every registered descriptor in deterministic asset-id order.\n    ///\n    /// Unlike `active_descriptors`, this metadata view includes stale and\n    /// explicitly invalidated assets so a governance store can reconstruct the\n    /// exact recall-admission state without serializing graph internals.\n    pub fn descriptors(&self) -> impl Iterator<Item = &MemoryAssetDescriptor> {\n        self.assets.values()\n    }\n\n    /// Iterate over exactly the assets explicitly invalidated by governance.\n    ///\n    /// Stale descendants are derived from these invalidations on restore and are\n    /// therefore not a second source of truth.\n    pub fn invalidated_asset_ids(&self) -> impl Iterator<Item = &MemoryAssetId> {\n        self.states.iter().filter_map(|(id, state)| {\n            (*state == MemoryAssetState::Invalidated).then_some(id)\n        })\n    }\n"
           if text.count(needle) != 1:
               raise SystemExit('lineage state accessor block changed')
-          lineage.write_text(text.replace(needle, replacement, 1))
+          lineage.write_text(text.replace(needle, needle + addition, 1))
 
           cargo = Path('crates/ccos-enterprise-store/Cargo.toml')
           text = cargo.read_text()
           needle = 'ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }\n'
-          replacement = needle + 'ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }\nccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }\n'
+          addition = 'ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }\nccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }\n'
           if text.count(needle) != 1:
               raise SystemExit('store runtime dependency block changed')
-          cargo.write_text(text.replace(needle, replacement, 1))
+          cargo.write_text(text.replace(needle, needle + addition, 1))
 
           store = Path('crates/ccos-enterprise-store/src/lib.rs')
           text = store.read_text()
           needle = 'use ccos_enterprise_runtime::{AuditRecord, DeploymentSnapshot, GovernanceRecord};\n'
-          replacement = needle + '''
-mod memory_governance;
-pub use memory_governance::{
-    MemoryGovernanceState, MemoryGovernanceStoreError, MEMORY_GOVERNANCE_FILE,
-};
-'''
+          addition = '\nmod memory_governance;\npub use memory_governance::{\n    MemoryGovernanceState, MemoryGovernanceStoreError, MEMORY_GOVERNANCE_FILE,\n};\n'
           if text.count(needle) != 1:
               raise SystemExit('store runtime import block changed')
-          store.write_text(text.replace(needle, replacement, 1))
+          store.write_text(text.replace(needle, needle + addition, 1))
           PY
           cargo fmt --all
       - name: Focused tests

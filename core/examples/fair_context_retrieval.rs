@@ -89,7 +89,7 @@ fn opaque_id(task: usize, kind: &str, ordinal: usize) -> String {
 }
 
 fn estimate_tokens(text: &str) -> usize {
-    (text.chars().count() + 3) / 4
+    text.chars().count().div_ceil(4)
 }
 
 fn filler(task: usize, ordinal: usize) -> String {

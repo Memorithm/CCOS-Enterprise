@@ -28,31 +28,21 @@ jobs:
 
           memory = Path('crates/ccos-enterprise-memory/src/lib.rs')
           text = memory.read_text()
-          needle = '''mod governed_recall;
-pub use governed_recall::{
-    admit_governed_recall, GovernedRecallGate, GovernedRecallGateError, GovernedRecallTrustPolicy,
-};
-'''
-          replacement = needle + '''\nmod governed_recall_budget;
-pub use governed_recall_budget::GovernedSemanticMemoryProviderExt;
-'''
+          needle = "mod governed_recall;\npub use governed_recall::{\n    admit_governed_recall, GovernedRecallGate, GovernedRecallGateError, GovernedRecallTrustPolicy,\n};\n"
+          replacement = needle + "\nmod governed_recall_budget;\npub use governed_recall_budget::GovernedSemanticMemoryProviderExt;\n"
           if text.count(needle) != 1:
               raise SystemExit('memory governed_recall export block changed')
           memory.write_text(text.replace(needle, replacement, 1))
 
           mcp = Path('crates/ccos-enterprise-mcp/src/lib.rs')
           text = mcp.read_text()
-          needle = 'pub mod decision;\npub mod server;'
-          replacement = 'pub mod decision;\npub mod served_context;\npub mod server;'
+          needle = "pub mod decision;\npub mod server;"
+          replacement = "pub mod decision;\npub mod served_context;\npub mod server;"
           if text.count(needle) != 1:
               raise SystemExit('MCP module block changed')
           text = text.replace(needle, replacement, 1)
-          needle = '''pub use decision::{
-    decision_governance_map, decision_governed_names, govern_decision_catalogue, DecisionBackend,
-    NoDecisionBackend,
-};
-'''
-          replacement = needle + '''pub use served_context::{assemble_served_governed_context, ServedContextError};\n'''
+          needle = "pub use decision::{\n    decision_governance_map, decision_governed_names, govern_decision_catalogue, DecisionBackend,\n    NoDecisionBackend,\n};\n"
+          replacement = needle + "pub use served_context::{assemble_served_governed_context, ServedContextError};\n"
           if text.count(needle) != 1:
               raise SystemExit('MCP decision export block changed')
           mcp.write_text(text.replace(needle, replacement, 1))

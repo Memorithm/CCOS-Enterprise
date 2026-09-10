@@ -1,0 +1,81 @@
+name: Validate served governed context seam
+
+on:
+  push:
+    branches:
+      - audit/served-governed-context-seam
+    paths:
+      - .github/workflows/apply-served-context-seam.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/served-governed-context-seam
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Wire the backend-neutral modules
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          memory = Path('crates/ccos-enterprise-memory/src/lib.rs')
+          text = memory.read_text()
+          needle = '''mod governed_recall;
+pub use governed_recall::{
+    admit_governed_recall, GovernedRecallGate, GovernedRecallGateError, GovernedRecallTrustPolicy,
+};
+'''
+          replacement = needle + '''\nmod governed_recall_budget;
+pub use governed_recall_budget::GovernedSemanticMemoryProviderExt;
+'''
+          if text.count(needle) != 1:
+              raise SystemExit('memory governed_recall export block changed')
+          memory.write_text(text.replace(needle, replacement, 1))
+
+          mcp = Path('crates/ccos-enterprise-mcp/src/lib.rs')
+          text = mcp.read_text()
+          needle = 'pub mod decision;\npub mod server;'
+          replacement = 'pub mod decision;\npub mod served_context;\npub mod server;'
+          if text.count(needle) != 1:
+              raise SystemExit('MCP module block changed')
+          text = text.replace(needle, replacement, 1)
+          needle = '''pub use decision::{
+    decision_governance_map, decision_governed_names, govern_decision_catalogue, DecisionBackend,
+    NoDecisionBackend,
+};
+'''
+          replacement = needle + '''pub use served_context::{assemble_served_governed_context, ServedContextError};\n'''
+          if text.count(needle) != 1:
+              raise SystemExit('MCP decision export block changed')
+          mcp.write_text(text.replace(needle, replacement, 1))
+          PY
+          cargo fmt --all
+      - name: Focused tests
+        run: |
+          cargo test -p ccos-enterprise-memory governed_recall_budget
+          cargo test -p ccos-enterprise-mcp served_context
+      - name: Check and clippy
+        run: |
+          cargo check -p ccos-enterprise-memory -p ccos-enterprise-mcp --all-features
+          cargo clippy -p ccos-enterprise-memory -p ccos-enterprise-mcp --all-features --all-targets -- -D warnings
+      - name: Commit product sources only
+        run: |
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add Cargo.lock \
+            crates/ccos-enterprise-memory/src/lib.rs \
+            crates/ccos-enterprise-memory/src/governed_recall_budget.rs \
+            crates/ccos-enterprise-mcp/Cargo.toml \
+            crates/ccos-enterprise-mcp/src/lib.rs \
+            crates/ccos-enterprise-mcp/src/served_context.rs
+          git diff --cached --exit-code && exit 1 || true
+          git commit -m "feat(mcp): compose bounded governed memory context"
+          git push origin HEAD:audit/served-governed-context-seam

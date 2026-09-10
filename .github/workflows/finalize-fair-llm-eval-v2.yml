@@ -69,7 +69,7 @@ jobs:
               assert report['schema_version'] == 2
               assert report['token_budget_kind'] == 'ceil(chars/4) estimate; not a provider tokenizer count'
               assert 'not evidence of general superiority over modern RAG' in report['claim_scope']
-              rows = {row['strategy']: row for row in report['strategies']}
+              rows = {row['strategy']: row for row in report['overall']}
               assert set(rows) == expected
               assert rows['ccos-workspace-anchor']['assisted_anchor'] is True
               assert all(

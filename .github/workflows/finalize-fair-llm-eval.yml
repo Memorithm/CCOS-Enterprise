@@ -1,0 +1,80 @@
+name: Finalize fair LLM evaluation sanitation
+
+on:
+  push:
+    branches:
+      - audit/fair-llm-eval
+    paths:
+      - .github/workflows/finalize-fair-llm-eval.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/fair-llm-eval
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Reuse the reviewed sanitation patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          raw = Path('.github/workflows/apply-fair-llm-eval.yml').read_text()
+          start_marker = "          python3 - <<'PY'\n"
+          end_marker = "          PY\n"
+          start = raw.index(start_marker) + len(start_marker)
+          end = raw.index(end_marker, start)
+          body = raw[start:end]
+          lines = []
+          for line in body.splitlines():
+              if line.startswith('          '):
+                  line = line[10:]
+              lines.append(line)
+          Path('/tmp/fair_llm_sanitize.py').write_text('\n'.join(lines) + '\n')
+          PY
+          python3 /tmp/fair_llm_sanitize.py
+          cargo fmt --all
+      - name: Unit tests and lint
+        run: |
+          cargo test -p ccos-core eval::tests
+          cargo check -p ccos-core
+          cargo clippy -p ccos-core --all-targets -- -D warnings
+      - name: Offline CLI smoke with the required feature
+        run: |
+          env -u OPENAI_API_KEY -u OPENAI_BASE_URL -u OPENAI_MODEL -u OLLAMA_ENDPOINT \
+            cargo run -p ccos-core --features llm -- eval --tasks 2 --json > /tmp/eval.json
+      - name: Verify sanitized report contract
+        run: |
+          python3 - <<'PY'
+          import json
+          report = json.load(open('/tmp/eval.json'))
+          assert report['schema_version'] == 2
+          assert report['token_budget_kind'] == 'ceil(chars/4) estimate; not a provider tokenizer count'
+          assert 'not evidence of general superiority over modern RAG' in report['claim_scope']
+          rows = {row['strategy']: row for row in report['strategies']}
+          expected = {
+              'token-jaccard',
+              'token-jaccard-popularity',
+              'graph-1hop',
+              'graph-bfs',
+              'ccos-query-region',
+              'ccos-workspace-anchor',
+          }
+          assert set(rows) == expected
+          assert rows['ccos-workspace-anchor']['assisted_anchor'] is True
+          assert all(not row['assisted_anchor'] for name, row in rows.items() if name != 'ccos-workspace-anchor')
+          PY
+      - name: Commit product sources only
+        run: |
+          git config user.name MEMOPERF
+          git config user.email contact@checkupauto.fr
+          git add core/src/eval.rs core/src/main.rs core/examples/fair_context_retrieval.rs
+          git diff --cached --exit-code && exit 1 || true
+          git commit -m "eval: sanitize legacy LLM benchmark semantics"
+          git push origin HEAD:audit/fair-llm-eval

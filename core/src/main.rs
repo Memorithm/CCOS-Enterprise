@@ -3007,12 +3007,12 @@ async fn run_eval_cmd(args: &[String]) -> CliResult {
     }
 
     let strategies = [
-        "rag-dense",
-        "rag-hybrid",
-        "graphrag-1hop",
-        "graphrag-bfs",
-        "ccos-from-query",
-        "ccos-region",
+        "token-jaccard",
+        "token-jaccard-popularity",
+        "graph-1hop",
+        "graph-bfs",
+        "ccos-query-region",
+        "ccos-workspace-anchor",
     ];
     let table = |report: &ccos_core::eval::EvalReport, title: &str| {
         println!("  ── {title} ──");

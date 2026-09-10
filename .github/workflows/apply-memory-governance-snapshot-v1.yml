@@ -53,6 +53,8 @@ jobs:
           projection = Path('crates/ccos-enterprise-store/src/memory_governance.rs')
           text = projection.read_text()
           bad = r'br#"{\"version\":2,\"tenant\":\"acme\"}"#'
+          # The Rust source delimiter quotes are not escaped; only the JSON quotes are.
+          bad = bad.replace('br#\\"', 'br#"').replace('}\\"#', '}"#')
           good = 'br#"{"version":2,"tenant":"acme"}"#'
           if bad not in text:
               raise SystemExit('unsupported-version fixture changed')

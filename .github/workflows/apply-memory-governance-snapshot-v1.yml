@@ -49,6 +49,14 @@ jobs:
           if text.count(needle) != 1:
               raise SystemExit('store runtime import block changed')
           store.write_text(text.replace(needle, needle + addition, 1))
+
+          projection = Path('crates/ccos-enterprise-store/src/memory_governance.rs')
+          text = projection.read_text()
+          bad = r'br#"{\"version\":2,\"tenant\":\"acme\"}"#'
+          good = 'br#"{"version":2,"tenant":"acme"}"#'
+          if bad not in text:
+              raise SystemExit('unsupported-version fixture changed')
+          projection.write_text(text.replace(bad, good, 1))
           PY
           cargo fmt --all
       - name: Focused tests

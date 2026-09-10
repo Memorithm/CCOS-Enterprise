@@ -333,6 +333,7 @@ dependencies = [
  "ccos-enterprise-decision-service",
  "ccos-enterprise-execution",
  "ccos-enterprise-gateway",
+ "ccos-enterprise-memory",
  "ccos-enterprise-qpages",
  "ccos-enterprise-rbac",
  "ccos-enterprise-runtime",

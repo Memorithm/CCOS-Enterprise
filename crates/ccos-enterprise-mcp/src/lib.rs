@@ -50,6 +50,7 @@
 //! pins exactly that.
 
 pub mod decision;
+pub mod served_context;
 pub mod server;
 pub mod skill_audit;
 pub mod skills;
@@ -57,6 +58,7 @@ pub use decision::{
     decision_governance_map, decision_governed_names, govern_decision_catalogue, DecisionBackend,
     NoDecisionBackend,
 };
+pub use served_context::{assemble_served_governed_context, ServedContextError};
 pub use server::{govern_catalogue, AdvertisedTool, Backend, GovernedMcp, McpOutcome};
 pub use skill_audit::{
     govern_skill_audit, skill_audit_permission, skill_audit_permission_for, skill_audit_result,

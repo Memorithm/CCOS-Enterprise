@@ -58,7 +58,9 @@ pub use decision::{
     decision_governance_map, decision_governed_names, govern_decision_catalogue, DecisionBackend,
     NoDecisionBackend,
 };
-pub use served_context::{assemble_served_governed_context, ServedContextError};
+pub use served_context::{
+    assemble_attested_served_context, assemble_served_governed_context, ServedContextError,
+};
 pub use server::{govern_catalogue, AdvertisedTool, Backend, GovernedMcp, McpOutcome};
 pub use skill_audit::{
     govern_skill_audit, skill_audit_permission, skill_audit_permission_for, skill_audit_result,
@@ -122,7 +124,7 @@ const fn governed(
 /// and canonical under its grammar; `every_governed_name_clears_the_boundary`
 /// proves it rather than assuming it.
 pub const CATALOGUE: &[CoreTool] = &[
-    // ── Memory primitives ────────────────────────────────────────────────
+    // ── Memory primitives ────────────────────────────────
     governed("recall", "memory.recall", "memory.read"),
     governed("recall_what_if", "memory.recall_what_if", "memory.read"),
     governed("get", "memory.get", "memory.read"),
@@ -132,9 +134,9 @@ pub const CATALOGUE: &[CoreTool] = &[
     governed("ingest", "memory.ingest", "memory.write"),
     governed("page_fault", "memory.page_fault", "memory.write"),
     governed("sync", "memory.sync", "memory.write"),
-    // ── Working-set assembly ─────────────────────────────────────────────
+    // ── Working-set assembly ────────────────────────────
     governed("ccos_retrieve", "context.retrieve", "memory.read"),
-    // ── Causal and belief revision ───────────────────────────────────────
+    // ── Causal and belief revision ───────────────────────
     governed("causal_blame", "ccos.causal_blame", "memory.read"),
     governed("causal_flash", "ccos.causal_flash", "memory.read"),
     governed("drift_cause", "ccos.drift_cause", "memory.read"),
@@ -143,7 +145,7 @@ pub const CATALOGUE: &[CoreTool] = &[
     // return, so they are writes however read-only their names sound.
     governed("causal_intervene", "ccos.causal_intervene", "memory.write"),
     governed("signal_failure", "ccos.signal_failure", "memory.write"),
-    // ── Deliberately outside the boundary ────────────────────────────────
+    // ── Deliberately outside the boundary ────────────────────
     CoreTool {
         core: OCTA_FEEDBACK,
         disposition: Disposition::OutsideBoundary {
@@ -250,7 +252,7 @@ mod tests {
         assert_eq!(
             unique.len(),
             names.len(),
-            "two Core tools share one Enterprise name, so an audit record \
+            "two Core tools share one Enterprise name, so an audit record \\
              would not say which capability ran"
         );
     }
@@ -283,11 +285,6 @@ mod tests {
         }
     }
 
-    /// The trap named in the module docs, pinned. `octa_feedback` is excluded
-    /// by **data**, not by the namespace rules: the gateway forbids the
-    /// `octa.` prefix, and an underscore is not a dot, so every plausible
-    /// spelling of this tool sails through `classify`. If the exclusion is
-    /// ever removed from `CATALOGUE`, nothing else stops it.
     #[test]
     fn the_excluded_tool_is_not_saved_by_the_prefix_rule() {
         assert!(
@@ -296,12 +293,11 @@ mod tests {
         );
         assert_eq!(to_enterprise(OCTA_FEEDBACK), None);
 
-        // …and the boundary would NOT have caught it on its own.
         for spelling in ["ccos.octa_feedback", "memory.octa_feedback"] {
             assert!(
                 clears_the_boundary(spelling),
-                "if the gateway now refuses {spelling:?} this test can be \
-                 tightened — but do not delete the catalogue exclusion, which \
+                "if the gateway now refuses {spelling:?} this test can be \\
+                 tightened — but do not delete the catalogue exclusion, which \\
                  is still the only thing that refuses the bare name"
             );
         }
@@ -314,12 +310,10 @@ mod tests {
         for name in governed_names() {
             assert!(
                 map.contains_key(name),
-                "{name} is advertised with no permission, so it would be \
+                "{name} is advertised with no permission, so it would be \\
                  refused as ungoverned"
             );
         }
-        // Permissions are drawn from a small closed set on purpose: a
-        // permission per tool is a permission nobody administers.
         let perms: BTreeSet<&str> = map.values().copied().collect();
         assert_eq!(
             perms,
@@ -330,7 +324,6 @@ mod tests {
 
     #[test]
     fn writes_are_classified_as_writes() {
-        // The three that read as queries but change what later recalls return.
         for tool in ["causal_intervene", "signal_failure", "page_fault"] {
             assert_eq!(
                 permission_for(tool),

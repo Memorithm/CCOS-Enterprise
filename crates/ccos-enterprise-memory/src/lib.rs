@@ -33,6 +33,9 @@ pub use governed_recall::{
     admit_governed_recall, GovernedRecallGate, GovernedRecallGateError, GovernedRecallTrustPolicy,
 };
 
+mod governed_recall_budget;
+pub use governed_recall_budget::GovernedSemanticMemoryProviderExt;
+
 mod governed_context;
 pub use governed_context::{assemble_governed_bootstrap_context, GovernedMemoryContextAssembly};
 

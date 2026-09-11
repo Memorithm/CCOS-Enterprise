@@ -108,14 +108,30 @@ jobs:
             deepseek-harness/packages/core/tools/src/ccos-enterprise-compat.ts
           cd deepseek-harness
           pnpm run build:lib:host
-      - name: Install CCOS bundle into a real DSH profile
+      - name: Stage CCOS bundle for DSH profile install
         shell: bash
         run: |
           set -euo pipefail
           cp -R ccos-enterprise/adapters/deepseek-harness deepseek-harness/ccos-enterprise-plugin
           mkdir -p "$RUNNER_TEMP/dsh-home"
+          test -f deepseek-harness/ccos-enterprise-plugin/package.json
+          test -f deepseek-harness/ccos-enterprise-plugin/cordis.patch.yml
+      - name: Install CCOS bundle into real DSH profile
+        shell: bash
+        run: |
+          set -euo pipefail
           cd deepseek-harness
-          HOME="$RUNNER_TEMP/dsh-home" pnpm dsh plugin --profile ccos-ci add ./ccos-enterprise-plugin
+          PLUGIN_DIR="$PWD/ccos-enterprise-plugin"
+          HOME="$RUNNER_TEMP/dsh-home" pnpm dsh plugin --profile ccos-ci add "$PLUGIN_DIR"
+      - name: Dump composed DSH profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd deepseek-harness
           HOME="$RUNNER_TEMP/dsh-home" pnpm dsh --profile ccos-ci --dump-config > "$RUNNER_TEMP/ccos-dsh-config.yml"
+      - name: Verify CCOS bundle composition
+        shell: bash
+        run: |
+          set -euo pipefail
           grep -q '@memorithm/ccos-deepseek-harness' "$RUNNER_TEMP/ccos-dsh-config.yml"
           grep -q 'ccos-enterprise-memory' "$RUNNER_TEMP/ccos-dsh-config.yml"

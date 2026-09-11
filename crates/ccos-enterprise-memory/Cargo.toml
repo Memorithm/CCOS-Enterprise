@@ -8,3 +8,5 @@ publish = false
 
 [dependencies]
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
+serde.workspace = true
+serde_json.workspace = true

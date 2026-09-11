@@ -16,16 +16,36 @@ pub enum PolicyDecision {
     RequireApproval,
 }
 
-/// A per-tenant token budget over a rolling window.
+/// A per-tenant token budget for one explicit billing epoch.
+///
+/// This is not a wall-clock rolling window. `spent` is monotonic inside an
+/// epoch and survives process restart when the deployment snapshot does.
+/// Opening a new epoch is an administrative act ([`TokenBudget::reset_epoch`])
+/// so a bounce cannot silently refill a quota.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenBudget {
     pub limit: u64,
     pub spent: u64,
+    /// Billing epoch. Starts at 0; incrementing it is the only supported way
+    /// to return `spent` to zero.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 impl TokenBudget {
     pub fn new(limit: u64) -> Self {
-        Self { limit, spent: 0 }
+        Self {
+            limit,
+            spent: 0,
+            epoch: 0,
+        }
+    }
+
+    /// Open a new billing epoch: `spent` returns to zero and `epoch` advances.
+    pub fn reset_epoch(&mut self) -> u64 {
+        self.epoch = self.epoch.saturating_add(1);
+        self.spent = 0;
+        self.epoch
     }
 
     /// Deterministic gate: deny what would exceed the budget; account what is allowed.
@@ -101,5 +121,26 @@ mod tests {
         let al = ModelAllowlist(["gpt-5".into(), "claude-opus".into()].into_iter().collect());
         assert_eq!(al.evaluate("gpt-5"), PolicyDecision::Allow);
         assert_eq!(al.evaluate("random-model"), PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn reset_epoch_zeros_spent_and_advances_the_watermark() {
+        let mut b = TokenBudget::new(100);
+        assert_eq!(b.charge(40), PolicyDecision::Allow);
+        assert_eq!(b.spent, 40);
+        assert_eq!(b.epoch, 0);
+        assert_eq!(b.reset_epoch(), 1);
+        assert_eq!(b.spent, 0);
+        assert_eq!(b.epoch, 1);
+        assert_eq!(b.charge(100), PolicyDecision::Allow);
+        assert_eq!(b.charge(1), PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn missing_epoch_field_deserializes_as_zero() {
+        let b: TokenBudget = serde_json::from_str(r#"{"limit":10,"spent":3}"#).unwrap();
+        assert_eq!(b.epoch, 0);
+        assert_eq!(b.spent, 3);
+        assert_eq!(b.limit, 10);
     }
 }

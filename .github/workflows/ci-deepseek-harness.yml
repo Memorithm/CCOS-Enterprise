@@ -115,7 +115,8 @@ jobs:
           cp -R ccos-enterprise/adapters/deepseek-harness deepseek-harness/ccos-enterprise-plugin
           mkdir -p "$RUNNER_TEMP/dsh-home"
           cd deepseek-harness
-          HOME="$RUNNER_TEMP/dsh-home" pnpm dsh plugin --profile ccos-ci add ./ccos-enterprise-plugin
+          PLUGIN_DIR="$PWD/ccos-enterprise-plugin"
+          HOME="$RUNNER_TEMP/dsh-home" pnpm dsh plugin --profile ccos-ci add "$PLUGIN_DIR"
           HOME="$RUNNER_TEMP/dsh-home" pnpm dsh --profile ccos-ci --dump-config > "$RUNNER_TEMP/ccos-dsh-config.yml"
           grep -q '@memorithm/ccos-deepseek-harness' "$RUNNER_TEMP/ccos-dsh-config.yml"
           grep -q 'ccos-enterprise-memory' "$RUNNER_TEMP/ccos-dsh-config.yml"

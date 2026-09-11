@@ -16,17 +16,17 @@ CI. This guide gets you productive quickly.
 ## Local setup
 
 You need the Rust toolchain pinned by `rust-toolchain.toml` (rustup reads it
-automatically) **and a sibling checkout of CCOS Core** — during development
-the workspace depends on `ccos-core` by path (charter §29; pinned to an exact
-git `rev` before any release, never a branch):
+automatically). CCOS Core lives in this repository under `core/` as a workspace
+member (`default-features = false` from Enterprise). Do not clone a sibling
+`CCOS-Core` checkout for ordinary development.
 
 ```bash
-git clone https://github.com/Memorithm/CCOS-Core CCOS-Core
 git clone https://github.com/Memorithm/CCOS-Enterprise CCOS-Enterprise
 cd CCOS-Enterprise
 scripts/install-git-hooks.sh   # author-policy hooks (see Branches & commits)
-cargo build --workspace --all-features
-cargo test  --workspace --all-features
+cargo build --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
+cargo test  --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
+cargo test --workspace
 ```
 
 No system dependencies, no network, no GPU: every test runs fully offline.

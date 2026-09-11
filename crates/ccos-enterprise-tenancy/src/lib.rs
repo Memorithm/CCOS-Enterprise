@@ -32,6 +32,16 @@ impl TenantId {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
         ok.then(|| Self(id.to_string()))
     }
+
+    /// Validating constructor. Prefer this over the tuple constructor except
+    /// when reading back a snapshot that already passed restore checks.
+    pub fn new(id: impl AsRef<str>) -> Option<Self> {
+        Self::validated(id.as_ref())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Look a tenant up by name without owning one.
@@ -85,5 +95,28 @@ mod tests {
             c.tenant, b.tenant,
             "explicit rescope is visible in the type"
         );
+    }
+
+    #[test]
+    fn validated_rejects_path_unsafe_and_confusable_ids() {
+        assert!(TenantId::new("acme").is_some());
+        assert!(TenantId::new("t-00").is_some());
+        assert_eq!(TenantId::new("acme").unwrap().as_str(), "acme");
+        for bad in [
+            "",
+            "Acme",
+            "acme ",
+            "../acme",
+            "acme/x",
+            ".hidden",
+            "-flag",
+            "acme.corp",
+            "acmé",
+        ] {
+            assert!(
+                TenantId::validated(bad).is_none(),
+                "{bad:?} must not become a tenant id"
+            );
+        }
     }
 }

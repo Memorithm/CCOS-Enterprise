@@ -1,7 +1,10 @@
 # Encryption Model
 
-- **At rest**: CCPS envelopes (Core) are the sealed unit; Enterprise adds
-  per-tenant key separation at the storage layer (deployment-managed KMS).
+- **At rest**: CCPS envelopes (Core) are the sealed unit. Per-tenant KMS
+  wrapping at the Enterprise storage layer is **not implemented** in this
+  tree; tenant isolation today is path/key namespacing plus admission gates,
+  not a distinct wrapping key per tenant. Do not read this document as a
+  claim that a KMS is already wired.
 - **In transit**: TLS terminated at the reverse proxy; internal listeners are
   loopback-only (same posture as the license server).
 - **Key management**: build-time public-key baking (Core `build.rs` keyring);

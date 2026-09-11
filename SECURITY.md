@@ -26,12 +26,13 @@ progress.
 
 ## Security Scope
 
-In scope are the deterministic core, optional premium boundaries, license and
-revocation verification, egress policy, MCP parsers, persistence, FFI, DGM and
-Forge sandboxing, CI/release provenance, and privacy controls.
+In scope for **this repository** are Enterprise admission, identity/RBAC/tenancy,
+the governed MCP gateway and catalogue, durable store/journals, license and
+revocation verification, persistence, CI/release provenance, and privacy
+controls. The colocalized `core/` tree is in scope as the kernel Enterprise
+depends on.
 
-The generated-code sandbox assumes an uncompromised Linux kernel, Bubblewrap,
-and pinned Rust toolchain and must run as an unprivileged account. It does not
-claim semantic correctness of generated patches. Independent cryptographic,
-legal, penetration, SIMD/FFI, production key-ceremony, and real hardware
-reviews remain separate assurance activities.
+Out of scope here: CCOS Research Lab surfaces (`rsi.*`, `forge.*`, DGM,
+generated-code execution, self-modification). Those products have their own
+security process. Mentions of them in this tree are refusals or provenance,
+not a claim that Enterprise sandboxes them.

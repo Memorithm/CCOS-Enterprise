@@ -15,10 +15,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # cargo-deny resolves the full graph, which reaches the ccos-core dev
-      # path dependency (charter §29) — materialize the sibling checkout.
-      # gitleaks below is unaffected: it scans this repository's git
-      # history, and the sibling sits in an untracked directory.
+      # Core is a workspace member under core/. cargo-deny resolves that
+      # path dependency from this checkout; no sibling repository is required.
       - uses: dtolnay/rust-toolchain@stable
       - name: cargo deny (advisories, licenses, sources)
         run: |

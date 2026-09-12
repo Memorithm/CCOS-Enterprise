@@ -27,11 +27,12 @@ Two different things are both called "license"; do not confuse them:
 - **The Pro license token** is a *runtime unlock*: a signed, offline-verified
   token (`$CCOS_LICENSE`, `$CCOS_LICENSE_FILE`, or `~/.config/ccos/license`) that
   switches a running engine from the **community tier** to the **Pro tier**. It
-  gates only the premium capabilities — nine runtime features, from
-  custom-authority-weights up to the CCOS_EXTENDED fusion kernels
-  (`slhav2-full-kernel`, `rsi-self-improvement`, `rsi-dgm`). The **core is never
-  gated**: without a token, ingestion, the causal graph, recall and replay are
-  fully functional, and every Pro refusal is explicit (never a silent downgrade).
+  gates Core premium capabilities documented in `core/LICENSING.md`. Enterprise
+  does not expose Research Lab namespaces (`rsi.*`, `forge.*`, DGM) even when a
+  Core Pro token would unlock them upstream. The **core recall/ingest path is
+  never gated**: without a token, ingestion, the causal graph, recall and replay
+  are fully functional, and every Pro refusal is explicit (never a silent
+  downgrade).
   Verification is a pure offline signature check (ed25519 and/or post-quantum
   SLH-DSA) — no network, no telemetry, air-gap friendly, fail-closed when no
   vendor key is baked in.

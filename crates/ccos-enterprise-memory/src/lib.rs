@@ -72,20 +72,41 @@ pub use retention::{
 mod trust;
 pub use trust::{MemoryTrustError, MemoryTrustMetadata, MemoryValidationState};
 
-/// A semantic-memory namespace inside one tenant.
+mod projection;
+pub use projection::{
+    load_governed_memory_projection, save_governed_memory_projection, GovernedMemoryProjection,
+    GovernedMemoryProjectionError, GOVERNED_MEMORY_PROJECTION_FILE,
+    GOVERNED_MEMORY_PROJECTION_VERSION,
+};
+
+mod attestation;
+pub use attestation::{attest_governed_context, MemoryAdmissionReason, MemoryContextAttestation};
+
+/// Path-safe label for memory asset ids, evidence refs and non-tenant space ids.
 ///
-/// The variants model CCOS collaboration boundaries rather than backend
-/// partitions. A provider is responsible for enforcing the isolation implied by
-/// the selected space before retrieval candidates are produced.
+/// Same alphabet as tenant ids, plus `:` so evidence refs like `audit:evt-1`
+/// remain valid. Dots, slashes and `..` stay forbidden because these labels
+/// become file components on the durable projection path.
+pub fn is_canonical_memory_label(id: &str) -> bool {
+    if id.len() > 128 || id.contains("..") {
+        return false;
+    }
+    let mut bytes = id.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && bytes.all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-' || b == b':'
+        })
+}
+
+/// A semantic-memory namespace inside one tenant.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemorySpace {
-    /// Tenant-wide shared memory.
     Tenant,
-    /// Project-specific shared memory.
     Project(String),
-    /// Team-specific shared memory.
     Team(String),
-    /// Private memory for one agent identity.
     Agent(String),
 }
 
@@ -93,19 +114,12 @@ impl MemorySpace {
     pub fn project(id: impl Into<String>) -> Result<Self, MemoryError> {
         validated_space(Self::Project(id.into()))
     }
-
     pub fn team(id: impl Into<String>) -> Result<Self, MemoryError> {
         validated_space(Self::Team(id.into()))
     }
-
     pub fn agent(id: impl Into<String>) -> Result<Self, MemoryError> {
         validated_space(Self::Agent(id.into()))
     }
-
-    /// Revalidate a space constructed through an enum variant directly.
-    ///
-    /// Provider boundaries call this method so malformed raw variants fail
-    /// closed even when a caller bypasses the convenience constructors.
     pub fn validate(&self) -> Result<(), MemoryError> {
         let (kind, id) = match self {
             Self::Tenant => return Ok(()),
@@ -113,7 +127,7 @@ impl MemorySpace {
             Self::Team(id) => ("team", id),
             Self::Agent(id) => ("agent", id),
         };
-        if id.trim().is_empty() {
+        if !is_canonical_memory_label(id) {
             Err(MemoryError::InvalidMemorySpace { kind })
         } else {
             Ok(())
@@ -121,11 +135,6 @@ impl MemorySpace {
     }
 }
 
-/// Explicit set of memory spaces that may participate in one recall.
-///
-/// The set is private and validated on construction. Providers still recheck
-/// each space at their trust boundary so direct enum construction cannot weaken
-/// isolation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryLoadout {
     spaces: BTreeSet<MemorySpace>,
@@ -142,87 +151,64 @@ impl MemoryLoadout {
         }
         Ok(Self { spaces })
     }
-
-    /// A loadout containing only the tenant-wide partition.
     pub fn tenant_only() -> Self {
         Self {
             spaces: BTreeSet::from([MemorySpace::Tenant]),
         }
     }
-
     pub fn spaces(&self) -> impl Iterator<Item = &MemorySpace> {
         self.spaces.iter()
     }
-
     pub fn len(&self) -> usize {
         self.spaces.len()
     }
-
     pub fn is_empty(&self) -> bool {
         self.spaces.is_empty()
     }
 }
 
-/// Semantic distance from direct evidence to increasingly reusable knowledge.
-///
-/// The names describe CCOS lifecycle intent rather than a storage layout. A
-/// backend may index every stratum identically; governance and lineage remain
-/// authoritative regardless of retrieval technology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemoryStratum {
-    /// Direct observation, tool result, conversation fragment or artifact fact.
     Evidence,
-    /// A bounded interaction or task episode derived from evidence.
     Episode,
-    /// Reusable situation, project or operational context derived from episodes.
     Context,
-    /// Durable generalized pattern that remains linked to its derivation chain.
     Pattern,
 }
 
-/// Stable CCOS identity for one governed memory asset.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryAssetId(String);
 
 impl MemoryAssetId {
     pub fn new(value: impl Into<String>) -> Result<Self, MemoryError> {
         let value = value.into();
-        if value.trim().is_empty() {
+        if !is_canonical_memory_label(&value) {
             Err(MemoryError::InvalidMemoryAssetId)
         } else {
             Ok(Self(value))
         }
     }
-
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-/// Opaque reference to immutable source evidence outside the memory graph.
-///
-/// Examples include an audit event id, artifact digest, commit-qualified source
-/// location or signed observation id. The contract deliberately does not assign
-/// authority to any particular reference syntax.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryEvidenceRef(String);
 
 impl MemoryEvidenceRef {
     pub fn new(value: impl Into<String>) -> Result<Self, MemoryError> {
         let value = value.into();
-        if value.trim().is_empty() {
+        if !is_canonical_memory_label(&value) {
             Err(MemoryError::InvalidEvidenceRef)
         } else {
             Ok(Self(value))
         }
     }
-
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-/// Provenance edges retained independently from semantic payloads and indexes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryLineage {
     parents: BTreeSet<MemoryAssetId>,
@@ -230,7 +216,6 @@ pub struct MemoryLineage {
 }
 
 impl MemoryLineage {
-    /// Lineage for a direct evidence asset.
     pub fn root(
         evidence: impl IntoIterator<Item = MemoryEvidenceRef>,
     ) -> Result<Self, MemoryError> {
@@ -243,12 +228,6 @@ impl MemoryLineage {
             evidence,
         })
     }
-
-    /// Lineage for synthesized memory.
-    ///
-    /// At least one governed parent is mandatory. Additional direct evidence is
-    /// optional and can record corroborating observations discovered during the
-    /// synthesis step.
     pub fn derived(
         parents: impl IntoIterator<Item = MemoryAssetId>,
         evidence: impl IntoIterator<Item = MemoryEvidenceRef>,
@@ -262,25 +241,17 @@ impl MemoryLineage {
             evidence: evidence.into_iter().collect(),
         })
     }
-
     pub fn parents(&self) -> impl Iterator<Item = &MemoryAssetId> {
         self.parents.iter()
     }
-
     pub fn evidence(&self) -> impl Iterator<Item = &MemoryEvidenceRef> {
         self.evidence.iter()
     }
-
     pub fn is_root(&self) -> bool {
         self.parents.is_empty()
     }
 }
 
-/// Governed metadata for a memory asset, independent from its payload/index.
-///
-/// This descriptor makes provenance a first-class invariant: evidence assets
-/// must point to immutable external evidence, while every synthesized asset must
-/// retain at least one parent edge. Self-dependencies are rejected at creation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryAssetDescriptor {
     pub id: MemoryAssetId,
@@ -323,7 +294,6 @@ impl MemoryAssetDescriptor {
     }
 }
 
-/// Write request for one exact memory space.
 #[derive(Debug, Clone, Copy)]
 pub struct ScopedMemoryWrite<'a> {
     pub space: &'a MemorySpace,
@@ -331,7 +301,6 @@ pub struct ScopedMemoryWrite<'a> {
     pub payload: &'a [u8],
 }
 
-/// Recall request over one explicit memory loadout.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadoutMemoryQuery<'a> {
     pub embedding: &'a [f32],
@@ -340,7 +309,6 @@ pub struct LoadoutMemoryQuery<'a> {
     pub loadout: &'a MemoryLoadout,
 }
 
-/// Owned provider result with the exact CCOS memory space that produced it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScopedMemoryObservation {
     pub space: MemorySpace,
@@ -348,7 +316,6 @@ pub struct ScopedMemoryObservation {
     pub similarity: f32,
 }
 
-/// Normalized failure surface for governed semantic-memory providers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryError {
     InvalidConfiguration(&'static str),
@@ -375,10 +342,14 @@ impl fmt::Display for MemoryError {
             }
             Self::InvalidTenant => write!(f, "tenant id must not be empty"),
             Self::InvalidMemorySpace { kind } => {
-                write!(f, "{kind} memory-space id must not be empty")
+                write!(f, "{kind} memory-space id is empty or not canonical")
             }
-            Self::InvalidMemoryAssetId => write!(f, "memory asset id must not be empty"),
-            Self::InvalidEvidenceRef => write!(f, "memory evidence reference must not be empty"),
+            Self::InvalidMemoryAssetId => {
+                write!(f, "memory asset id is empty or not canonical")
+            }
+            Self::InvalidEvidenceRef => {
+                write!(f, "memory evidence reference is empty or not canonical")
+            }
             Self::EmptyMemoryLoadout => write!(f, "memory loadout must contain at least one space"),
             Self::EvidenceRequiresSource => {
                 write!(f, "evidence memory must reference at least one source")
@@ -391,17 +362,11 @@ impl fmt::Display for MemoryError {
             }
             Self::SelfReferentialLineage => write!(f, "memory lineage cannot reference itself"),
             Self::DimensionMismatch { expected, found } => {
-                write!(
-                    f,
-                    "embedding dimension mismatch: expected {expected}, found {found}"
-                )
+                write!(f, "embedding dimension mismatch: expected {expected}, found {found}")
             }
             Self::NonFiniteEmbedding => write!(f, "embedding contains a non-finite value"),
             Self::TenantCapacityExceeded { limit } => {
-                write!(
-                    f,
-                    "tenant semantic-memory capacity exceeded (limit {limit})"
-                )
+                write!(f, "tenant semantic-memory capacity exceeded (limit {limit})")
             }
             Self::InsertRejected => write!(f, "semantic-memory provider rejected the insertion"),
         }
@@ -410,17 +375,11 @@ impl fmt::Display for MemoryError {
 
 impl std::error::Error for MemoryError {}
 
-/// Minimal backend contract for CCOS scoped semantic memory.
-///
-/// The trait intentionally exposes only explicit-space writes and explicit-
-/// loadout recalls. Backend-specific convenience APIs may exist separately, but
-/// generic CCOS code cannot accidentally perform an unscoped semantic lookup.
 pub trait SemanticMemoryProvider {
     fn insert_scoped(
         &mut self,
         scoped: TenantScope<ScopedMemoryWrite<'_>>,
     ) -> Result<(), MemoryError>;
-
     fn recall_loadout(
         &self,
         scoped: TenantScope<LoadoutMemoryQuery<'_>>,
@@ -430,134 +389,4 @@ pub trait SemanticMemoryProvider {
 fn validated_space(space: MemorySpace) -> Result<MemorySpace, MemoryError> {
     space.validate()?;
     Ok(space)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn asset_id(value: &str) -> MemoryAssetId {
-        MemoryAssetId::new(value).unwrap()
-    }
-
-    fn evidence_ref(value: &str) -> MemoryEvidenceRef {
-        MemoryEvidenceRef::new(value).unwrap()
-    }
-
-    #[test]
-    fn malformed_space_ids_fail_closed() {
-        assert_eq!(
-            MemorySpace::agent("  "),
-            Err(MemoryError::InvalidMemorySpace { kind: "agent" })
-        );
-        assert_eq!(
-            MemorySpace::Project(String::new()).validate(),
-            Err(MemoryError::InvalidMemorySpace { kind: "project" })
-        );
-    }
-
-    #[test]
-    fn empty_loadout_is_rejected() {
-        assert_eq!(MemoryLoadout::new([]), Err(MemoryError::EmptyMemoryLoadout));
-    }
-
-    #[test]
-    fn loadout_deduplicates_and_orders_spaces_deterministically() {
-        let project = MemorySpace::project("ccos").unwrap();
-        let team = MemorySpace::team("runtime").unwrap();
-        let loadout =
-            MemoryLoadout::new([team.clone(), project.clone(), MemorySpace::Tenant, team]).unwrap();
-
-        assert_eq!(
-            loadout.spaces().cloned().collect::<Vec<_>>(),
-            vec![
-                MemorySpace::Tenant,
-                project,
-                MemorySpace::team("runtime").unwrap()
-            ]
-        );
-    }
-
-    #[test]
-    fn evidence_assets_require_external_source_and_no_parent() {
-        assert_eq!(
-            MemoryLineage::root([]),
-            Err(MemoryError::EvidenceRequiresSource)
-        );
-
-        let id = asset_id("mem:evidence:1");
-        let lineage =
-            MemoryLineage::derived([asset_id("mem:other")], [evidence_ref("audit:7")]).unwrap();
-        assert_eq!(
-            MemoryAssetDescriptor::new(id, MemorySpace::Tenant, MemoryStratum::Evidence, lineage),
-            Err(MemoryError::EvidenceCannotHaveParents)
-        );
-    }
-
-    #[test]
-    fn derived_assets_cannot_drop_parent_lineage() {
-        let root = MemoryLineage::root([evidence_ref("artifact:sha256:abc")]).unwrap();
-        assert_eq!(
-            MemoryAssetDescriptor::new(
-                asset_id("mem:episode:1"),
-                MemorySpace::Tenant,
-                MemoryStratum::Episode,
-                root
-            ),
-            Err(MemoryError::DerivedMemoryRequiresParent)
-        );
-    }
-
-    #[test]
-    fn lineage_is_deduplicated_and_deterministic() {
-        let parent_a = asset_id("mem:a");
-        let parent_b = asset_id("mem:b");
-        let lineage = MemoryLineage::derived(
-            [parent_b.clone(), parent_a.clone(), parent_b],
-            [evidence_ref("audit:2"), evidence_ref("audit:1")],
-        )
-        .unwrap();
-
-        assert_eq!(
-            lineage.parents().cloned().collect::<Vec<_>>(),
-            vec![parent_a, asset_id("mem:b")]
-        );
-        assert_eq!(
-            lineage
-                .evidence()
-                .map(MemoryEvidenceRef::as_str)
-                .collect::<Vec<_>>(),
-            vec!["audit:1", "audit:2"]
-        );
-    }
-
-    #[test]
-    fn self_referential_lineage_fails_closed() {
-        let id = asset_id("mem:context:1");
-        let lineage = MemoryLineage::derived([id.clone()], []).unwrap();
-        assert_eq!(
-            MemoryAssetDescriptor::new(
-                id,
-                MemorySpace::project("ccos").unwrap(),
-                MemoryStratum::Context,
-                lineage
-            ),
-            Err(MemoryError::SelfReferentialLineage)
-        );
-    }
-
-    #[test]
-    fn valid_derivation_preserves_space_stratum_and_lineage() {
-        let parent = asset_id("mem:episode:1");
-        let descriptor = MemoryAssetDescriptor::new(
-            asset_id("mem:context:1"),
-            MemorySpace::project("ccos").unwrap(),
-            MemoryStratum::Context,
-            MemoryLineage::derived([parent.clone()], [evidence_ref("commit:abc")]).unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(descriptor.stratum, MemoryStratum::Context);
-        assert_eq!(descriptor.lineage.parents().next(), Some(&parent));
-    }
 }

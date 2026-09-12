@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(
             unique.len(),
             names.len(),
-            "two Core tools share one Enterprise name, so an audit record \\
+            "two Core tools share one Enterprise name, so an audit record \
              would not say which capability ran"
         );
     }
@@ -296,8 +296,8 @@ mod tests {
         for spelling in ["ccos.octa_feedback", "memory.octa_feedback"] {
             assert!(
                 clears_the_boundary(spelling),
-                "if the gateway now refuses {spelling:?} this test can be \\
-                 tightened — but do not delete the catalogue exclusion, which \\
+                "if the gateway now refuses {spelling:?} this test can be \
+                 tightened — but do not delete the catalogue exclusion, which \
                  is still the only thing that refuses the bare name"
             );
         }
@@ -310,7 +310,7 @@ mod tests {
         for name in governed_names() {
             assert!(
                 map.contains_key(name),
-                "{name} is advertised with no permission, so it would be \\
+                "{name} is advertised with no permission, so it would be \
                  refused as ungoverned"
             );
         }

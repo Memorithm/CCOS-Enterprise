@@ -78,7 +78,7 @@ impl std::error::Error for MemoryGraphError {}
 /// derivation step from silently widening an asset's collaboration boundary.
 /// Explicit cross-space promotion can be layered above this contract with its
 /// own authorization and evidence requirements.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MemoryLineageGraph {
     assets: BTreeMap<MemoryAssetId, MemoryAssetDescriptor>,
     children: BTreeMap<MemoryAssetId, BTreeSet<MemoryAssetId>>,
@@ -248,6 +248,8 @@ impl MemoryLineageGraph {
         })
     }
 }
+
+include!("lineage_persist.rs");
 
 #[cfg(test)]
 mod tests {

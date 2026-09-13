@@ -362,11 +362,17 @@ impl fmt::Display for MemoryError {
             }
             Self::SelfReferentialLineage => write!(f, "memory lineage cannot reference itself"),
             Self::DimensionMismatch { expected, found } => {
-                write!(f, "embedding dimension mismatch: expected {expected}, found {found}")
+                write!(
+                    f,
+                    "embedding dimension mismatch: expected {expected}, found {found}"
+                )
             }
             Self::NonFiniteEmbedding => write!(f, "embedding contains a non-finite value"),
             Self::TenantCapacityExceeded { limit } => {
-                write!(f, "tenant semantic-memory capacity exceeded (limit {limit})")
+                write!(
+                    f,
+                    "tenant semantic-memory capacity exceeded (limit {limit})"
+                )
             }
             Self::InsertRejected => write!(f, "semantic-memory provider rejected the insertion"),
         }

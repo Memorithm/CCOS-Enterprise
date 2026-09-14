@@ -113,16 +113,19 @@ jobs:
         run: |
           set -euo pipefail
           cp -R ccos-enterprise/adapters/deepseek-harness deepseek-harness/ccos-enterprise-plugin
-          mkdir -p "$RUNNER_TEMP/dsh-home"
+          mkdir -p "$RUNNER_TEMP/dsh-home" "$RUNNER_TEMP/corepack-home"
           test -f deepseek-harness/ccos-enterprise-plugin/package.json
           test -f deepseek-harness/ccos-enterprise-plugin/cordis.patch.yml
+          HOME="$RUNNER_TEMP/dsh-home" COREPACK_HOME="$RUNNER_TEMP/corepack-home" \
+            corepack install --global pnpm@11.7.0
       - name: Install CCOS bundle into real DSH profile
         shell: bash
         run: |
           set -euo pipefail
           cd deepseek-harness
           PLUGIN_DIR="$PWD/ccos-enterprise-plugin"
-          HOME="$RUNNER_TEMP/dsh-home" pnpm dsh plugin --profile ccos-ci add "$PLUGIN_DIR" \
+          HOME="$RUNNER_TEMP/dsh-home" COREPACK_HOME="$RUNNER_TEMP/corepack-home" \
+            pnpm dsh plugin --profile ccos-ci add "$PLUGIN_DIR" \
             2>&1 | tee "$RUNNER_TEMP/ccos-dsh-plugin-install.log"
       - name: Upload DSH plugin install diagnostic
         if: always()
@@ -137,7 +140,8 @@ jobs:
         run: |
           set -euo pipefail
           cd deepseek-harness
-          HOME="$RUNNER_TEMP/dsh-home" pnpm dsh --profile ccos-ci --dump-config > "$RUNNER_TEMP/ccos-dsh-config.yml"
+          HOME="$RUNNER_TEMP/dsh-home" COREPACK_HOME="$RUNNER_TEMP/corepack-home" \
+            pnpm dsh --profile ccos-ci --dump-config > "$RUNNER_TEMP/ccos-dsh-config.yml"
       - name: Verify CCOS bundle composition
         shell: bash
         run: |

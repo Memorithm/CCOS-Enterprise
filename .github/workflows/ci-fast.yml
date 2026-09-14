@@ -68,7 +68,20 @@ jobs:
       # Enterprise's own feature matrix is swept here.
       - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
       - run: cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features -- -D warnings
-      - run: cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
+      - name: Enterprise all-features release tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release \
+            2>&1 | tee "$RUNNER_TEMP/ccos-fast-release-tests.log"
+      - name: Upload release-test diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccos-fast-release-tests-${{ github.sha }}
+          path: ${{ runner.temp }}/ccos-fast-release-tests.log
+          if-no-files-found: ignore
+          retention-days: 3
       # Excluding Core from the feature sweep must not mean Core stops being
       # tested — that would trade a boundary risk for a coverage hole. Its own
       # suite runs at default features, which is what Enterprise ships. This

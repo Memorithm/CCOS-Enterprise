@@ -8,11 +8,12 @@
 use std::fmt;
 
 use ccos_enterprise_memory::{
-    admit_governed_recall, assemble_governed_bootstrap_context, BudgetedMemoryRecall,
-    GovernedMemoryContextAssembly, GovernedRecallGate, GovernedRecallGateError,
-    GovernedSemanticMemoryProvider, GovernedSemanticMemoryProviderExt, MemoryContextBudget,
-    MemoryContextError, MemoryLoadoutPlan, MemoryLoadoutPlanError, MemoryRecallBudget,
-    MemoryRecallBudgetError,
+    admit_governed_recall, assemble_governed_bootstrap_context, attest_governed_context,
+    BudgetedMemoryRecall, GovernedMemoryContextAssembly, GovernedMemoryProjection,
+    GovernedRecallGate, GovernedRecallGateError, GovernedRecallTrustPolicy,
+    GovernedSemanticMemoryProvider, GovernedSemanticMemoryProviderExt, MemoryContextAttestation,
+    MemoryContextBudget, MemoryContextError, MemoryError, MemoryLoadoutPlan,
+    MemoryLoadoutPlanError, MemoryRecallBudget, MemoryRecallBudgetError,
 };
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 
@@ -23,10 +24,11 @@ pub enum ServedContextError {
     Recall(MemoryRecallBudgetError),
     RecallAdmission(GovernedRecallGateError),
     Context(MemoryContextError),
+    Attestation(MemoryError),
 }
 
 impl fmt::Display for ServedContextError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Loadout(error) => write!(f, "invalid governed memory loadout: {error}"),
             Self::NoBootstrapLoadout => {
@@ -37,6 +39,9 @@ impl fmt::Display for ServedContextError {
                 write!(f, "governed memory recall admission failed: {error}")
             }
             Self::Context(error) => write!(f, "governed memory context assembly failed: {error}"),
+            Self::Attestation(error) => {
+                write!(f, "governed memory context attestation failed: {error}")
+            }
         }
     }
 }
@@ -64,6 +69,12 @@ impl From<GovernedRecallGateError> for ServedContextError {
 impl From<MemoryContextError> for ServedContextError {
     fn from(value: MemoryContextError) -> Self {
         Self::Context(value)
+    }
+}
+
+impl From<MemoryError> for ServedContextError {
+    fn from(value: MemoryError) -> Self {
+        Self::Attestation(value)
     }
 }
 
@@ -104,6 +115,36 @@ pub fn assemble_served_governed_context<P: GovernedSemanticMemoryProvider + ?Siz
         admitted,
         context_budget,
     )?)
+}
+
+/// Assemble context from a reconstructed governance projection.
+///
+/// The projection is the durable authority for lineage, trust and loadout.
+/// Provider similarity still cannot mint eligibility; each surviving chunk
+/// carries an attestation that names why it was admitted.
+pub fn assemble_attested_served_context<P: GovernedSemanticMemoryProvider + ?Sized>(
+    provider: &P,
+    projection: &GovernedMemoryProjection,
+    policy: GovernedRecallTrustPolicy,
+    embedding: &[f32],
+    recall_budget: MemoryRecallBudget,
+    context_budget: MemoryContextBudget,
+) -> Result<(GovernedMemoryContextAssembly, Vec<MemoryContextAttestation>), ServedContextError> {
+    let assembly = assemble_served_governed_context(
+        provider,
+        projection.tenant.clone(),
+        &projection.loadout,
+        GovernedRecallGate {
+            graph: &projection.graph,
+            trust: &projection.trust,
+            policy,
+        },
+        embedding,
+        recall_budget,
+        context_budget,
+    )?;
+    let attested = attest_governed_context(&assembly, &projection.graph, &projection.trust)?;
+    Ok((assembly, attested))
 }
 
 #[cfg(test)]
@@ -212,7 +253,7 @@ mod tests {
         let plan = plan(MemoryUsageMode::BootstrapAndOnDemand);
         let context = assemble_served_governed_context(
             &provider,
-            ccos_enterprise_tenancy::TenantId("acme".into()),
+            TenantId::new("acme").unwrap(),
             &plan,
             GovernedRecallGate {
                 graph: &graph,
@@ -243,7 +284,7 @@ mod tests {
         assert!(matches!(
             assemble_served_governed_context(
                 &provider,
-                ccos_enterprise_tenancy::TenantId("acme".into()),
+                TenantId::new("acme").unwrap(),
                 &plan,
                 GovernedRecallGate {
                     graph: &graph,
@@ -272,7 +313,7 @@ mod tests {
         assert!(matches!(
             assemble_served_governed_context(
                 &provider,
-                ccos_enterprise_tenancy::TenantId("acme".into()),
+                TenantId::new("acme").unwrap(),
                 &plan,
                 GovernedRecallGate {
                     graph: &graph,

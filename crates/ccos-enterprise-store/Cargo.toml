@@ -9,6 +9,7 @@ description = "Durable, fail-closed persistence for an Enterprise deployment: an
 
 [dependencies]
 ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }
+ccos-enterprise-auth = { path = "../ccos-enterprise-auth" }
 ccos-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,9 +1,10 @@
 //! Backend-neutral agent-memory contract for CCOS Enterprise.
 //!
 //! This crate owns the CCOS vocabulary for composing semantic-memory domains.
-//! It deliberately contains no vector index, database, network transport, or
-//! vendor-specific implementation. Providers receive an explicit tenant scope
-//! and an explicit memory loadout for every operation.
+//! It contains no vector index, network transport, or vendor-specific provider.
+//! Providers receive an explicit tenant scope and memory loadout for every
+//! operation. The optional use of the projection functions persists governance
+//! metadata, not embeddings or provider internals.
 //!
 //! The contract is original to CCOS Enterprise. External memory systems may
 //! inform product requirements, but their APIs, schemas, storage layouts, and
@@ -72,11 +73,23 @@ pub use retention::{
 mod trust;
 pub use trust::{MemoryTrustError, MemoryTrustMetadata, MemoryValidationState};
 
+mod projection;
+pub use projection::{
+    load_governed_memory_projection, save_governed_memory_projection, GovernedMemoryProjection,
+    GovernedMemoryProjectionError, GOVERNED_MEMORY_PROJECTION_FILE,
+    GOVERNED_MEMORY_PROJECTION_VERSION, MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
+};
+
+mod attestation;
+pub use attestation::{attest_governed_context, MemoryAdmissionReason, MemoryContextAttestation};
+
 /// A semantic-memory namespace inside one tenant.
 ///
 /// The variants model CCOS collaboration boundaries rather than backend
 /// partitions. A provider is responsible for enforcing the isolation implied by
-/// the selected space before retrieval candidates are produced.
+/// the selected space before retrieval candidates are produced. Space labels
+/// are opaque data, not paths; a persistence adapter must never join them to a
+/// filesystem root without its own validated path mapping.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemorySpace {
     /// Tenant-wide shared memory.
@@ -181,6 +194,8 @@ pub enum MemoryStratum {
 }
 
 /// Stable CCOS identity for one governed memory asset.
+///
+/// Identities are opaque data and must not be interpreted as filesystem paths.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryAssetId(String);
 
@@ -203,7 +218,8 @@ impl MemoryAssetId {
 ///
 /// Examples include an audit event id, artifact digest, commit-qualified source
 /// location or signed observation id. The contract deliberately does not assign
-/// authority to any particular reference syntax.
+/// authority to any particular reference syntax. A valid reference is not proof
+/// that its target exists; resolution and verification are separate operations.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryEvidenceRef(String);
 
@@ -279,8 +295,9 @@ impl MemoryLineage {
 /// Governed metadata for a memory asset, independent from its payload/index.
 ///
 /// This descriptor makes provenance a first-class invariant: evidence assets
-/// must point to immutable external evidence, while every synthesized asset must
-/// retain at least one parent edge. Self-dependencies are rejected at creation.
+/// must reference external evidence, while every synthesized asset must retain
+/// at least one parent edge. Self-dependencies are rejected at creation. The
+/// constructor validates structure, not the truth or immutability of a source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryAssetDescriptor {
     pub id: MemoryAssetId,
@@ -559,5 +576,29 @@ mod tests {
 
         assert_eq!(descriptor.stratum, MemoryStratum::Context);
         assert_eq!(descriptor.lineage.parents().next(), Some(&parent));
+    }
+
+    #[test]
+    fn opaque_identifiers_and_evidence_preserve_case_and_locators() {
+        let uri = "https://example.invalid/Repo/blob/abc/src/Main.rs#L12";
+        assert_eq!(evidence_ref(uri).as_str(), uri);
+        assert_eq!(asset_id("Memory:Case/42").as_str(), "Memory:Case/42");
+        assert_ne!(asset_id("Memory:A"), asset_id("memory:a"));
+        assert_eq!(
+            MemorySpace::project("Project/A").unwrap(),
+            MemorySpace::Project("Project/A".to_string())
+        );
+    }
+
+    #[test]
+    fn opaque_references_still_reject_empty_values() {
+        assert_eq!(
+            MemoryAssetId::new(" \t"),
+            Err(MemoryError::InvalidMemoryAssetId)
+        );
+        assert_eq!(
+            MemoryEvidenceRef::new(""),
+            Err(MemoryError::InvalidEvidenceRef)
+        );
     }
 }

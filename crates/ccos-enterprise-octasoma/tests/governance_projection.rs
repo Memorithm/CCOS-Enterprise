@@ -141,7 +141,10 @@ fn restored_invalidation_blocks_a_still_retrievable_provider_record() {
     let restored = load_governed_memory_projection(&dir.0, Some(&projection.tenant))
         .unwrap()
         .unwrap();
-    assert_eq!(restored.graph.state(&asset), Some(MemoryAssetState::Invalidated));
+    assert_eq!(
+        restored.graph.state(&asset),
+        Some(MemoryAssetState::Invalidated)
+    );
     let loadout = restored.loadout.bootstrap_loadout().unwrap().unwrap();
     let observations = provider
         .recall_governed(TenantScope::new(

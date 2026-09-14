@@ -116,6 +116,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dsh-home" "$RUNNER_TEMP/corepack-home"
           test -f deepseek-harness/ccos-enterprise-plugin/package.json
           test -f deepseek-harness/ccos-enterprise-plugin/cordis.patch.yml
+          # The real profile uses an isolated HOME, so pin Corepack independently of the runner HOME.
           HOME="$RUNNER_TEMP/dsh-home" COREPACK_HOME="$RUNNER_TEMP/corepack-home" \
             corepack install --global pnpm@11.7.0
       - name: Install CCOS bundle into real DSH profile

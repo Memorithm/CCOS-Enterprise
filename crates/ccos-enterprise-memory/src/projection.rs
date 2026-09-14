@@ -48,7 +48,9 @@ pub enum GovernedMemoryProjectionError {
 impl std::fmt::Display for GovernedMemoryProjectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io { path, source } => write!(f, "governed memory projection io {path:?}: {source}"),
+            Self::Io { path, source } => {
+                write!(f, "governed memory projection io {path:?}: {source}")
+            }
             Self::Corrupt { path, detail } => {
                 write!(f, "governed memory projection corrupt {path:?}: {detail}")
             }
@@ -56,7 +58,10 @@ impl std::fmt::Display for GovernedMemoryProjectionError {
                 write!(f, "unsupported governed memory projection version {v}")
             }
             Self::TenantMismatch { expected, found } => {
-                write!(f, "governed memory projection tenant {found:?} != {expected:?}")
+                write!(
+                    f,
+                    "governed memory projection tenant {found:?} != {expected:?}"
+                )
             }
             Self::TenantInvalid(id) => write!(f, "invalid tenant id in projection: {id:?}"),
             Self::DuplicateAsset(id) => write!(f, "duplicate memory asset in projection: {id}"),
@@ -76,16 +81,24 @@ impl std::fmt::Display for GovernedMemoryProjectionError {
 impl std::error::Error for GovernedMemoryProjectionError {}
 
 impl From<crate::MemoryGraphError> for GovernedMemoryProjectionError {
-    fn from(value: crate::MemoryGraphError) -> Self { Self::Lineage(value) }
+    fn from(value: crate::MemoryGraphError) -> Self {
+        Self::Lineage(value)
+    }
 }
 impl From<crate::MemoryTrustError> for GovernedMemoryProjectionError {
-    fn from(value: crate::MemoryTrustError) -> Self { Self::Trust(value) }
+    fn from(value: crate::MemoryTrustError) -> Self {
+        Self::Trust(value)
+    }
 }
 impl From<crate::MemoryError> for GovernedMemoryProjectionError {
-    fn from(value: crate::MemoryError) -> Self { Self::Memory(value) }
+    fn from(value: crate::MemoryError) -> Self {
+        Self::Memory(value)
+    }
 }
 impl From<MemoryLoadoutPlanError> for GovernedMemoryProjectionError {
-    fn from(value: MemoryLoadoutPlanError) -> Self { Self::Loadout(value) }
+    fn from(value: MemoryLoadoutPlanError) -> Self {
+        Self::Loadout(value)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -138,7 +151,12 @@ impl GovernedMemoryProjection {
                 ));
             }
         }
-        Ok(Self { tenant, graph, trust, loadout })
+        Ok(Self {
+            tenant,
+            graph,
+            trust,
+            loadout,
+        })
     }
 
     fn to_wire(&self) -> WireDocument {
@@ -150,8 +168,16 @@ impl GovernedMemoryProjection {
                 id: descriptor.id.as_str().to_string(),
                 space: encode_space(&descriptor.space),
                 stratum: encode_stratum(descriptor.stratum).to_string(),
-                parents: descriptor.lineage.parents().map(|id| id.as_str().to_string()).collect(),
-                evidence: descriptor.lineage.evidence().map(|id| id.as_str().to_string()).collect(),
+                parents: descriptor
+                    .lineage
+                    .parents()
+                    .map(|id| id.as_str().to_string())
+                    .collect(),
+                evidence: descriptor
+                    .lineage
+                    .evidence()
+                    .map(|id| id.as_str().to_string())
+                    .collect(),
                 state: encode_asset_state(state).to_string(),
             })
             .collect();
@@ -192,7 +218,9 @@ impl GovernedMemoryProjection {
         doc: WireDocument,
     ) -> Result<Self, GovernedMemoryProjectionError> {
         if doc.version != GOVERNED_MEMORY_PROJECTION_VERSION {
-            return Err(GovernedMemoryProjectionError::UnsupportedVersion(doc.version));
+            return Err(GovernedMemoryProjectionError::UnsupportedVersion(
+                doc.version,
+            ));
         }
         let tenant = TenantId::validated(&doc.tenant)
             .ok_or_else(|| GovernedMemoryProjectionError::TenantInvalid(doc.tenant.clone()))?;
@@ -214,8 +242,16 @@ impl GovernedMemoryProjection {
             let id = MemoryAssetId::new(asset.id)?;
             let space = decode_space(&asset.space)?;
             let stratum = decode_stratum(&asset.stratum)?;
-            let parents = asset.parents.into_iter().map(MemoryAssetId::new).collect::<Result<Vec<_>, _>>()?;
-            let evidence = asset.evidence.into_iter().map(MemoryEvidenceRef::new).collect::<Result<Vec<_>, _>>()?;
+            let parents = asset
+                .parents
+                .into_iter()
+                .map(MemoryAssetId::new)
+                .collect::<Result<Vec<_>, _>>()?;
+            let evidence = asset
+                .evidence
+                .into_iter()
+                .map(MemoryEvidenceRef::new)
+                .collect::<Result<Vec<_>, _>>()?;
             let lineage = if parents.is_empty() {
                 MemoryLineage::root(evidence)?
             } else {
@@ -228,20 +264,28 @@ impl GovernedMemoryProjection {
         let graph = MemoryLineageGraph::restore(descriptors, states)?;
         let mut trust = BTreeMap::new();
         for row in doc.trust {
-            if trust.keys().any(|id: &MemoryAssetId| id.as_str() == row.asset_id) {
+            if trust
+                .keys()
+                .any(|id: &MemoryAssetId| id.as_str() == row.asset_id)
+            {
                 return Err(GovernedMemoryProjectionError::DuplicateTrust(row.asset_id));
             }
             let id = MemoryAssetId::new(row.asset_id)?;
             if graph.descriptor(&id).is_none() {
-                return Err(GovernedMemoryProjectionError::UnknownTrustAsset(id.as_str().to_string()));
+                return Err(GovernedMemoryProjectionError::UnknownTrustAsset(
+                    id.as_str().to_string(),
+                ));
             }
-            trust.insert(id, MemoryTrustMetadata::new(
-                decode_trust_state(&row.state)?,
-                row.source_count,
-                row.independent_source_count,
-                row.contradiction_count,
-                row.verification_refs,
-            )?);
+            trust.insert(
+                id,
+                MemoryTrustMetadata::new(
+                    decode_trust_state(&row.state)?,
+                    row.source_count,
+                    row.independent_source_count,
+                    row.contradiction_count,
+                    row.verification_refs,
+                )?,
+            );
         }
         let mut seen_spaces = BTreeSet::new();
         let mut bindings = Vec::new();
@@ -269,18 +313,41 @@ pub fn save_governed_memory_projection(
     })?;
     let path = root.join(GOVERNED_MEMORY_PROJECTION_FILE);
     let bytes = serde_json::to_vec_pretty(&projection.to_wire()).map_err(|error| {
-        GovernedMemoryProjectionError::Corrupt { path: path.clone(), detail: error.to_string() }
+        GovernedMemoryProjectionError::Corrupt {
+            path: path.clone(),
+            detail: error.to_string(),
+        }
     })?;
     let tmp = path.with_extension("json.tmp");
     {
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(&tmp)
-            .map_err(|source| GovernedMemoryProjectionError::Io { path: tmp.clone(), source })?;
-        file.write_all(&bytes).map_err(|source| GovernedMemoryProjectionError::Io { path: tmp.clone(), source })?;
-        file.sync_all().map_err(|source| GovernedMemoryProjectionError::Io { path: tmp.clone(), source })?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)
+            .map_err(|source| GovernedMemoryProjectionError::Io {
+                path: tmp.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .map_err(|source| GovernedMemoryProjectionError::Io {
+                path: tmp.clone(),
+                source,
+            })?;
+        file.sync_all()
+            .map_err(|source| GovernedMemoryProjectionError::Io {
+                path: tmp.clone(),
+                source,
+            })?;
     }
-    fs::rename(&tmp, &path).map_err(|source| GovernedMemoryProjectionError::Io { path: path.clone(), source })?;
+    fs::rename(&tmp, &path).map_err(|source| GovernedMemoryProjectionError::Io {
+        path: path.clone(),
+        source,
+    })?;
     if let Some(dir) = path.parent() {
-        if let Ok(dirf) = File::open(dir) { let _ = dirf.sync_all(); }
+        if let Ok(dirf) = File::open(dir) {
+            let _ = dirf.sync_all();
+        }
     }
     Ok(path)
 }
@@ -293,9 +360,15 @@ pub fn load_governed_memory_projection(
     match fs::read(&path) {
         Ok(bytes) => {
             let doc: WireDocument = serde_json::from_slice(&bytes).map_err(|error| {
-                GovernedMemoryProjectionError::Corrupt { path: path.clone(), detail: error.to_string() }
+                GovernedMemoryProjectionError::Corrupt {
+                    path: path.clone(),
+                    detail: error.to_string(),
+                }
             })?;
-            Ok(Some(GovernedMemoryProjection::from_wire(expected_tenant, doc)?))
+            Ok(Some(GovernedMemoryProjection::from_wire(
+                expected_tenant,
+                doc,
+            )?))
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(GovernedMemoryProjectionError::Io { path, source }),
@@ -311,10 +384,18 @@ fn encode_space(space: &MemorySpace) -> String {
     }
 }
 fn decode_space(value: &str) -> Result<MemorySpace, GovernedMemoryProjectionError> {
-    if value == "tenant" { return Ok(MemorySpace::Tenant); }
-    if let Some(id) = value.strip_prefix("project:") { return Ok(MemorySpace::project(id)?); }
-    if let Some(id) = value.strip_prefix("team:") { return Ok(MemorySpace::team(id)?); }
-    if let Some(id) = value.strip_prefix("agent:") { return Ok(MemorySpace::agent(id)?); }
+    if value == "tenant" {
+        return Ok(MemorySpace::Tenant);
+    }
+    if let Some(id) = value.strip_prefix("project:") {
+        return Ok(MemorySpace::project(id)?);
+    }
+    if let Some(id) = value.strip_prefix("team:") {
+        return Ok(MemorySpace::team(id)?);
+    }
+    if let Some(id) = value.strip_prefix("agent:") {
+        return Ok(MemorySpace::agent(id)?);
+    }
     Err(GovernedMemoryProjectionError::Corrupt {
         path: PathBuf::from(GOVERNED_MEMORY_PROJECTION_FILE),
         detail: format!("unknown memory space {value:?}"),
@@ -334,7 +415,9 @@ fn decode_stratum(value: &str) -> Result<MemoryStratum, crate::MemoryError> {
         "episode" => Ok(MemoryStratum::Episode),
         "context" => Ok(MemoryStratum::Context),
         "pattern" => Ok(MemoryStratum::Pattern),
-        _ => Err(crate::MemoryError::InvalidConfiguration("unknown memory stratum")),
+        _ => Err(crate::MemoryError::InvalidConfiguration(
+            "unknown memory stratum",
+        )),
     }
 }
 fn encode_asset_state(state: MemoryAssetState) -> &'static str {
@@ -349,7 +432,9 @@ fn decode_asset_state(value: &str) -> Result<MemoryAssetState, crate::MemoryErro
         "active" => Ok(MemoryAssetState::Active),
         "stale" => Ok(MemoryAssetState::Stale),
         "invalidated" => Ok(MemoryAssetState::Invalidated),
-        _ => Err(crate::MemoryError::InvalidConfiguration("unknown memory asset state")),
+        _ => Err(crate::MemoryError::InvalidConfiguration(
+            "unknown memory asset state",
+        )),
     }
 }
 fn encode_trust_state(state: MemoryValidationState) -> &'static str {
@@ -368,7 +453,9 @@ fn decode_trust_state(value: &str) -> Result<MemoryValidationState, crate::Memor
         "verified" => Ok(MemoryValidationState::Verified),
         "disputed" => Ok(MemoryValidationState::Disputed),
         "quarantined" => Ok(MemoryValidationState::Quarantined),
-        _ => Err(crate::MemoryError::InvalidConfiguration("unknown memory trust state")),
+        _ => Err(crate::MemoryError::InvalidConfiguration(
+            "unknown memory trust state",
+        )),
     }
 }
 fn encode_usage(usage: MemoryUsageMode) -> &'static str {
@@ -383,6 +470,8 @@ fn decode_usage(value: &str) -> Result<MemoryUsageMode, crate::MemoryError> {
         "bootstrap" => Ok(MemoryUsageMode::Bootstrap),
         "on-demand" => Ok(MemoryUsageMode::OnDemand),
         "bootstrap-and-on-demand" => Ok(MemoryUsageMode::BootstrapAndOnDemand),
-        _ => Err(crate::MemoryError::InvalidConfiguration("unknown memory usage mode")),
+        _ => Err(crate::MemoryError::InvalidConfiguration(
+            "unknown memory usage mode",
+        )),
     }
 }

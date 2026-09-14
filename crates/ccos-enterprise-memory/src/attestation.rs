@@ -97,8 +97,7 @@ mod tests {
                     id("root-1"),
                     space,
                     MemoryStratum::Evidence,
-                    MemoryLineage::root([MemoryEvidenceRef::new("audit:root-1").unwrap()])
-                        .unwrap(),
+                    MemoryLineage::root([MemoryEvidenceRef::new("audit:root-1").unwrap()]).unwrap(),
                 )
                 .unwrap(),
             )

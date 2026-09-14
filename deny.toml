@@ -37,7 +37,7 @@ allow = [
 # them. This keeps an unrelated dependency from silently inheriting the same
 # licence exception.
 exceptions = [
-    { name = "ccos-core", allow = ["LicenseRef-TarekZekriti-Dual"] },
+    { name = "ccos-core", allow = ["PolyForm-Noncommercial-1.0.0"] },
     { name = "ccos-memory-runtime", allow = ["PolyForm-Noncommercial-1.0.0"] },
     { name = "octasoma", allow = ["LicenseRef-CheckupAuto-Dual"] },
     { name = "scirust-license", allow = ["PolyForm-Noncommercial-1.0.0"] },

@@ -149,9 +149,11 @@ pub const CATALOGUE: &[CoreTool] = &[
     CoreTool {
         core: OCTA_FEEDBACK,
         disposition: Disposition::OutsideBoundary {
-            why: "stateful relevance feedback: it calibrates the gate future \
-                  recalls run through, with no tenant scoping, no permission \
-                  and no audit shape",
+            why: concat!(
+                "stateful relevance feedback: it calibrates the gate future ",
+                "recalls run through, with no tenant scoping, no permission ",
+                "and no audit shape"
+            ),
         },
     },
 ];
@@ -252,8 +254,10 @@ mod tests {
         assert_eq!(
             unique.len(),
             names.len(),
-            "two Core tools share one Enterprise name, so an audit record \
-             would not say which capability ran"
+            concat!(
+                "two Core tools share one Enterprise name, so an audit record ",
+                "would not say which capability ran"
+            )
         );
     }
 
@@ -296,9 +300,11 @@ mod tests {
         for spelling in ["ccos.octa_feedback", "memory.octa_feedback"] {
             assert!(
                 clears_the_boundary(spelling),
-                "if the gateway now refuses {spelling:?} this test can be \
-                 tightened — but do not delete the catalogue exclusion, which \
-                 is still the only thing that refuses the bare name"
+                concat!(
+                    "if the gateway now refuses {spelling:?} this test can be ",
+                    "tightened — but do not delete the catalogue exclusion, which ",
+                    "is still the only thing that refuses the bare name"
+                )
             );
         }
     }
@@ -310,8 +316,10 @@ mod tests {
         for name in governed_names() {
             assert!(
                 map.contains_key(name),
-                "{name} is advertised with no permission, so it would be \
-                 refused as ungoverned"
+                concat!(
+                    "{name} is advertised with no permission, so it would be ",
+                    "refused as ungoverned"
+                )
             );
         }
         let perms: BTreeSet<&str> = map.values().copied().collect();

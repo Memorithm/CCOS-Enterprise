@@ -27,6 +27,12 @@ pub enum MemoryGraphError {
     DuplicateAsset(MemoryAssetId),
     UnknownAsset(MemoryAssetId),
     UnknownParent(MemoryAssetId),
+    /// Restore requires exactly one explicit state for every descriptor.
+    MissingAssetState(MemoryAssetId),
+    /// Even identical duplicate state rows are ambiguous and are refused.
+    DuplicateAssetState(MemoryAssetId),
+    /// Public descriptor fields must not bypass their validating constructor.
+    InvalidDescriptor(crate::MemoryError),
     ParentNotActive {
         parent: MemoryAssetId,
         state: MemoryAssetState,
@@ -45,6 +51,13 @@ impl fmt::Display for MemoryGraphError {
             Self::DuplicateAsset(id) => write!(f, "memory asset already registered: {}", id.as_str()),
             Self::UnknownAsset(id) => write!(f, "unknown memory asset: {}", id.as_str()),
             Self::UnknownParent(id) => write!(f, "unknown memory parent: {}", id.as_str()),
+            Self::MissingAssetState(id) => {
+                write!(f, "missing memory asset state on restore: {}", id.as_str())
+            }
+            Self::DuplicateAssetState(id) => {
+                write!(f, "duplicate memory asset state on restore: {}", id.as_str())
+            }
+            Self::InvalidDescriptor(error) => write!(f, "invalid memory descriptor: {error}"),
             Self::ParentNotActive { parent, state } => write!(
                 f,
                 "memory parent {} is not active ({state:?})",
@@ -92,6 +105,13 @@ impl MemoryLineageGraph {
 
     /// Register one descriptor after validating all graph-level invariants.
     pub fn register(&mut self, descriptor: MemoryAssetDescriptor) -> Result<(), MemoryGraphError> {
+        let descriptor = MemoryAssetDescriptor::new(
+            descriptor.id,
+            descriptor.space,
+            descriptor.stratum,
+            descriptor.lineage,
+        )
+        .map_err(MemoryGraphError::InvalidDescriptor)?;
         if self.assets.contains_key(&descriptor.id) {
             return Err(MemoryGraphError::DuplicateAsset(descriptor.id));
         }
@@ -100,11 +120,7 @@ impl MemoryLineageGraph {
             let Some(parent) = self.assets.get(parent_id) else {
                 return Err(MemoryGraphError::UnknownParent(parent_id.clone()));
             };
-            let state = self
-                .states
-                .get(parent_id)
-                .copied()
-                .unwrap_or(MemoryAssetState::Active);
+            let state = self.states[parent_id];
             if state != MemoryAssetState::Active {
                 return Err(MemoryGraphError::ParentNotActive {
                     parent: parent_id.clone(),

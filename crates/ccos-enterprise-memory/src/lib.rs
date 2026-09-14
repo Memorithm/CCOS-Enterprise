@@ -592,7 +592,13 @@ mod tests {
 
     #[test]
     fn opaque_references_still_reject_empty_values() {
-        assert_eq!(MemoryAssetId::new(" \t"), Err(MemoryError::InvalidMemoryAssetId));
-        assert_eq!(MemoryEvidenceRef::new(""), Err(MemoryError::InvalidEvidenceRef));
+        assert_eq!(
+            MemoryAssetId::new(" \t"),
+            Err(MemoryError::InvalidMemoryAssetId)
+        );
+        assert_eq!(
+            MemoryEvidenceRef::new(""),
+            Err(MemoryError::InvalidEvidenceRef)
+        );
     }
 }

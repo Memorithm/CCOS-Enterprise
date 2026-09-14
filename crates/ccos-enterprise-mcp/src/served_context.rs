@@ -21,6 +21,8 @@ use ccos_enterprise_tenancy::{TenantId, TenantScope};
 pub enum ServedContextError {
     Loadout(MemoryLoadoutPlanError),
     NoBootstrapLoadout,
+    /// The selected projection does not belong to the independently admitted tenant.
+    ProjectionTenantMismatch,
     Recall(MemoryRecallBudgetError),
     RecallAdmission(GovernedRecallGateError),
     Context(MemoryContextError),
@@ -33,6 +35,9 @@ impl fmt::Display for ServedContextError {
             Self::Loadout(error) => write!(f, "invalid governed memory loadout: {error}"),
             Self::NoBootstrapLoadout => {
                 f.write_str("governed memory loadout has no bootstrap-enabled space")
+            }
+            Self::ProjectionTenantMismatch => {
+                f.write_str("governed projection does not match the admitted tenant")
             }
             Self::Recall(error) => write!(f, "governed memory recall failed: {error}"),
             Self::RecallAdmission(error) => {
@@ -117,22 +122,31 @@ pub fn assemble_served_governed_context<P: GovernedSemanticMemoryProvider + ?Siz
     )?)
 }
 
-/// Assemble context from a reconstructed governance projection.
+/// Assemble context from a projection belonging to the independently admitted tenant.
 ///
-/// The projection is the durable authority for lineage, trust and loadout.
-/// Provider similarity still cannot mint eligibility; each surviving chunk
-/// carries an attestation that names why it was admitted.
+/// `admitted_tenant` must come from the authenticated, admitted request, not from
+/// the selected projection. The tenant comparison happens before loadout access
+/// and before calling the provider, so choosing another tenant's projection
+/// cannot redirect recall. Callers must still authenticate and run
+/// `Deployment::admit`; this equality check does not grant permission itself.
+///
+/// The projection supplies lineage, trust and loadout. Provider similarity cannot
+/// mint eligibility; each surviving chunk carries categorical attestation metadata.
 pub fn assemble_attested_served_context<P: GovernedSemanticMemoryProvider + ?Sized>(
     provider: &P,
+    admitted_tenant: &TenantId,
     projection: &GovernedMemoryProjection,
     policy: GovernedRecallTrustPolicy,
     embedding: &[f32],
     recall_budget: MemoryRecallBudget,
     context_budget: MemoryContextBudget,
 ) -> Result<(GovernedMemoryContextAssembly, Vec<MemoryContextAttestation>), ServedContextError> {
+    if admitted_tenant != &projection.tenant {
+        return Err(ServedContextError::ProjectionTenantMismatch);
+    }
     let assembly = assemble_served_governed_context(
         provider,
-        projection.tenant.clone(),
+        admitted_tenant.clone(),
         &projection.loadout,
         GovernedRecallGate {
             graph: &projection.graph,

@@ -122,7 +122,16 @@ jobs:
           set -euo pipefail
           cd deepseek-harness
           PLUGIN_DIR="$PWD/ccos-enterprise-plugin"
-          HOME="$RUNNER_TEMP/dsh-home" pnpm dsh plugin --profile ccos-ci add "$PLUGIN_DIR"
+          HOME="$RUNNER_TEMP/dsh-home" pnpm dsh plugin --profile ccos-ci add "$PLUGIN_DIR" \
+            2>&1 | tee "$RUNNER_TEMP/ccos-dsh-plugin-install.log"
+      - name: Upload DSH plugin install diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccos-dsh-plugin-install-${{ github.sha }}
+          path: ${{ runner.temp }}/ccos-dsh-plugin-install.log
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Dump composed DSH profile
         shell: bash
         run: |

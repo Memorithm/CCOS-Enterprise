@@ -3,7 +3,7 @@ name = "ccos-license-server"
 version = "0.1.0"
 edition = "2021"
 description = "The vendor-side claim counter for CCOS Pro licenses: one-time claim codes → signed single-seat tokens. A zero-framework HTTP/1.1 binary plus the ccos-license-admin vault CLI; runtime verification stays fully offline in the ccos binary."
-license = "LicenseRef-TarekZekriti-Dual"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 # Deliberately dependency-light, matching the house style: the HTTP/1.1 loop is

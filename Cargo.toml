@@ -55,7 +55,7 @@ exclude = ["core/fuzz"]
 [workspace.package]
 edition = "2021"
 rust-version = "1.89"
-license = "LicenseRef-TarekZekriti-Dual"
+license = "PolyForm-Noncommercial-1.0.0"
 repository = "https://github.com/Memorithm/CCOS-Enterprise"
 
 [workspace.dependencies]

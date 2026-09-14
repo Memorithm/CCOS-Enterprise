@@ -12,9 +12,9 @@ use ccos_enterprise_memory::{
     admit_governed_recall, assemble_governed_bootstrap_context, attest_governed_context,
     load_governed_memory_projection, save_governed_memory_projection, GovernedMemoryProjection,
     GovernedMemoryWrite, GovernedRecallGate, GovernedRecallTrustPolicy, LoadoutMemoryQuery,
-    MemoryAssetDescriptor, MemoryAssetId, MemoryAssetState, MemoryContextBudget,
-    MemoryEvidenceRef, MemoryLineage, MemoryLineageGraph, MemoryLoadoutBinding, MemoryLoadoutPlan,
-    MemorySpace, MemoryStratum, MemoryTrustMetadata, MemoryUsageMode,
+    MemoryAssetDescriptor, MemoryAssetId, MemoryAssetState, MemoryContextBudget, MemoryEvidenceRef,
+    MemoryLineage, MemoryLineageGraph, MemoryLoadoutBinding, MemoryLoadoutPlan, MemorySpace,
+    MemoryStratum, MemoryTrustMetadata, MemoryUsageMode,
 };
 use ccos_enterprise_octasoma::EnterpriseOctaSoma;
 use ccos_enterprise_tenancy::{TenantId, TenantScope};

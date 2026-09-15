@@ -22,22 +22,38 @@ const LOCK_FILE: &str = ".governed-memory.lock";
 #[derive(Debug)]
 pub enum GovernedMemoryStoreError {
     Projection(GovernedMemoryProjectionError),
-    AlreadyOpen { path: PathBuf },
-    AlreadyInitialized { path: PathBuf },
-    MissingProjection { path: PathBuf },
+    AlreadyOpen {
+        path: PathBuf,
+    },
+    AlreadyInitialized {
+        path: PathBuf,
+    },
+    MissingProjection {
+        path: PathBuf,
+    },
     /// Publication was attempted but not acknowledged as durable. Drop and
     /// reopen this owner; neither reads nor another replacement are permitted.
-    RecoveryRequired { path: PathBuf },
+    RecoveryRequired {
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for GovernedMemoryStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Projection(error) => write!(f, "governed memory store: {error}"),
-            Self::AlreadyOpen { path } => write!(f, "governed memory store already owned: {path:?}"),
-            Self::AlreadyInitialized { path } => write!(f, "governed memory projection already exists: {path:?}"),
-            Self::MissingProjection { path } => write!(f, "governed memory projection required: {path:?}"),
-            Self::RecoveryRequired { path } => write!(f, "governed memory store must be reopened: {path:?}"),
+            Self::AlreadyOpen { path } => {
+                write!(f, "governed memory store already owned: {path:?}")
+            }
+            Self::AlreadyInitialized { path } => {
+                write!(f, "governed memory projection already exists: {path:?}")
+            }
+            Self::MissingProjection { path } => {
+                write!(f, "governed memory projection required: {path:?}")
+            }
+            Self::RecoveryRequired { path } => {
+                write!(f, "governed memory store must be reopened: {path:?}")
+            }
         }
     }
 }
@@ -80,6 +96,16 @@ pub struct GovernedMemoryStore {
     _lock: File,
 }
 
+impl Drop for GovernedMemoryStore {
+    fn drop(&mut self) {
+        // Closing only this descriptor can leave the lock held by an
+        // inherited descriptor during another thread's fork/exec. The
+        // owner exposes no clones; release its lock explicitly first.
+        // Drop cannot report errors; descriptor closure is the fallback.
+        let _ = self._lock.unlock();
+    }
+}
+
 impl GovernedMemoryStore {
     /// Open an existing projection for an explicitly selected tenant.
     ///
@@ -97,7 +123,10 @@ impl GovernedMemoryStore {
     /// assert_eq!(projection.tenant, tenant);
     /// # Ok(()) }
     /// ```
-    pub fn open(root: impl AsRef<Path>, expected_tenant: TenantId) -> Result<Self, GovernedMemoryStoreError> {
+    pub fn open(
+        root: impl AsRef<Path>,
+        expected_tenant: TenantId,
+    ) -> Result<Self, GovernedMemoryStoreError> {
         validate_tenant(&expected_tenant)?;
         let (root, lock) = lock_directory(root.as_ref(), false)?;
         let path = root.join(GOVERNED_MEMORY_PROJECTION_FILE);
@@ -107,7 +136,12 @@ impl GovernedMemoryStore {
             .and_then(|file| file.sync_all())
             .map_err(|error| projection_io(&path, error))?;
         sync_directory(&root).map_err(|error| projection_io(&root, error))?;
-        Ok(Self { root, tenant: expected_tenant, projection: Some(projection), _lock: lock })
+        Ok(Self {
+            root,
+            tenant: expected_tenant,
+            projection: Some(projection),
+            _lock: lock,
+        })
     }
 
     /// Explicitly provision a new owner; never replace an existing directory entry.
@@ -123,7 +157,10 @@ impl GovernedMemoryStore {
     /// assert!(store.root().is_absolute());
     /// # Ok(()) }
     /// ```
-    pub fn initialize(root: impl AsRef<Path>, initial: GovernedMemoryProjection) -> Result<Self, GovernedMemoryStoreError> {
+    pub fn initialize(
+        root: impl AsRef<Path>,
+        initial: GovernedMemoryProjection,
+    ) -> Result<Self, GovernedMemoryStoreError> {
         let checked = validate_candidate(&initial.tenant, &initial)?;
         let (root, lock) = lock_directory(root.as_ref(), true)?;
         let path = root.join(GOVERNED_MEMORY_PROJECTION_FILE);
@@ -133,7 +170,12 @@ impl GovernedMemoryStore {
             Err(error) => return Err(projection_io(&path, error).into()),
         }
         save_governed_memory_projection(&root, &checked)?;
-        Ok(Self { root, tenant: checked.tenant.clone(), projection: Some(checked), _lock: lock })
+        Ok(Self {
+            root,
+            tenant: checked.tenant.clone(),
+            projection: Some(checked),
+            _lock: lock,
+        })
     }
 
     /// Return the pinned absolute directory, independently of later CWD changes.
@@ -161,8 +203,14 @@ impl GovernedMemoryStore {
     /// # let _ = active;
     /// # Ok(()) }
     /// ```
-    pub fn projection_for(&self, expected_tenant: &TenantId) -> Result<&GovernedMemoryProjection, GovernedMemoryStoreError> {
-        let projection = self.projection.as_ref().ok_or_else(|| self.recovery_error())?;
+    pub fn projection_for(
+        &self,
+        expected_tenant: &TenantId,
+    ) -> Result<&GovernedMemoryProjection, GovernedMemoryStoreError> {
+        let projection = self
+            .projection
+            .as_ref()
+            .ok_or_else(|| self.recovery_error())?;
         check_tenant(&self.tenant, expected_tenant)?;
         Ok(projection)
     }
@@ -183,18 +231,26 @@ impl GovernedMemoryStore {
     /// store.replace(candidate)?;
     /// # Ok(()) }
     /// ```
-    pub fn replace(&mut self, candidate: GovernedMemoryProjection) -> Result<(), GovernedMemoryStoreError> {
+    pub fn replace(
+        &mut self,
+        candidate: GovernedMemoryProjection,
+    ) -> Result<(), GovernedMemoryStoreError> {
         self.replace_with(candidate, save_governed_memory_projection)
     }
 
     fn recovery_error(&self) -> GovernedMemoryStoreError {
-        GovernedMemoryStoreError::RecoveryRequired { path: self.root.join(GOVERNED_MEMORY_PROJECTION_FILE) }
+        GovernedMemoryStoreError::RecoveryRequired {
+            path: self.root.join(GOVERNED_MEMORY_PROJECTION_FILE),
+        }
     }
 
     fn replace_with(
         &mut self,
         candidate: GovernedMemoryProjection,
-        publish: impl FnOnce(&Path, &GovernedMemoryProjection) -> Result<PathBuf, GovernedMemoryProjectionError>,
+        publish: impl FnOnce(
+            &Path,
+            &GovernedMemoryProjection,
+        ) -> Result<PathBuf, GovernedMemoryProjectionError>,
     ) -> Result<(), GovernedMemoryStoreError> {
         if self.projection.is_none() {
             return Err(self.recovery_error());
@@ -209,35 +265,50 @@ impl GovernedMemoryStore {
 
 fn validate_tenant(tenant: &TenantId) -> Result<(), GovernedMemoryProjectionError> {
     if TenantId::validated(tenant.as_str()).is_none() {
-        return Err(GovernedMemoryProjectionError::TenantInvalid(tenant.as_str().to_string()));
+        return Err(GovernedMemoryProjectionError::TenantInvalid(
+            tenant.as_str().to_string(),
+        ));
     }
     Ok(())
 }
 
-fn check_tenant(expected: &TenantId, found: &TenantId) -> Result<(), GovernedMemoryProjectionError> {
+fn check_tenant(
+    expected: &TenantId,
+    found: &TenantId,
+) -> Result<(), GovernedMemoryProjectionError> {
     validate_tenant(expected)?;
     validate_tenant(found)?;
     if expected != found {
         return Err(GovernedMemoryProjectionError::TenantMismatch {
-            expected: expected.as_str().to_string(), found: found.as_str().to_string(),
+            expected: expected.as_str().to_string(),
+            found: found.as_str().to_string(),
         });
     }
     Ok(())
 }
 
-fn validate_candidate(expected: &TenantId, candidate: &GovernedMemoryProjection) -> Result<GovernedMemoryProjection, GovernedMemoryProjectionError> {
+fn validate_candidate(
+    expected: &TenantId,
+    candidate: &GovernedMemoryProjection,
+) -> Result<GovernedMemoryProjection, GovernedMemoryProjectionError> {
     check_tenant(expected, &candidate.tenant)?;
     let checked = GovernedMemoryProjection::from_wire(Some(expected), candidate.to_wire())?;
     let encoded = serde_json::to_vec_pretty(&checked.to_wire())
         .map_err(|error| projection_corrupt(&error.to_string()))?;
     if encoded.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
-        return Err(projection_corrupt("projection exceeds the 16 MiB byte limit"));
+        return Err(projection_corrupt(
+            "projection exceeds the 16 MiB byte limit",
+        ));
     }
     Ok(checked)
 }
 
 fn lock_directory(root: &Path, create: bool) -> Result<(PathBuf, File), GovernedMemoryStoreError> {
-    let root = if root.as_os_str().is_empty() { Path::new(".") } else { root };
+    let root = if root.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        root
+    };
     if create {
         create_projection_root(root)?;
     }
@@ -250,7 +321,9 @@ fn lock_directory(root: &Path, create: bool) -> Result<(PathBuf, File), Governed
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let lock = options.open(&path).map_err(|error| projection_io(&path, error))?;
+    let lock = options
+        .open(&path)
+        .map_err(|error| projection_io(&path, error))?;
     lock.try_lock().map_err(|error| match error {
         TryLockError::WouldBlock => GovernedMemoryStoreError::AlreadyOpen { path: path.clone() },
         TryLockError::Error(source) => projection_io(&path, source).into(),
@@ -262,9 +335,11 @@ fn lock_directory(root: &Path, create: bool) -> Result<(PathBuf, File), Governed
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MemoryAssetDescriptor, MemoryAssetId, MemoryAssetState, MemoryEvidenceRef,
-        MemoryLineage, MemoryLineageGraph, MemoryLoadoutBinding, MemoryLoadoutPlan,
-        MemorySpace, MemoryStratum, MemoryTrustMetadata, MemoryUsageMode};
+    use crate::{
+        MemoryAssetDescriptor, MemoryAssetId, MemoryAssetState, MemoryEvidenceRef, MemoryLineage,
+        MemoryLineageGraph, MemoryLoadoutBinding, MemoryLoadoutPlan, MemorySpace, MemoryStratum,
+        MemoryTrustMetadata, MemoryUsageMode,
+    };
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -272,31 +347,75 @@ mod tests {
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("ccos-governance-owner-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            let root = std::env::temp_dir().join(format!(
+                "ccos-governance-owner-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
             fs::create_dir(&root).unwrap();
             Self(root)
         }
     }
     impl Drop for Directory {
-        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
-    fn tenant() -> TenantId { TenantId::validated("acme").unwrap() }
-    fn id(value: &str) -> MemoryAssetId { MemoryAssetId::new(value).unwrap() }
+    fn tenant() -> TenantId {
+        TenantId::validated("acme").unwrap()
+    }
+    fn id(value: &str) -> MemoryAssetId {
+        MemoryAssetId::new(value).unwrap()
+    }
     fn fixture() -> GovernedMemoryProjection {
         let mut graph = MemoryLineageGraph::new();
-        graph.register(MemoryAssetDescriptor::new(id("root"), MemorySpace::Tenant, MemoryStratum::Evidence,
-            MemoryLineage::root([MemoryEvidenceRef::new("audit:root").unwrap()]).unwrap()).unwrap()).unwrap();
-        graph.register(MemoryAssetDescriptor::new(id("child"), MemorySpace::Tenant, MemoryStratum::Episode,
-            MemoryLineage::derived([id("root")], []).unwrap()).unwrap()).unwrap();
-        GovernedMemoryProjection::new(tenant(), graph,
-            BTreeMap::from([(id("root"), MemoryTrustMetadata::unverified(1)), (id("child"), MemoryTrustMetadata::unverified(1))]),
-            MemoryLoadoutPlan::new([MemoryLoadoutBinding::new(MemorySpace::Tenant, 1, MemoryUsageMode::Bootstrap).unwrap()]).unwrap()).unwrap()
+        graph
+            .register(
+                MemoryAssetDescriptor::new(
+                    id("root"),
+                    MemorySpace::Tenant,
+                    MemoryStratum::Evidence,
+                    MemoryLineage::root([MemoryEvidenceRef::new("audit:root").unwrap()]).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        graph
+            .register(
+                MemoryAssetDescriptor::new(
+                    id("child"),
+                    MemorySpace::Tenant,
+                    MemoryStratum::Episode,
+                    MemoryLineage::derived([id("root")], []).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        GovernedMemoryProjection::new(
+            tenant(),
+            graph,
+            BTreeMap::from([
+                (id("root"), MemoryTrustMetadata::unverified(1)),
+                (id("child"), MemoryTrustMetadata::unverified(1)),
+            ]),
+            MemoryLoadoutPlan::new([MemoryLoadoutBinding::new(
+                MemorySpace::Tenant,
+                1,
+                MemoryUsageMode::Bootstrap,
+            )
+            .unwrap()])
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn missing_state_never_initializes_implicit_authority() {
         let dir = Directory::new();
-        assert!(matches!(GovernedMemoryStore::open(&dir.0, tenant()), Err(GovernedMemoryStoreError::MissingProjection { .. })));
+        assert!(matches!(
+            GovernedMemoryStore::open(&dir.0, tenant()),
+            Err(GovernedMemoryStoreError::MissingProjection { .. })
+        ));
         assert!(!dir.0.join(GOVERNED_MEMORY_PROJECTION_FILE).exists());
         let absent = dir.0.join("absent");
         assert!(GovernedMemoryStore::open(&absent, tenant()).is_err());
@@ -315,12 +434,35 @@ mod tests {
     }
 
     #[test]
+    fn dropping_owner_releases_duplicated_lock_description() {
+        let dir = Directory::new();
+        let store = GovernedMemoryStore::initialize(&dir.0, fixture()).unwrap();
+        // A descriptor inherited during a concurrent fork shares this
+        // open-file description, even before the child closes it at exec.
+        let inherited = store._lock.try_clone().unwrap();
+        drop(store);
+        let reopened = GovernedMemoryStore::open(&dir.0, tenant()).unwrap();
+        drop(inherited);
+        assert!(matches!(
+            GovernedMemoryStore::open(&dir.0, tenant()),
+            Err(GovernedMemoryStoreError::AlreadyOpen { .. })
+        ));
+        drop(reopened);
+    }
+
+    #[test]
     fn second_owner_is_refused_across_replacements_and_released_on_drop() {
         let dir = Directory::new();
         let mut store = GovernedMemoryStore::initialize(&dir.0, fixture()).unwrap();
         for _ in 0..2 {
-            assert!(matches!(GovernedMemoryStore::open(&dir.0, tenant()), Err(GovernedMemoryStoreError::AlreadyOpen { .. })));
-            assert!(matches!(GovernedMemoryStore::initialize(&dir.0, fixture()), Err(GovernedMemoryStoreError::AlreadyOpen { .. })));
+            assert!(matches!(
+                GovernedMemoryStore::open(&dir.0, tenant()),
+                Err(GovernedMemoryStoreError::AlreadyOpen { .. })
+            ));
+            assert!(matches!(
+                GovernedMemoryStore::initialize(&dir.0, fixture()),
+                Err(GovernedMemoryStoreError::AlreadyOpen { .. })
+            ));
             store.replace(fixture()).unwrap();
         }
         drop(store);
@@ -334,7 +476,10 @@ mod tests {
         let path = dir.0.join(GOVERNED_MEMORY_PROJECTION_FILE);
         fs::write(&path, b"{torn").unwrap();
         assert!(GovernedMemoryStore::open(&dir.0, tenant()).is_err());
-        assert!(matches!(GovernedMemoryStore::initialize(&dir.0, fixture()), Err(GovernedMemoryStoreError::AlreadyInitialized { .. })));
+        assert!(matches!(
+            GovernedMemoryStore::initialize(&dir.0, fixture()),
+            Err(GovernedMemoryStoreError::AlreadyInitialized { .. })
+        ));
         assert_eq!(fs::read(&path).unwrap(), b"{torn");
     }
 
@@ -344,7 +489,10 @@ mod tests {
         let dir = Directory::new();
         let path = dir.0.join(GOVERNED_MEMORY_PROJECTION_FILE);
         std::os::unix::fs::symlink(dir.0.join("missing-target"), &path).unwrap();
-        assert!(matches!(GovernedMemoryStore::initialize(&dir.0, fixture()), Err(GovernedMemoryStoreError::AlreadyInitialized { .. })));
+        assert!(matches!(
+            GovernedMemoryStore::initialize(&dir.0, fixture()),
+            Err(GovernedMemoryStoreError::AlreadyInitialized { .. })
+        ));
         assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
     }
 
@@ -357,11 +505,24 @@ mod tests {
         assert!(store.projection_for(&other).is_err());
         let mut candidate = fixture();
         candidate.tenant = other.clone();
-        assert!(matches!(store.replace(candidate), Err(GovernedMemoryStoreError::Projection(GovernedMemoryProjectionError::TenantMismatch { .. }))));
+        assert!(matches!(
+            store.replace(candidate),
+            Err(GovernedMemoryStoreError::Projection(
+                GovernedMemoryProjectionError::TenantMismatch { .. }
+            ))
+        ));
         assert_eq!(store.projection_for(&tenant()).unwrap(), &fixture());
-        assert_eq!(before, fs::read(dir.0.join(GOVERNED_MEMORY_PROJECTION_FILE)).unwrap());
+        assert_eq!(
+            before,
+            fs::read(dir.0.join(GOVERNED_MEMORY_PROJECTION_FILE)).unwrap()
+        );
         drop(store);
-        assert!(matches!(GovernedMemoryStore::open(&dir.0, other), Err(GovernedMemoryStoreError::Projection(GovernedMemoryProjectionError::TenantMismatch { .. }))));
+        assert!(matches!(
+            GovernedMemoryStore::open(&dir.0, other),
+            Err(GovernedMemoryStoreError::Projection(
+                GovernedMemoryProjectionError::TenantMismatch { .. }
+            ))
+        ));
     }
 
     #[test]
@@ -369,7 +530,9 @@ mod tests {
         let dir = Directory::new();
         let mut store = GovernedMemoryStore::initialize(&dir.0, fixture()).unwrap();
         let mut candidate = fixture();
-        candidate.trust.insert(id("unknown"), MemoryTrustMetadata::unverified(1));
+        candidate
+            .trust
+            .insert(id("unknown"), MemoryTrustMetadata::unverified(1));
         assert!(store.replace(candidate).is_err());
         assert_eq!(store.projection_for(&tenant()).unwrap(), &fixture());
         store.replace(fixture()).unwrap();
@@ -386,8 +549,14 @@ mod tests {
         let reopened = GovernedMemoryStore::open(&dir.0, tenant()).unwrap();
         let current = reopened.projection_for(&tenant()).unwrap();
         assert_eq!(current, &candidate);
-        assert_eq!(current.graph.state(&id("root")), Some(MemoryAssetState::Invalidated));
-        assert_eq!(current.graph.state(&id("child")), Some(MemoryAssetState::Stale));
+        assert_eq!(
+            current.graph.state(&id("root")),
+            Some(MemoryAssetState::Invalidated)
+        );
+        assert_eq!(
+            current.graph.state(&id("child")),
+            Some(MemoryAssetState::Stale)
+        );
     }
 
     #[test]
@@ -395,11 +564,25 @@ mod tests {
         let dir = Directory::new();
         let mut store = GovernedMemoryStore::initialize(&dir.0, fixture()).unwrap();
         let before = fs::read(dir.0.join(GOVERNED_MEMORY_PROJECTION_FILE)).unwrap();
-        let result = store.replace_with(fixture(), |root, _| Err(projection_io(root, io::Error::other("injected write failure"))));
+        let result = store.replace_with(fixture(), |root, _| {
+            Err(projection_io(
+                root,
+                io::Error::other("injected write failure"),
+            ))
+        });
         assert!(result.is_err());
-        assert!(matches!(store.projection_for(&tenant()), Err(GovernedMemoryStoreError::RecoveryRequired { .. })));
-        assert!(matches!(store.replace(fixture()), Err(GovernedMemoryStoreError::RecoveryRequired { .. })));
-        assert_eq!(before, fs::read(dir.0.join(GOVERNED_MEMORY_PROJECTION_FILE)).unwrap());
+        assert!(matches!(
+            store.projection_for(&tenant()),
+            Err(GovernedMemoryStoreError::RecoveryRequired { .. })
+        ));
+        assert!(matches!(
+            store.replace(fixture()),
+            Err(GovernedMemoryStoreError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            before,
+            fs::read(dir.0.join(GOVERNED_MEMORY_PROJECTION_FILE)).unwrap()
+        );
         drop(store);
         assert!(GovernedMemoryStore::open(&dir.0, tenant()).is_ok());
     }
@@ -413,13 +596,24 @@ mod tests {
         let result = store.replace_with(candidate.clone(), |root, projection| {
             let path = root.join(GOVERNED_MEMORY_PROJECTION_FILE);
             let bytes = serde_json::to_vec_pretty(&projection.to_wire()).unwrap();
-            super::super::publish_projection(root, &path, &bytes, |_| Err(io::Error::other("injected directory sync failure")))?;
+            super::super::publish_projection(root, &path, &bytes, |_| {
+                Err(io::Error::other("injected directory sync failure"))
+            })?;
             Ok(path)
         });
         assert!(result.is_err());
-        assert!(matches!(store.projection_for(&tenant()), Err(GovernedMemoryStoreError::RecoveryRequired { .. })));
-        assert!(matches!(store.replace(fixture()), Err(GovernedMemoryStoreError::RecoveryRequired { .. })));
-        assert_eq!(load_governed_memory_projection(&dir.0, Some(&tenant())).unwrap(), Some(candidate.clone()));
+        assert!(matches!(
+            store.projection_for(&tenant()),
+            Err(GovernedMemoryStoreError::RecoveryRequired { .. })
+        ));
+        assert!(matches!(
+            store.replace(fixture()),
+            Err(GovernedMemoryStoreError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            load_governed_memory_projection(&dir.0, Some(&tenant())).unwrap(),
+            Some(candidate.clone())
+        );
         drop(store);
         let reopened = GovernedMemoryStore::open(&dir.0, tenant()).unwrap();
         assert_eq!(reopened.projection_for(&tenant()).unwrap(), &candidate);
@@ -427,12 +621,24 @@ mod tests {
 
     #[test]
     fn process_lock_probe() {
-        let Some(root) = std::env::var_os("CCOS_GOVERNANCE_LOCK_PROBE_ROOT") else { return; };
+        let Some(root) = std::env::var_os("CCOS_GOVERNANCE_LOCK_PROBE_ROOT") else {
+            return;
+        };
         if std::env::var_os("CCOS_GOVERNANCE_LOCK_PROBE_REOPEN").is_some() {
             let store = GovernedMemoryStore::open(PathBuf::from(root), tenant()).unwrap();
-            assert_eq!(store.projection_for(&tenant()).unwrap().graph.state(&id("root")), Some(MemoryAssetState::Invalidated));
+            assert_eq!(
+                store
+                    .projection_for(&tenant())
+                    .unwrap()
+                    .graph
+                    .state(&id("root")),
+                Some(MemoryAssetState::Invalidated)
+            );
         } else {
-            assert!(matches!(GovernedMemoryStore::open(PathBuf::from(root), tenant()), Err(GovernedMemoryStoreError::AlreadyOpen { .. })));
+            assert!(matches!(
+                GovernedMemoryStore::open(PathBuf::from(root), tenant()),
+                Err(GovernedMemoryStoreError::AlreadyOpen { .. })
+            ));
         }
     }
 
@@ -442,13 +648,28 @@ mod tests {
         let mut store = GovernedMemoryStore::initialize(&dir.0, fixture()).unwrap();
         let run_probe = |reopen: bool| {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command.args(["--exact", "projection::store::tests::process_lock_probe", "--nocapture"])
+            command
+                .args([
+                    "--exact",
+                    "projection::store::tests::process_lock_probe",
+                    "--nocapture",
+                ])
                 .env("CCOS_GOVERNANCE_LOCK_PROBE_ROOT", &dir.0)
                 .env_remove("CCOS_GOVERNANCE_LOCK_PROBE_REOPEN");
-            if reopen { command.env("CCOS_GOVERNANCE_LOCK_PROBE_REOPEN", "1"); }
+            if reopen {
+                command.env("CCOS_GOVERNANCE_LOCK_PROBE_REOPEN", "1");
+            }
             let result = command.output().unwrap();
-            assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
-            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"), "child probe must actually run");
+            assert!(
+                result.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+                "child probe must actually run"
+            );
         };
         run_probe(false);
         let mut candidate = fixture();

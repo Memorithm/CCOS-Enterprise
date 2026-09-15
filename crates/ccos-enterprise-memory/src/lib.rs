@@ -76,8 +76,9 @@ pub use trust::{MemoryTrustError, MemoryTrustMetadata, MemoryValidationState};
 mod projection;
 pub use projection::{
     load_governed_memory_projection, save_governed_memory_projection, GovernedMemoryProjection,
-    GovernedMemoryProjectionError, GOVERNED_MEMORY_PROJECTION_FILE,
-    GOVERNED_MEMORY_PROJECTION_VERSION, MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
+    GovernedMemoryProjectionError, GovernedMemoryStore, GovernedMemoryStoreError,
+    GOVERNED_MEMORY_PROJECTION_FILE, GOVERNED_MEMORY_PROJECTION_VERSION,
+    MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
 };
 
 mod attestation;

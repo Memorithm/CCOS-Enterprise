@@ -10,10 +10,10 @@ use std::fmt;
 use ccos_enterprise_memory::{
     admit_governed_recall, assemble_governed_bootstrap_context, attest_governed_context,
     BudgetedMemoryRecall, GovernedMemoryContextAssembly, GovernedMemoryProjection,
-    GovernedRecallGate, GovernedRecallGateError, GovernedRecallTrustPolicy,
-    GovernedSemanticMemoryProvider, GovernedSemanticMemoryProviderExt, MemoryContextAttestation,
-    MemoryContextBudget, MemoryContextError, MemoryError, MemoryLoadoutPlan,
-    MemoryLoadoutPlanError, MemoryRecallBudget, MemoryRecallBudgetError,
+    GovernedMemoryStore, GovernedMemoryStoreError, GovernedRecallGate, GovernedRecallGateError,
+    GovernedRecallTrustPolicy, GovernedSemanticMemoryProvider, GovernedSemanticMemoryProviderExt,
+    MemoryContextAttestation, MemoryContextBudget, MemoryContextError, MemoryError,
+    MemoryLoadoutPlan, MemoryLoadoutPlanError, MemoryRecallBudget, MemoryRecallBudgetError,
 };
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 
@@ -25,11 +25,13 @@ pub enum ServedContextError {
     RecallAdmission(GovernedRecallGateError),
     Context(MemoryContextError),
     Attestation(MemoryError),
+    Store(GovernedMemoryStoreError),
 }
 
 impl fmt::Display for ServedContextError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Store(error) => write!(f, "governed memory owner unavailable: {error}"),
             Self::Loadout(error) => write!(f, "invalid governed memory loadout: {error}"),
             Self::NoBootstrapLoadout => {
                 f.write_str("governed memory loadout has no bootstrap-enabled space")
@@ -145,6 +147,54 @@ pub fn assemble_attested_served_context<P: GovernedSemanticMemoryProvider + ?Siz
     )?;
     let attested = attest_governed_context(&assembly, &projection.graph, &projection.trust)?;
     Ok((assembly, attested))
+}
+
+impl From<GovernedMemoryStoreError> for ServedContextError {
+    fn from(value: GovernedMemoryStoreError) -> Self {
+        Self::Store(value)
+    }
+}
+
+/// Assemble from the acknowledged state of an exclusively owned projection.
+///
+/// Check the admitted request tenant and owner health before any provider
+/// call. Borrowing the store also prevents replacement while this synchronous
+/// context assembly is in progress. This function does not authenticate,
+/// reserve quota or settle the request; the real handler must still enter
+/// through `Deployment::admit`. It does not reconstruct provider indexes.
+///
+/// ```no_run
+/// # use ccos_enterprise_mcp::{assemble_stored_governed_context, ServedContextError};
+/// # use ccos_enterprise_memory::{GovernedMemoryStore, GovernedSemanticMemoryProvider,
+/// # GovernedRecallTrustPolicy, MemoryRecallBudget, MemoryContextBudget};
+/// # use ccos_enterprise_tenancy::TenantId;
+/// # fn example<P: GovernedSemanticMemoryProvider>(provider: &P, store: &GovernedMemoryStore, admitted_tenant: &TenantId) -> Result<(), ServedContextError> {
+/// let (context, evidence) = assemble_stored_governed_context(
+///     provider, store, admitted_tenant, GovernedRecallTrustPolicy::VerifiedOnly,
+///     &[1.0, 0.0], MemoryRecallBudget::new(8, 16, 4096).unwrap(),
+///     MemoryContextBudget::new(4, 2048).unwrap(),
+/// )?;
+/// assert_eq!(context.len(), evidence.len());
+/// # Ok(()) }
+/// ```
+pub fn assemble_stored_governed_context<P: GovernedSemanticMemoryProvider + ?Sized>(
+    provider: &P,
+    store: &GovernedMemoryStore,
+    expected_tenant: &TenantId,
+    policy: GovernedRecallTrustPolicy,
+    embedding: &[f32],
+    recall_budget: MemoryRecallBudget,
+    context_budget: MemoryContextBudget,
+) -> Result<(GovernedMemoryContextAssembly, Vec<MemoryContextAttestation>), ServedContextError> {
+    let projection = store.projection_for(expected_tenant)?;
+    assemble_attested_served_context(
+        provider,
+        projection,
+        policy,
+        embedding,
+        recall_budget,
+        context_budget,
+    )
 }
 
 #[cfg(test)]

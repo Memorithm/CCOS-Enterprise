@@ -382,6 +382,9 @@ dependencies = [
  "ccos-enterprise-memory",
  "ccos-enterprise-tenancy",
  "octasoma 0.4.0 (git+https://github.com/Memorithm/octasoma?rev=2e2e0f1ed88d81675f301819529aeb3aa6053c72)",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

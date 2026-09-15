@@ -1,6 +1,8 @@
 //! Canonical version-1 projection bytes shared by save and recovery binding.
-use super::{projection_corrupt, GovernedMemoryProjection, GovernedMemoryProjectionError,
-    MAX_GOVERNED_MEMORY_PROJECTION_BYTES};
+use super::{
+    projection_corrupt, GovernedMemoryProjection, GovernedMemoryProjectionError,
+    MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
+};
 
 /// Validate and encode exactly the bytes used by projection persistence.
 ///
@@ -19,11 +21,14 @@ use super::{projection_corrupt, GovernedMemoryProjection, GovernedMemoryProjecti
 pub fn encode_governed_memory_projection(
     projection: &GovernedMemoryProjection,
 ) -> Result<Vec<u8>, GovernedMemoryProjectionError> {
-    let checked = GovernedMemoryProjection::from_wire(Some(&projection.tenant), projection.to_wire())?;
+    let checked =
+        GovernedMemoryProjection::from_wire(Some(&projection.tenant), projection.to_wire())?;
     let bytes = serde_json::to_vec_pretty(&checked.to_wire())
         .map_err(|error| projection_corrupt(&error.to_string()))?;
     if bytes.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
-        return Err(projection_corrupt("projection exceeds the 16 MiB byte limit"));
+        return Err(projection_corrupt(
+            "projection exceeds the 16 MiB byte limit",
+        ));
     }
     Ok(bytes)
 }

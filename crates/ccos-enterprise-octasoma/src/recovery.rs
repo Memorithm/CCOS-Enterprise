@@ -19,8 +19,10 @@ use ccos_enterprise_tenancy::TenantScope;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{EnterpriseMemoryError, EnterpriseOctaSoma, GovernedMemoryObservation,
-    GovernedMemoryWrite, MemoryAssetId};
+use crate::{
+    EnterpriseMemoryError, EnterpriseOctaSoma, GovernedMemoryObservation, GovernedMemoryWrite,
+    MemoryAssetId,
+};
 
 pub const MAX_RECOVERY_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RECORDS: usize = 16_384;
@@ -43,14 +45,19 @@ pub struct RecoveryConfig {
 
 impl RecoveryConfig {
     fn validate(self) -> Result<(), RecoveryError> {
-        if self.dimension == 0 || self.dimension > 8192
-            || self.simhash_bits == 0 || self.simhash_bits > 4096
+        if self.dimension == 0
+            || self.dimension > 8192
+            || self.simhash_bits == 0
+            || self.simhash_bits > 4096
             || !self.simhash_bits.is_multiple_of(64)
-            || self.per_tenant_capacity == 0 || self.per_tenant_capacity > MAX_RECORDS
+            || self.per_tenant_capacity == 0
+            || self.per_tenant_capacity > MAX_RECORDS
         {
             return Err(RecoveryError::Invalid("unsupported recovery configuration"));
         }
-        let projector = self.dimension.checked_mul(self.simhash_bits)
+        let projector = self
+            .dimension
+            .checked_mul(self.simhash_bits)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
             .ok_or(RecoveryError::Limit("projector arithmetic"))?;
         if projector > MAX_PROJECTOR_BYTES {
@@ -100,10 +107,18 @@ impl std::fmt::Display for RecoveryError {
             Self::Admission(error) => write!(f, "recovery admission: {error}"),
             Self::Invalid(detail) => write!(f, "invalid recovery image: {detail}"),
             Self::Limit(detail) => write!(f, "recovery resource limit: {detail}"),
-            Self::DigestMismatch => f.write_str("recovery image digest differs from expected receipt"),
-            Self::GovernanceMismatch => f.write_str("recovery image does not match current governance"),
-            Self::ConfigurationMismatch => f.write_str("recovery configuration differs from expected configuration"),
-            Self::TenantMismatch => f.write_str("recovery request tenant differs from authority tenant"),
+            Self::DigestMismatch => {
+                f.write_str("recovery image digest differs from expected receipt")
+            }
+            Self::GovernanceMismatch => {
+                f.write_str("recovery image does not match current governance")
+            }
+            Self::ConfigurationMismatch => {
+                f.write_str("recovery configuration differs from expected configuration")
+            }
+            Self::TenantMismatch => {
+                f.write_str("recovery request tenant differs from authority tenant")
+            }
         }
     }
 }
@@ -174,19 +189,28 @@ impl RecoveryImage {
         records: &[RecoveryRecord],
     ) -> Result<Self, RecoveryError> {
         config.validate()?;
-        let governance = encode_governed_memory_projection(authority).map_err(RecoveryError::Projection)?;
+        let governance =
+            encode_governed_memory_projection(authority).map_err(RecoveryError::Projection)?;
         validate_records(authority, config, records)?;
         let wire = WireImage {
             version: FORMAT_VERSION,
             backend_revision: BACKEND_REVISION.into(),
             config,
-            governance: String::from_utf8(governance).map_err(|_| RecoveryError::Invalid("non-UTF8 governance"))?,
-            records: records.iter().map(|record| WireRecord {
-                asset_id: record.asset_id.as_str().into(),
-                embedding_bits: record.embedding.iter().map(|value| value.to_bits()).collect(),
-                payload: record.payload.clone(),
-                forgotten: record.forgotten,
-            }).collect(),
+            governance: String::from_utf8(governance)
+                .map_err(|_| RecoveryError::Invalid("non-UTF8 governance"))?,
+            records: records
+                .iter()
+                .map(|record| WireRecord {
+                    asset_id: record.asset_id.as_str().into(),
+                    embedding_bits: record
+                        .embedding
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect(),
+                    payload: record.payload.clone(),
+                    forgotten: record.forgotten,
+                })
+                .collect(),
         };
         let mut output = LimitedOutput(Vec::new());
         serde_json::to_writer(&mut output, &wire).map_err(RecoveryError::Json)?;
@@ -196,10 +220,14 @@ impl RecoveryImage {
     }
 
     /// Borrow the exact immutable bytes; storage must not rewrite their formatting.
-    pub fn as_bytes(&self) -> &[u8] { &self.bytes }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 
     /// Digest of the entire image, binding metadata, configuration and ordered rows.
-    pub fn digest(&self) -> [u8; 32] { self.digest }
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
 
     /// Create a new immutable generation file and synchronize file plus directory.
     ///
@@ -216,8 +244,13 @@ impl RecoveryImage {
         path: &Path,
         sync_parent: impl FnOnce(&Path) -> io::Result<()>,
     ) -> Result<(), RecoveryError> {
-        let name = path.file_name().ok_or(RecoveryError::Invalid("image filename required"))?;
-        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let name = path
+            .file_name()
+            .ok_or(RecoveryError::Invalid("image filename required"))?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
         let parent = fs::canonicalize(parent).map_err(|source| io_error(parent, source))?;
         let destination = parent.join(name);
         let mut options = OpenOptions::new();
@@ -227,8 +260,11 @@ impl RecoveryImage {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&destination).map_err(|source| io_error(&destination, source))?;
-        file.write_all(&self.bytes).and_then(|()| file.sync_all())
+        let mut file = options
+            .open(&destination)
+            .map_err(|source| io_error(&destination, source))?;
+        file.write_all(&self.bytes)
+            .and_then(|()| file.sync_all())
             .map_err(|source| io_error(&destination, source))?;
         sync_parent(&parent).map_err(|source| io_error(&parent, source))?;
         Ok(())
@@ -244,7 +280,9 @@ impl Write for LimitedOutput {
         self.0.extend_from_slice(bytes);
         Ok(bytes.len())
     }
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Rebuilt governed indexes, paired with immutable exact authority.
@@ -261,10 +299,14 @@ pub struct RecoveredGovernedMemory {
 
 impl RecoveredGovernedMemory {
     /// Receipt identifying the complete recovered input generation.
-    pub fn digest(&self) -> [u8; 32] { self.digest }
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
 
     /// Count includes forgotten records, preserving append-only quota accounting.
-    pub fn stored_records(&self) -> usize { self.provider.tenant_len(&self.authority.tenant) }
+    pub fn stored_records(&self) -> usize {
+        self.provider.tenant_len(&self.authority.tenant)
+    }
 
     /// Recall only after exact tenant, current-generation and loadout checks.
     ///
@@ -291,19 +333,35 @@ impl RecoveredGovernedMemory {
         if request.tenant != self.authority.tenant || current.tenant != self.authority.tenant {
             return Err(RecoveryError::TenantMismatch);
         }
-        let current_bytes = encode_governed_memory_projection(current).map_err(RecoveryError::Projection)?;
+        let current_bytes =
+            encode_governed_memory_projection(current).map_err(RecoveryError::Projection)?;
         if current_bytes != self.canonical_governance {
             return Err(RecoveryError::GovernanceMismatch);
         }
         for space in request.inner.loadout.spaces() {
-            if !current.loadout.bindings().any(|binding| &binding.space == space) {
-                return Err(RecoveryError::Invalid("requested space outside governance loadout"));
+            if !current
+                .loadout
+                .bindings()
+                .any(|binding| &binding.space == space)
+            {
+                return Err(RecoveryError::Invalid(
+                    "requested space outside governance loadout",
+                ));
             }
         }
-        let observations = self.provider.recall_governed_bounded(request).map_err(RecoveryError::Budget)?;
-        admit_governed_recall(GovernedRecallGate {
-            graph: &current.graph, trust: &current.trust, policy,
-        }, observations).map_err(RecoveryError::Admission)
+        let observations = self
+            .provider
+            .recall_governed_bounded(request)
+            .map_err(RecoveryError::Budget)?;
+        admit_governed_recall(
+            GovernedRecallGate {
+                graph: &current.graph,
+                trust: &current.trust,
+                policy,
+            },
+            observations,
+        )
+        .map_err(RecoveryError::Admission)
     }
 }
 
@@ -331,43 +389,84 @@ pub fn restore_governed_memory(
     expected_config: RecoveryConfig,
 ) -> Result<RecoveredGovernedMemory, RecoveryError> {
     expected_config.validate()?;
-    let canonical_governance = encode_governed_memory_projection(authority).map_err(RecoveryError::Projection)?;
+    let canonical_governance =
+        encode_governed_memory_projection(authority).map_err(RecoveryError::Projection)?;
     let mut bytes = Vec::new();
-    reader.take(MAX_RECOVERY_IMAGE_BYTES as u64 + 1).read_to_end(&mut bytes)
+    reader
+        .take(MAX_RECOVERY_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|source| io_error(Path::new("<recovery reader>"), source))?;
-    if bytes.len() > MAX_RECOVERY_IMAGE_BYTES { return Err(RecoveryError::Limit("image bytes")); }
+    if bytes.len() > MAX_RECOVERY_IMAGE_BYTES {
+        return Err(RecoveryError::Limit("image bytes"));
+    }
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
-    if digest != expected_digest { return Err(RecoveryError::DigestMismatch); }
+    if digest != expected_digest {
+        return Err(RecoveryError::DigestMismatch);
+    }
     let wire: WireImage = serde_json::from_slice(&bytes).map_err(RecoveryError::Json)?;
     if wire.version != FORMAT_VERSION || wire.backend_revision != BACKEND_REVISION {
-        return Err(RecoveryError::Invalid("unsupported format or backend revision"));
+        return Err(RecoveryError::Invalid(
+            "unsupported format or backend revision",
+        ));
     }
-    if wire.config != expected_config { return Err(RecoveryError::ConfigurationMismatch); }
-    if wire.governance.as_bytes() != canonical_governance { return Err(RecoveryError::GovernanceMismatch); }
-    let records = wire.records.into_iter().map(|record| {
-        Ok(RecoveryRecord {
-            asset_id: MemoryAssetId::new(record.asset_id).map_err(RecoveryError::Provider)?,
-            embedding: record.embedding_bits.into_iter().map(f32::from_bits).collect(),
-            payload: record.payload,
-            forgotten: record.forgotten,
+    if wire.config != expected_config {
+        return Err(RecoveryError::ConfigurationMismatch);
+    }
+    if wire.governance.as_bytes() != canonical_governance {
+        return Err(RecoveryError::GovernanceMismatch);
+    }
+    let records = wire
+        .records
+        .into_iter()
+        .map(|record| {
+            Ok(RecoveryRecord {
+                asset_id: MemoryAssetId::new(record.asset_id).map_err(RecoveryError::Provider)?,
+                embedding: record
+                    .embedding_bits
+                    .into_iter()
+                    .map(f32::from_bits)
+                    .collect(),
+                payload: record.payload,
+                forgotten: record.forgotten,
+            })
         })
-    }).collect::<Result<Vec<_>, RecoveryError>>()?;
+        .collect::<Result<Vec<_>, RecoveryError>>()?;
     validate_records(authority, expected_config, &records)?;
-    let mut provider = EnterpriseOctaSoma::new(expected_config.dimension, expected_config.simhash_bits,
-        expected_config.per_tenant_capacity, expected_config.seed).map_err(RecoveryError::Provider)?;
+    let mut provider = EnterpriseOctaSoma::new(
+        expected_config.dimension,
+        expected_config.simhash_bits,
+        expected_config.per_tenant_capacity,
+        expected_config.seed,
+    )
+    .map_err(RecoveryError::Provider)?;
     for record in &records {
-        let descriptor = authority.graph.descriptor(&record.asset_id)
+        let descriptor = authority
+            .graph
+            .descriptor(&record.asset_id)
             .ok_or(RecoveryError::Invalid("record descriptor missing"))?;
-        provider.insert_governed(TenantScope::new(authority.tenant.clone(), GovernedMemoryWrite {
-            asset_id: &record.asset_id, space: &descriptor.space,
-            embedding: &record.embedding, payload: &record.payload,
-        })).map_err(RecoveryError::Provider)?;
+        provider
+            .insert_governed(TenantScope::new(
+                authority.tenant.clone(),
+                GovernedMemoryWrite {
+                    asset_id: &record.asset_id,
+                    space: &descriptor.space,
+                    embedding: &record.embedding,
+                    payload: &record.payload,
+                },
+            ))
+            .map_err(RecoveryError::Provider)?;
         if record.forgotten {
-            provider.forget_governed(TenantScope::new(authority.tenant.clone(), &record.asset_id))
+            provider
+                .forget_governed(TenantScope::new(authority.tenant.clone(), &record.asset_id))
                 .map_err(RecoveryError::Provider)?;
         }
     }
-    Ok(RecoveredGovernedMemory { provider, authority: authority.clone(), canonical_governance, digest })
+    Ok(RecoveredGovernedMemory {
+        provider,
+        authority: authority.clone(),
+        canonical_governance,
+        digest,
+    })
 }
 
 fn validate_records(
@@ -378,19 +477,39 @@ fn validate_records(
     if records.len() > config.per_tenant_capacity || records.len() > MAX_RECORDS {
         return Err(RecoveryError::Limit("record count"));
     }
-    if records.len() != authority.graph.len() { return Err(RecoveryError::Invalid("incomplete provider population")); }
+    if records.len() != authority.graph.len() {
+        return Err(RecoveryError::Invalid("incomplete provider population"));
+    }
     let mut ids = BTreeSet::new();
     let mut vector_bytes = 0usize;
     let mut payload_bytes = 0usize;
     for record in records {
-        if !ids.insert(&record.asset_id) { return Err(RecoveryError::Invalid("duplicate provider asset")); }
-        if authority.graph.descriptor(&record.asset_id).is_none() { return Err(RecoveryError::Invalid("unknown provider asset")); }
-        if !authority.trust.contains_key(&record.asset_id) { return Err(RecoveryError::Invalid("missing explicit trust")); }
-        if record.asset_id.as_str().len() > 4096 { return Err(RecoveryError::Limit("asset identifier bytes")); }
-        crate::validate_embedding(&record.embedding, config.dimension).map_err(RecoveryError::Provider)?;
-        vector_bytes = vector_bytes.checked_add(record.embedding.len().checked_mul(4)
-            .ok_or(RecoveryError::Limit("vector arithmetic"))?).ok_or(RecoveryError::Limit("vector arithmetic"))?;
-        payload_bytes = payload_bytes.checked_add(record.payload.len()).ok_or(RecoveryError::Limit("payload arithmetic"))?;
+        if !ids.insert(&record.asset_id) {
+            return Err(RecoveryError::Invalid("duplicate provider asset"));
+        }
+        if authority.graph.descriptor(&record.asset_id).is_none() {
+            return Err(RecoveryError::Invalid("unknown provider asset"));
+        }
+        if !authority.trust.contains_key(&record.asset_id) {
+            return Err(RecoveryError::Invalid("missing explicit trust"));
+        }
+        if record.asset_id.as_str().len() > 4096 {
+            return Err(RecoveryError::Limit("asset identifier bytes"));
+        }
+        crate::validate_embedding(&record.embedding, config.dimension)
+            .map_err(RecoveryError::Provider)?;
+        vector_bytes = vector_bytes
+            .checked_add(
+                record
+                    .embedding
+                    .len()
+                    .checked_mul(4)
+                    .ok_or(RecoveryError::Limit("vector arithmetic"))?,
+            )
+            .ok_or(RecoveryError::Limit("vector arithmetic"))?;
+        payload_bytes = payload_bytes
+            .checked_add(record.payload.len())
+            .ok_or(RecoveryError::Limit("payload arithmetic"))?;
         if vector_bytes > MAX_VECTOR_BYTES || payload_bytes > MAX_PAYLOAD_BYTES {
             return Err(RecoveryError::Limit("aggregate vectors or payloads"));
         }
@@ -399,7 +518,10 @@ fn validate_records(
 }
 
 fn io_error(path: &Path, source: io::Error) -> RecoveryError {
-    RecoveryError::Io { path: path.to_path_buf(), source }
+    RecoveryError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 #[cfg(test)]

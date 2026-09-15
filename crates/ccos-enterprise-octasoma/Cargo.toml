@@ -10,3 +10,6 @@ publish = false
 ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
 octasoma.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

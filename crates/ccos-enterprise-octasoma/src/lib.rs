@@ -14,6 +14,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod recovery;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use ccos_enterprise_memory::{

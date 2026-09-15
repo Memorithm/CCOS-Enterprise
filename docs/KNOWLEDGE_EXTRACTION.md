@@ -64,10 +64,18 @@ strings. Schema typing belongs to the later ontology/schema layer.
 
 ### Plain text / Markdown
 
-No record candidates are invented. Deterministic structural extraction has no
-basis for claiming that a sentence names an entity or relation. A later explicit
-NER/model path may create model-labelled observations with model/prompt
-provenance, but never authoritative facts by default.
+Each non-empty parsed prose unit becomes one deterministic
+`AssertionKind::Observation` candidate. The extractor preserves the normalized
+observed text and records the parsed format as `text-line` or `markdown-line`.
+Whitespace-only units are skipped. Markdown syntax remains observed text rather
+than being interpreted as structure, an entity, a relation, or an authoritative
+fact.
+
+This prose path deliberately does **not** perform NER, alias inference, relation
+inference, canonical-entity creation, or semantic promotion. A later explicit
+NER/model path may create separately model-labelled observations with
+model/prompt provenance, but neither structural prose extraction nor a future
+model result becomes authoritative knowledge by default.
 
 ## Identity and evidence
 

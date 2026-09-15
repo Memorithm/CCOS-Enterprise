@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ccos_enterprise_memory::{
-    decode_governed_memory_projection, encode_governed_memory_projection,
-    GovernedMemoryProjection, GovernedMemoryProjectionError, GovernedMemoryStore,
-    GovernedMemoryStoreError, MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
+    decode_governed_memory_projection, encode_governed_memory_projection, GovernedMemoryProjection,
+    GovernedMemoryProjectionError, GovernedMemoryStore, GovernedMemoryStoreError,
+    MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
 };
 use ccos_enterprise_tenancy::TenantId;
 use serde::{Deserialize, Serialize};
@@ -263,20 +263,19 @@ impl ProviderGenerationStore {
         selector: WireSelector,
     ) -> Result<Self, ProviderGenerationError> {
         let expected_governance_file = governance_generation_filename(selector.generation);
-        let governance_file = selector
-            .governance_file
-            .as_deref()
-            .ok_or(ProviderGenerationError::Invalid(
-                "version-2 selector requires governance file",
-            ))?;
+        let governance_file =
+            selector
+                .governance_file
+                .as_deref()
+                .ok_or(ProviderGenerationError::Invalid(
+                    "version-2 selector requires governance file",
+                ))?;
         if governance_file != expected_governance_file {
             return Err(ProviderGenerationError::Invalid(
                 "non-canonical governance filename",
             ));
         }
-        let governance_path = root
-            .join(GOVERNANCE_GENERATIONS_DIR)
-            .join(governance_file);
+        let governance_path = root.join(GOVERNANCE_GENERATIONS_DIR).join(governance_file);
         let governance_bytes = read_bounded_file(
             &governance_path,
             MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
@@ -484,7 +483,10 @@ fn read_bounded_file(
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if path.file_name().is_some_and(|name| name == PROVIDER_SELECTOR_FILE) {
+            if path
+                .file_name()
+                .is_some_and(|name| name == PROVIDER_SELECTOR_FILE)
+            {
                 return Err(ProviderGenerationError::MissingSelector {
                     path: path.to_path_buf(),
                 });
@@ -598,11 +600,9 @@ fn write_selector(
 }
 
 fn write_new_bytes(path: &Path, bytes: &[u8]) -> Result<(), ProviderGenerationError> {
-    let parent = path
-        .parent()
-        .ok_or(ProviderGenerationError::Invalid(
-            "generation artifact parent required",
-        ))?;
+    let parent = path.parent().ok_or(ProviderGenerationError::Invalid(
+        "generation artifact parent required",
+    ))?;
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]

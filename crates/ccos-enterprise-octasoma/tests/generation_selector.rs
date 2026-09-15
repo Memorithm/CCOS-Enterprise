@@ -11,8 +11,8 @@ use ccos_enterprise_memory::{
     MemoryTrustMetadata, MemoryUsageMode, MemoryValidationState,
 };
 use ccos_enterprise_octasoma::generation::{
-    ProviderGenerationError, ProviderGenerationStore, GENERATION_SELECTOR_VERSION,
-    GOVERNANCE_DIR, GOVERNANCE_GENERATIONS_DIR, PROVIDER_GENERATIONS_DIR, PROVIDER_SELECTOR_FILE,
+    ProviderGenerationError, ProviderGenerationStore, GENERATION_SELECTOR_VERSION, GOVERNANCE_DIR,
+    GOVERNANCE_GENERATIONS_DIR, PROVIDER_GENERATIONS_DIR, PROVIDER_SELECTOR_FILE,
 };
 use ccos_enterprise_octasoma::recovery::{RecoveryConfig, RecoveryImage, RecoveryRecord};
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
@@ -133,9 +133,12 @@ fn recalled_payload(store: &ProviderGenerationStore) -> Vec<u8> {
     admitted[0].payload.clone()
 }
 
-fn hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+fn raw_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    raw_hex(&Sha256::digest(bytes))
 }
 
 #[test]
@@ -184,8 +187,8 @@ fn legacy_v1_selector_remains_readable() {
         "tenant": "acme",
         "generation": 0,
         "image_file": image_file,
-        "image_sha256": image.digest().iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
-        "governance_sha256": hex(&governance_bytes),
+        "image_sha256": raw_hex(&image.digest()),
+        "governance_sha256": sha256_hex(&governance_bytes),
         "config": config(),
     });
     fs::write(

@@ -11,7 +11,7 @@ pub use store::{GovernedMemoryStore, GovernedMemoryStoreError};
 
 #[path = "projection_codec.rs"]
 mod codec;
-pub use codec::encode_governed_memory_projection;
+pub use codec::{decode_governed_memory_projection, encode_governed_memory_projection};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -282,178 +282,47 @@ impl GovernedMemoryProjection {
             } else {
                 MemoryLineage::derived(parents, evidence)?
             };
-            let descriptor = MemoryAssetDescriptor::new(id.clone(), space, stratum, lineage)?;
-            states.push((id, decode_asset_state(&asset.state)?));
-            descriptors.push(descriptor);
+            descriptors.push(MemoryAssetDescriptor::new(id, space, stratum, lineage)?);
+            states.push(decode_asset_state(&asset.state)?);
         }
-        let graph = MemoryLineageGraph::restore(descriptors, states)?;
+        let graph = MemoryLineageGraph::restore(descriptors.into_iter().zip(states))?;
         let mut trust = BTreeMap::new();
         for row in doc.trust {
-            let id = MemoryAssetId::new(row.asset_id)?;
+            let id = MemoryAssetId::new(row.asset_id.clone())?;
             if trust.contains_key(&id) {
-                return Err(GovernedMemoryProjectionError::DuplicateTrust(
-                    id.as_str().to_string(),
-                ));
+                return Err(GovernedMemoryProjectionError::DuplicateTrust(row.asset_id));
             }
-            if graph.descriptor(&id).is_none() {
-                return Err(GovernedMemoryProjectionError::UnknownTrustAsset(
-                    id.as_str().to_string(),
-                ));
-            }
-            trust.insert(
-                id,
-                MemoryTrustMetadata::new(
-                    decode_trust_state(&row.state)?,
-                    row.source_count,
-                    row.independent_source_count,
-                    row.contradiction_count,
-                    row.verification_refs,
-                )?,
-            );
+            let state = decode_trust_state(&row.state)?;
+            let metadata = MemoryTrustMetadata::new(
+                state,
+                row.source_count,
+                row.independent_source_count,
+                row.contradiction_count,
+                row.verification_refs,
+            )?;
+            trust.insert(id, metadata);
         }
-        let mut seen_spaces = BTreeSet::new();
-        let mut bindings = Vec::new();
-        for row in doc.loadout {
-            if !seen_spaces.insert(row.space.clone()) {
-                return Err(GovernedMemoryProjectionError::DuplicateBinding(row.space));
-            }
-            bindings.push(MemoryLoadoutBinding::new(
-                decode_space(&row.space)?,
-                row.priority,
-                decode_usage(&row.usage)?,
-            )?);
-        }
-        Self::new(tenant, graph, trust, MemoryLoadoutPlan::new(bindings)?)
+        let loadout = MemoryLoadoutPlan::new(
+            doc.loadout
+                .into_iter()
+                .map(|binding| {
+                    Ok(MemoryLoadoutBinding::new(
+                        decode_space(&binding.space)?,
+                        binding.priority,
+                        decode_usage(&binding.usage)?,
+                    )?)
+                })
+                .collect::<Result<Vec<_>, GovernedMemoryProjectionError>>()?,
+        )?;
+        GovernedMemoryProjection::new(tenant, graph, trust, loadout)
     }
 }
 
-fn projection_corrupt(detail: &str) -> GovernedMemoryProjectionError {
-    GovernedMemoryProjectionError::Corrupt {
-        path: PathBuf::from(GOVERNED_MEMORY_PROJECTION_FILE),
-        detail: detail.to_string(),
-    }
-}
-
-fn projection_io(path: &Path, source: io::Error) -> GovernedMemoryProjectionError {
-    GovernedMemoryProjectionError::Io {
-        path: path.to_path_buf(),
-        source,
-    }
-}
-
-fn parent_directory(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-}
-
-fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-fn create_projection_root(root: &Path) -> Result<(), GovernedMemoryProjectionError> {
-    let mut missing = Vec::new();
-    let mut cursor = root;
-    while !cursor
-        .try_exists()
-        .map_err(|error| projection_io(cursor, error))?
-    {
-        missing.push(cursor.to_path_buf());
-        cursor = parent_directory(cursor);
-    }
-    fs::create_dir_all(root).map_err(|error| projection_io(root, error))?;
-    for directory in missing.iter().rev() {
-        let parent = parent_directory(directory);
-        sync_directory(parent).map_err(|error| projection_io(parent, error))?;
-    }
-    Ok(())
-}
-
-struct TemporaryProjection(PathBuf);
-
-impl Drop for TemporaryProjection {
-    fn drop(&mut self) {
-        // Only our exclusively created temporary file is eligible for cleanup.
-        // Cleanup failure cannot turn a failed publication into success.
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
-fn publish_projection(
-    root: &Path,
-    path: &Path,
-    bytes: &[u8],
-    sync_parent: impl FnOnce(&Path) -> io::Result<()>,
-) -> Result<(), GovernedMemoryProjectionError> {
-    for _ in 0..128 {
-        let ordinal = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-        let tmp = root.join(format!(
-            ".governed-memory-{}-{ordinal}.tmp",
-            std::process::id()
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = match options.open(&tmp) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(projection_io(&tmp, error)),
-        };
-        let temporary = TemporaryProjection(tmp);
-        file.write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|error| projection_io(&temporary.0, error))?;
-        drop(file);
-        fs::rename(&temporary.0, path).map_err(|error| projection_io(path, error))?;
-        // Publication may already be visible if this fails. Report the error;
-        // callers must reload/stop rather than assume rollback or durability.
-        sync_parent(root).map_err(|error| projection_io(root, error))?;
-        return Ok(());
-    }
-    Err(projection_io(
-        root,
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "temporary projection names exhausted",
-        ),
-    ))
-}
-
-/// Validate and atomically replace one bounded governance projection.
-///
-/// Temporary files are exclusively created, synced and renamed; directory-sync
-/// errors propagate. An error after rename means publication is uncertain, not
-/// rolled back. The caller must stop or reload its authority state in that case.
-/// The root must be controlled by the deployment, not an untrusted actor.
-pub fn save_governed_memory_projection(
-    root: &Path,
-    projection: &GovernedMemoryProjection,
-) -> Result<PathBuf, GovernedMemoryProjectionError> {
-    let bytes = encode_governed_memory_projection(projection)?;
-    let root = if root.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        root
-    };
-    create_projection_root(root)?;
-    let path = root.join(GOVERNED_MEMORY_PROJECTION_FILE);
-    publish_projection(root, &path, &bytes, sync_directory)?;
-    Ok(path)
-}
-
-/// Restore a bounded projection through validating domain constructors.
-///
-/// Served callers must pass `Some(expected_tenant)`; `None` is intended only for
-/// inspection/import before a tenant is selected. A missing file is `None`, never
-/// a replacement empty projection after corruption or another I/O error.
 pub fn load_governed_memory_projection(
-    root: &Path,
+    root: impl AsRef<Path>,
     expected_tenant: Option<&TenantId>,
 ) -> Result<Option<GovernedMemoryProjection>, GovernedMemoryProjectionError> {
+    let root = root.as_ref();
     let path = root.join(GOVERNED_MEMORY_PROJECTION_FILE);
     let file = match File::open(&path) {
         Ok(file) => file,
@@ -465,19 +334,105 @@ pub fn load_governed_memory_projection(
         .read_to_end(&mut bytes)
         .map_err(|error| projection_io(&path, error))?;
     if bytes.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
-        return Err(projection_corrupt(
-            "projection exceeds the 16 MiB byte limit",
-        ));
+        return Err(projection_corrupt("projection exceeds the 16 MiB byte limit"));
     }
-    let doc: WireDocument =
-        serde_json::from_slice(&bytes).map_err(|error| GovernedMemoryProjectionError::Corrupt {
-            path,
-            detail: error.to_string(),
-        })?;
+    let doc: WireDocument = serde_json::from_slice(&bytes)
+        .map_err(|error| projection_corrupt(&error.to_string()))?;
     Ok(Some(GovernedMemoryProjection::from_wire(
         expected_tenant,
         doc,
     )?))
+}
+
+pub fn save_governed_memory_projection(
+    root: impl AsRef<Path>,
+    projection: &GovernedMemoryProjection,
+) -> Result<PathBuf, GovernedMemoryProjectionError> {
+    let root = root.as_ref();
+    if root.as_os_str().is_empty() {
+        return Err(projection_io(
+            root,
+            io::Error::new(io::ErrorKind::InvalidInput, "projection root is empty"),
+        ));
+    }
+    create_projection_root(root)?;
+    let root = fs::canonicalize(root).map_err(|error| projection_io(root, error))?;
+    let final_path = root.join(GOVERNED_MEMORY_PROJECTION_FILE);
+    let current = load_governed_memory_projection(&root, None)?;
+    if let Some(current) = current {
+        if current.tenant != projection.tenant {
+            return Err(GovernedMemoryProjectionError::TenantMismatch {
+                expected: current.tenant.as_str().to_string(),
+                found: projection.tenant.as_str().to_string(),
+            });
+        }
+    }
+    let bytes = encode_governed_memory_projection(projection)?;
+    let ordinal = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let temp_path = root.join(format!(
+        ".{GOVERNED_MEMORY_PROJECTION_FILE}.{}.{}.tmp",
+        std::process::id(),
+        ordinal
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut temp_file = options
+        .open(&temp_path)
+        .map_err(|error| projection_io(&temp_path, error))?;
+    temp_file
+        .write_all(&bytes)
+        .and_then(|()| temp_file.sync_all())
+        .map_err(|error| projection_io(&temp_path, error))?;
+    if let Err(error) = fs::rename(&temp_path, &final_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(projection_io(&final_path, error));
+    }
+    sync_directory(&root).map_err(|error| projection_io(&root, error))?;
+    Ok(final_path)
+}
+
+pub(crate) fn create_projection_root(root: &Path) -> Result<(), GovernedMemoryProjectionError> {
+    match fs::create_dir(root) {
+        Ok(()) => sync_directory(root.parent().unwrap_or_else(|| Path::new(".")))
+            .map_err(|error| projection_io(root, error)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(root).map_err(|error| projection_io(root, error))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(projection_io(
+                    root,
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "projection root is not a real directory",
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        Err(error) => Err(projection_io(root, error)),
+    }
+}
+
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+pub(crate) fn projection_corrupt(detail: &str) -> GovernedMemoryProjectionError {
+    GovernedMemoryProjectionError::Corrupt {
+        path: PathBuf::from(GOVERNED_MEMORY_PROJECTION_FILE),
+        detail: detail.to_string(),
+    }
+}
+
+pub(crate) fn projection_io(path: &Path, source: io::Error) -> GovernedMemoryProjectionError {
+    GovernedMemoryProjectionError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 fn encode_space(space: &MemorySpace) -> String {
@@ -488,42 +443,43 @@ fn encode_space(space: &MemorySpace) -> String {
         MemorySpace::Agent(id) => format!("agent:{id}"),
     }
 }
-fn decode_space(value: &str) -> Result<MemorySpace, GovernedMemoryProjectionError> {
-    if value == "tenant" {
+
+fn decode_space(raw: &str) -> Result<MemorySpace, GovernedMemoryProjectionError> {
+    if raw == "tenant" {
         return Ok(MemorySpace::Tenant);
     }
-    if let Some(id) = value.strip_prefix("project:") {
-        return Ok(MemorySpace::project(id)?);
+    let (kind, id) = raw
+        .split_once(':')
+        .ok_or_else(|| projection_corrupt("memory space must contain a kind prefix"))?;
+    match kind {
+        "project" => Ok(MemorySpace::project(id.to_string())?),
+        "team" => Ok(MemorySpace::team(id.to_string())?),
+        "agent" => Ok(MemorySpace::agent(id.to_string())?),
+        _ => Err(projection_corrupt("unknown memory space kind")),
     }
-    if let Some(id) = value.strip_prefix("team:") {
-        return Ok(MemorySpace::team(id)?);
-    }
-    if let Some(id) = value.strip_prefix("agent:") {
-        return Ok(MemorySpace::agent(id)?);
-    }
-    Err(projection_corrupt(&format!(
-        "unknown memory space {value:?}"
-    )))
 }
+
 fn encode_stratum(stratum: MemoryStratum) -> &'static str {
     match stratum {
         MemoryStratum::Evidence => "evidence",
         MemoryStratum::Episode => "episode",
-        MemoryStratum::Context => "context",
+        MemoryStratum::Entity => "entity",
         MemoryStratum::Pattern => "pattern",
+        MemoryStratum::Procedure => "procedure",
     }
 }
-fn decode_stratum(value: &str) -> Result<MemoryStratum, crate::MemoryError> {
-    match value {
+
+fn decode_stratum(raw: &str) -> Result<MemoryStratum, GovernedMemoryProjectionError> {
+    match raw {
         "evidence" => Ok(MemoryStratum::Evidence),
         "episode" => Ok(MemoryStratum::Episode),
-        "context" => Ok(MemoryStratum::Context),
+        "entity" => Ok(MemoryStratum::Entity),
         "pattern" => Ok(MemoryStratum::Pattern),
-        _ => Err(crate::MemoryError::InvalidConfiguration(
-            "unknown memory stratum",
-        )),
+        "procedure" => Ok(MemoryStratum::Procedure),
+        _ => Err(projection_corrupt("unknown memory stratum")),
     }
 }
+
 fn encode_asset_state(state: MemoryAssetState) -> &'static str {
     match state {
         MemoryAssetState::Active => "active",
@@ -531,16 +487,16 @@ fn encode_asset_state(state: MemoryAssetState) -> &'static str {
         MemoryAssetState::Invalidated => "invalidated",
     }
 }
-fn decode_asset_state(value: &str) -> Result<MemoryAssetState, crate::MemoryError> {
-    match value {
+
+fn decode_asset_state(raw: &str) -> Result<MemoryAssetState, GovernedMemoryProjectionError> {
+    match raw {
         "active" => Ok(MemoryAssetState::Active),
         "stale" => Ok(MemoryAssetState::Stale),
         "invalidated" => Ok(MemoryAssetState::Invalidated),
-        _ => Err(crate::MemoryError::InvalidConfiguration(
-            "unknown memory asset state",
-        )),
+        _ => Err(projection_corrupt("unknown memory asset state")),
     }
 }
+
 fn encode_trust_state(state: MemoryValidationState) -> &'static str {
     match state {
         MemoryValidationState::Unverified => "unverified",
@@ -550,176 +506,29 @@ fn encode_trust_state(state: MemoryValidationState) -> &'static str {
         MemoryValidationState::Quarantined => "quarantined",
     }
 }
-fn decode_trust_state(value: &str) -> Result<MemoryValidationState, crate::MemoryError> {
-    match value {
+
+fn decode_trust_state(raw: &str) -> Result<MemoryValidationState, GovernedMemoryProjectionError> {
+    match raw {
         "unverified" => Ok(MemoryValidationState::Unverified),
         "corroborated" => Ok(MemoryValidationState::Corroborated),
         "verified" => Ok(MemoryValidationState::Verified),
         "disputed" => Ok(MemoryValidationState::Disputed),
         "quarantined" => Ok(MemoryValidationState::Quarantined),
-        _ => Err(crate::MemoryError::InvalidConfiguration(
-            "unknown memory trust state",
-        )),
+        _ => Err(projection_corrupt("unknown trust state")),
     }
 }
+
 fn encode_usage(usage: MemoryUsageMode) -> &'static str {
     match usage {
         MemoryUsageMode::Bootstrap => "bootstrap",
         MemoryUsageMode::OnDemand => "on-demand",
-        MemoryUsageMode::BootstrapAndOnDemand => "bootstrap-and-on-demand",
     }
 }
-fn decode_usage(value: &str) -> Result<MemoryUsageMode, crate::MemoryError> {
-    match value {
+
+fn decode_usage(raw: &str) -> Result<MemoryUsageMode, GovernedMemoryProjectionError> {
+    match raw {
         "bootstrap" => Ok(MemoryUsageMode::Bootstrap),
         "on-demand" => Ok(MemoryUsageMode::OnDemand),
-        "bootstrap-and-on-demand" => Ok(MemoryUsageMode::BootstrapAndOnDemand),
-        _ => Err(crate::MemoryError::InvalidConfiguration(
-            "unknown memory usage mode",
-        )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            let ordinal = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "ccos-projection-audit-{}-{ordinal}",
-                std::process::id()
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn projection() -> GovernedMemoryProjection {
-        let id = MemoryAssetId::new("root").unwrap();
-        let mut graph = MemoryLineageGraph::new();
-        graph
-            .register(
-                MemoryAssetDescriptor::new(
-                    id.clone(),
-                    MemorySpace::Tenant,
-                    MemoryStratum::Evidence,
-                    MemoryLineage::root([MemoryEvidenceRef::new("audit:root").unwrap()]).unwrap(),
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        let loadout = MemoryLoadoutPlan::new([MemoryLoadoutBinding::new(
-            MemorySpace::Tenant,
-            1,
-            MemoryUsageMode::Bootstrap,
-        )
-        .unwrap()])
-        .unwrap();
-        GovernedMemoryProjection::new(
-            TenantId::validated("acme").unwrap(),
-            graph,
-            BTreeMap::from([(id, MemoryTrustMetadata::unverified(1))]),
-            loadout,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn projection_round_trip_is_deterministic_and_tenant_bound() {
-        let dir = TestDirectory::new();
-        let mut original = projection();
-        original
-            .graph
-            .invalidate(&MemoryAssetId::new("root").unwrap())
-            .unwrap();
-        let path = save_governed_memory_projection(&dir.0, &original).unwrap();
-        let bytes = fs::read(&path).unwrap();
-        assert_eq!(
-            load_governed_memory_projection(&dir.0, Some(&original.tenant)).unwrap(),
-            Some(original.clone())
-        );
-        save_governed_memory_projection(&dir.0, &original).unwrap();
-        assert_eq!(bytes, fs::read(&path).unwrap());
-        assert!(matches!(
-            load_governed_memory_projection(&dir.0, Some(&TenantId::validated("other").unwrap())),
-            Err(GovernedMemoryProjectionError::TenantMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn mutated_projection_cannot_replace_a_valid_snapshot() {
-        let dir = TestDirectory::new();
-        let mut original = projection();
-        let path = save_governed_memory_projection(&dir.0, &original).unwrap();
-        let before = fs::read(&path).unwrap();
-        original.trust.insert(
-            MemoryAssetId::new("unknown").unwrap(),
-            MemoryTrustMetadata::unverified(1),
-        );
-        assert!(matches!(
-            save_governed_memory_projection(&dir.0, &original),
-            Err(GovernedMemoryProjectionError::UnknownTrustAsset(_))
-        ));
-        assert_eq!(before, fs::read(path).unwrap());
-    }
-
-    #[test]
-    fn directory_sync_failure_is_not_reported_as_success() {
-        let dir = TestDirectory::new();
-        let path = dir.0.join(GOVERNED_MEMORY_PROJECTION_FILE);
-        let result = publish_projection(&dir.0, &path, b"published", |_| {
-            Err(io::Error::other("injected directory sync failure"))
-        });
-        assert!(matches!(
-            result,
-            Err(GovernedMemoryProjectionError::Io { .. })
-        ));
-        // The rename already happened: an error must not be mistaken for rollback.
-        assert_eq!(fs::read(path).unwrap(), b"published");
-    }
-
-    #[test]
-    fn old_shared_temporary_file_is_never_overwritten() {
-        let dir = TestDirectory::new();
-        let old = dir.0.join("governed-memory.json.tmp");
-        fs::write(&old, b"unrelated existing file").unwrap();
-        save_governed_memory_projection(&dir.0, &projection()).unwrap();
-        assert_eq!(fs::read(old).unwrap(), b"unrelated existing file");
-    }
-
-    #[test]
-    fn corrupt_and_oversized_documents_fail_closed() {
-        let dir = TestDirectory::new();
-        let path = dir.0.join(GOVERNED_MEMORY_PROJECTION_FILE);
-        fs::write(&path, b"{\"version\":").unwrap();
-        assert!(load_governed_memory_projection(&dir.0, None).is_err());
-        File::create(&path)
-            .unwrap()
-            .set_len(MAX_GOVERNED_MEMORY_PROJECTION_BYTES as u64 + 1)
-            .unwrap();
-        assert!(matches!(
-            load_governed_memory_projection(&dir.0, None),
-            Err(GovernedMemoryProjectionError::Corrupt { .. })
-        ));
-    }
-
-    #[test]
-    fn unknown_fields_and_duplicate_lineage_are_rejected() {
-        let mut value = serde_json::to_value(projection().to_wire()).unwrap();
-        value["unexpected_authority"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<WireDocument>(value).is_err());
-        let mut wire = projection().to_wire();
-        wire.assets[0].evidence.push("audit:root".to_string());
-        assert!(GovernedMemoryProjection::from_wire(None, wire).is_err());
+        _ => Err(projection_corrupt("unknown memory usage mode")),
     }
 }

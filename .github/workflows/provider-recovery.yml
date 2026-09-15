@@ -1,0 +1,53 @@
+name: Governed provider recovery
+
+on:
+  pull_request:
+    paths:
+      - 'crates/ccos-enterprise-memory/**'
+      - 'crates/ccos-enterprise-octasoma/**'
+      - 'crates/ccos-enterprise-tenancy/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/provider-recovery.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/ccos-enterprise-memory/**'
+      - 'crates/ccos-enterprise-octasoma/**'
+      - 'crates/ccos-enterprise-tenancy/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/provider-recovery.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    name: Recovery tests (${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ['1.89.0', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - name: Exact toolchain and committed dependency graph
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          rustc +"$TOOLCHAIN" --version --verbose
+          cargo +"$TOOLCHAIN" metadata --locked --format-version 1 >/dev/null
+      - name: Provider reconstruction and immutable filesystem regressions
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --lib recovery::tests --locked -- --list > /tmp/recovery-tests.txt
+          grep -E '^recovery::tests::fresh_process_reconstructs_actual_provider_from_the_durable_image: test$' /tmp/recovery-tests.txt
+          cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --lib recovery::tests --locked
+          cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --doc --locked
+          git diff --exit-code -- Cargo.lock

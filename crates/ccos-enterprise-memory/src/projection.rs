@@ -9,6 +9,10 @@
 mod store;
 pub use store::{GovernedMemoryStore, GovernedMemoryStoreError};
 
+#[path = "projection_codec.rs"]
+mod codec;
+pub use codec::encode_governed_memory_projection;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -429,17 +433,7 @@ pub fn save_governed_memory_projection(
     root: &Path,
     projection: &GovernedMemoryProjection,
 ) -> Result<PathBuf, GovernedMemoryProjectionError> {
-    // Public projection fields can be changed after `new`; validate again before
-    // touching the filesystem, using exactly the same boundary as restore.
-    let checked =
-        GovernedMemoryProjection::from_wire(Some(&projection.tenant), projection.to_wire())?;
-    let bytes = serde_json::to_vec_pretty(&checked.to_wire())
-        .map_err(|error| projection_corrupt(&error.to_string()))?;
-    if bytes.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
-        return Err(projection_corrupt(
-            "projection exceeds the 16 MiB byte limit",
-        ));
-    }
+    let bytes = encode_governed_memory_projection(projection)?;
     let root = if root.as_os_str().is_empty() {
         Path::new(".")
     } else {

@@ -1,0 +1,41 @@
+name: Format accepted governed evidence once
+
+on:
+  push:
+    branches: [feat/governed-evidence-write]
+    paths: [.github/workflows/format-accepted-evidence-once.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - name: Format and qualify
+        run: |
+          set -euo pipefail
+          cargo +1.89.0 fmt --all
+          cargo +1.89.0 test -p ccos-enterprise-octasoma --test accepted_evidence_write --locked
+          cargo +1.89.0 test -p ccos-enterprise-octasoma --locked
+          cargo +1.89.0 clippy -p ccos-enterprise-octasoma --all-targets --locked -- -D warnings
+          git diff --exit-code -- Cargo.lock
+      - name: Commit formatting only
+        run: |
+          set -euo pipefail
+          git config user.name 'ZEKRITI Tarek'
+          git config user.email contact@checkupauto.fr
+          git add crates/ccos-enterprise-octasoma/src/accepted_write.rs \
+            crates/ccos-enterprise-octasoma/tests/accepted_evidence_write.rs
+          if ! git diff --cached --quiet; then
+            git commit -m 'style(memory): format accepted evidence generation tests'
+            git push origin HEAD:feat/governed-evidence-write
+          fi

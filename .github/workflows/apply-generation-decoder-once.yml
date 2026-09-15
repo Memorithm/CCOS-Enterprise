@@ -1,0 +1,106 @@
+name: Apply generation projection decoder once
+
+on:
+  push:
+    branches: [feat/provider-generation-transaction-v2]
+    paths: [.github/workflows/apply-generation-decoder-once.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - name: Add validated byte decoder
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('crates/ccos-enterprise-memory/src/projection_codec.rs')
+          text = p.read_text()
+          old = '''//! Canonical version-1 projection bytes shared by save and recovery binding.
+          use super::{
+          '''
+          new = '''//! Canonical version-1 projection bytes shared by save and recovery binding.
+          use ccos_enterprise_tenancy::TenantId;
+
+          use super::{
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('projection codec import anchor changed')
+          text = text.replace(old, new, 1)
+          addition = r'''
+
+/// Decode canonical governed-memory projection bytes through the same validating
+/// constructors used by the durable projection store.
+///
+/// This helper is intended for immutable generation artifacts. The expected
+/// tenant is independent caller input: bytes never select their own authority
+/// scope. The 16 MiB wire limit is checked before JSON decoding.
+pub fn decode_governed_memory_projection(
+    bytes: &[u8],
+    expected_tenant: &TenantId,
+) -> Result<GovernedMemoryProjection, GovernedMemoryProjectionError> {
+    if bytes.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
+        return Err(projection_corrupt(
+            "projection exceeds the 16 MiB byte limit",
+        ));
+    }
+    let document: super::WireDocument = serde_json::from_slice(bytes)
+        .map_err(|error| projection_corrupt(&error.to_string()))?;
+    GovernedMemoryProjection::from_wire(Some(expected_tenant), document)
+}
+'''
+          if 'pub fn decode_governed_memory_projection' in text:
+              raise SystemExit('projection decoder already exists')
+          p.write_text(text.rstrip() + addition + '\n')
+
+          p = Path('crates/ccos-enterprise-memory/src/projection.rs')
+          text = p.read_text()
+          old = 'pub use codec::encode_governed_memory_projection;'
+          new = 'pub use codec::{decode_governed_memory_projection, encode_governed_memory_projection};'
+          if text.count(old) != 1:
+              raise SystemExit('projection export anchor changed')
+          p.write_text(text.replace(old, new, 1))
+
+          p = Path('crates/ccos-enterprise-memory/src/lib.rs')
+          text = p.read_text()
+          old = '''pub use projection::{
+              encode_governed_memory_projection, load_governed_memory_projection,
+          '''
+          new = '''pub use projection::{
+              decode_governed_memory_projection, encode_governed_memory_projection,
+              load_governed_memory_projection,
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('memory public export anchor changed')
+          p.write_text(text.replace(old, new, 1))
+          PY
+      - name: Format and qualify
+        run: |
+          set -euo pipefail
+          cargo +1.89.0 fmt --all
+          cargo +1.89.0 test -p ccos-enterprise-memory --locked
+          cargo +1.89.0 clippy -p ccos-enterprise-memory --all-targets --locked -- -D warnings
+          git diff --exit-code -- Cargo.lock
+      - name: Commit product changes only
+        run: |
+          set -euo pipefail
+          git config user.name 'ZEKRITI Tarek'
+          git config user.email contact@checkupauto.fr
+          git add crates/ccos-enterprise-memory/src/projection_codec.rs \
+            crates/ccos-enterprise-memory/src/projection.rs \
+            crates/ccos-enterprise-memory/src/lib.rs
+          git diff --cached --quiet && exit 1
+          git commit -m 'feat(memory): decode canonical governed projection bytes'
+          git push origin HEAD:feat/provider-generation-transaction-v2

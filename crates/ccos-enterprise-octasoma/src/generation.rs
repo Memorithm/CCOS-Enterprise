@@ -339,10 +339,7 @@ impl ProviderGenerationStore {
             &governance_bytes,
         )?;
         let image_file = provider_generation_filename(generation);
-        write_new_or_verify_exact(
-            &provider_generations.join(&image_file),
-            image.as_bytes(),
-        )?;
+        write_new_or_verify_exact(&provider_generations.join(&image_file), image.as_bytes())?;
         let selector = WireSelector {
             version: GENERATION_SELECTOR_VERSION,
             tenant: tenant.as_str().to_string(),

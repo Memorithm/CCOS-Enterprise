@@ -129,7 +129,11 @@ fn accepted_evidence_advances_generation_but_stays_out_of_verified_context() {
             [0.0, 1.0],
         ))
         .unwrap();
-    assert_eq!(store.generation(), 0, "preparation must be side-effect free");
+    assert_eq!(
+        store.generation(),
+        0,
+        "preparation must be side-effect free"
+    );
 
     let (store, receipt) = store.commit_prepared_evidence(prepared).unwrap();
     assert_eq!(store.generation(), 1);

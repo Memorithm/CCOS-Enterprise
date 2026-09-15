@@ -353,6 +353,8 @@ name = "ccos-enterprise-memory"
 version = "0.1.0-pre"
 dependencies = [
  "ccos-enterprise-tenancy",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

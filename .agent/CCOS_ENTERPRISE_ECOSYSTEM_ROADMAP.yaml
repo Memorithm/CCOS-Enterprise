@@ -1,7 +1,7 @@
 schema_version: 1
 kind: ccos_enterprise_ecosystem_agent_roadmap
 status: active
-last_updated: "2026-08-31"
+last_updated: "2026-09-15"
 repository: Memorithm/CCOS-Enterprise
 intended_consumer: autonomous_coding_agent
 merge_policy: never_merge_this_file_to_default_branch_unless_user_explicitly_requests
@@ -106,6 +106,27 @@ roadmap:
       - semver_migrations_and_Core_compatibility_matrix
       - operational_recovery_and_rotation_guides
       - security_regression_and_admission_benchmarks_with_scoped_claims
+
+reviewed_core_slices:
+  - id: BEIR_IMPORT_2026_09_15
+    upstream_repository: Memorithm/CCOS-Core
+    upstream_pr: 26
+    reviewed_commit: d5b564eac008321d53db711276d0781ee8cc8a79
+    upstream_merge_commit: cb3d6987e2b1ea19ac2c0508a5a8635ec242f3f0
+    upstream_acceptance_date: "2026-09-15"
+    upstream_successful_runs: [34935825978, 34935825994, 34935826014]
+    enterprise_tracking_issue: 149
+    scope:
+      - examples/beir_eval.rs
+      - examples/support/beir_import.rs
+      - docs/BEIR_IMPORT_CONTRACT.md
+    consumer_provenance_file: core/UPSTREAM_CCOS_BEIR.json
+    consumer_gate: source_hashes_and_applicable_CI_must_pass_on_exact_Enterprise_candidate
+    whole_Core_sync: false
+    limitations:
+      - retrieval_input_integrity_not_new_quality_results
+      - does_not_close_served_memory_issues_135_or_136
+      - existing_licensing_only_lineage_marker_is_not_a_full_functional_Core_sync
 
 agent_operating_protocol:
   must_read_this_file:

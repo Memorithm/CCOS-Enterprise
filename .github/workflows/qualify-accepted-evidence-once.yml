@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
-      - name: Retain validated recovery source rows for generation advancement
+      - name: Ensure recovery rows are retained for generation advancement
         shell: bash
         run: |
           set -euo pipefail
@@ -29,34 +29,33 @@ jobs:
 
           p = Path('crates/ccos-enterprise-octasoma/src/lib.rs')
           text = p.read_text()
-          anchor = 'pub mod recovery;\n'
-          addition = 'pub mod accepted_write;\n'
-          if addition not in text:
+          if 'pub mod accepted_write;\n' not in text:
+              anchor = 'pub mod recovery;\n'
               if text.count(anchor) != 1:
                   raise SystemExit('octasoma module anchor changed')
-              text = text.replace(anchor, anchor + addition, 1)
+              text = text.replace(anchor, anchor + 'pub mod accepted_write;\n', 1)
           p.write_text(text)
 
           p = Path('crates/ccos-enterprise-octasoma/src/recovery.rs')
           text = p.read_text()
-          old = 'pub struct RecoveredGovernedMemory {\n    provider: EnterpriseOctaSoma,\n    authority: GovernedMemoryProjection,\n    canonical_governance: Vec<u8>,\n    digest: [u8; 32],\n}'
-          new = 'pub struct RecoveredGovernedMemory {\n    provider: EnterpriseOctaSoma,\n    authority: GovernedMemoryProjection,\n    canonical_governance: Vec<u8>,\n    digest: [u8; 32],\n    records: Vec<RecoveryRecord>,\n}'
-          if text.count(old) != 1:
-              raise SystemExit('recovered memory struct anchor changed')
-          text = text.replace(old, new, 1)
-
-          anchor = '    pub fn stored_records(&self) -> usize {\n        self.provider.tenant_len(&self.authority.tenant)\n    }\n'
-          addition = '\n    /// Exact validated source rows reconstructed from the immutable recovery image.\n    /// Kept crate-private so generation publication can derive a complete next input\n    /// population without exposing an arbitrary live-index export API.\n    pub(crate) fn source_records(&self) -> &[RecoveryRecord] {\n        &self.records\n    }\n'
+          if '    records: Vec<RecoveryRecord>,\n' not in text:
+              old = 'pub struct RecoveredGovernedMemory {\n    provider: EnterpriseOctaSoma,\n    authority: GovernedMemoryProjection,\n    canonical_governance: Vec<u8>,\n    digest: [u8; 32],\n}'
+              new = 'pub struct RecoveredGovernedMemory {\n    provider: EnterpriseOctaSoma,\n    authority: GovernedMemoryProjection,\n    canonical_governance: Vec<u8>,\n    digest: [u8; 32],\n    records: Vec<RecoveryRecord>,\n}'
+              if text.count(old) != 1:
+                  raise SystemExit('recovered memory struct anchor changed')
+              text = text.replace(old, new, 1)
           if 'pub(crate) fn source_records' not in text:
+              anchor = '    pub fn stored_records(&self) -> usize {\n        self.provider.tenant_len(&self.authority.tenant)\n    }\n'
+              addition = '\n    /// Exact validated source rows reconstructed from the immutable recovery image.\n    /// Kept crate-private so generation publication can derive a complete next input\n    /// population without exposing an arbitrary live-index export API.\n    pub(crate) fn source_records(&self) -> &[RecoveryRecord] {\n        &self.records\n    }\n'
               if text.count(anchor) != 1:
                   raise SystemExit('stored_records anchor changed')
               text = text.replace(anchor, anchor + addition, 1)
-
-          old = '    Ok(RecoveredGovernedMemory {\n        provider,\n        authority: authority.clone(),\n        canonical_governance,\n        digest,\n    })'
-          new = '    Ok(RecoveredGovernedMemory {\n        provider,\n        authority: authority.clone(),\n        canonical_governance,\n        digest,\n        records,\n    })'
-          if text.count(old) != 1:
-              raise SystemExit('recovered construction anchor changed')
-          text = text.replace(old, new, 1)
+          if '        records,\n    })' not in text:
+              old = '    Ok(RecoveredGovernedMemory {\n        provider,\n        authority: authority.clone(),\n        canonical_governance,\n        digest,\n    })'
+              new = '    Ok(RecoveredGovernedMemory {\n        provider,\n        authority: authority.clone(),\n        canonical_governance,\n        digest,\n        records,\n    })'
+              if text.count(old) != 1:
+                  raise SystemExit('recovered construction anchor changed')
+              text = text.replace(old, new, 1)
           p.write_text(text)
           PY
       - name: Format and qualify adapter primitive

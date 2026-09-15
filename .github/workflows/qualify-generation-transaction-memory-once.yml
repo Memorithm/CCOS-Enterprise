@@ -1,0 +1,26 @@
+name: Qualify generation transaction memory decoder once
+
+on:
+  push:
+    branches: [feat/provider-generation-transaction]
+    paths: [.github/workflows/qualify-generation-transaction-memory-once.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - name: Validate decoder surface
+        run: |
+          set -euo pipefail
+          cargo +1.89.0 fmt --all -- --check
+          cargo +1.89.0 test -p ccos-enterprise-memory --locked
+          cargo +1.89.0 clippy -p ccos-enterprise-memory --all-targets --locked -- -D warnings
+          git diff --exit-code -- Cargo.lock

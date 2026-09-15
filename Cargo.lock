@@ -334,6 +334,7 @@ dependencies = [
  "ccos-enterprise-execution",
  "ccos-enterprise-gateway",
  "ccos-enterprise-memory",
+ "ccos-enterprise-octasoma",
  "ccos-enterprise-qpages",
  "ccos-enterprise-rbac",
  "ccos-enterprise-runtime",

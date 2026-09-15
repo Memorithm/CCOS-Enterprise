@@ -49,10 +49,8 @@ fn authority() -> GovernedMemoryProjection {
                     id(name),
                     MemorySpace::Tenant,
                     MemoryStratum::Evidence,
-                    MemoryLineage::root([
-                        MemoryEvidenceRef::new(format!("audit:{name}")).unwrap(),
-                    ])
-                    .unwrap(),
+                    MemoryLineage::root([MemoryEvidenceRef::new(format!("audit:{name}")).unwrap()])
+                        .unwrap(),
                 )
                 .unwrap(),
             )
@@ -119,7 +117,10 @@ struct ServerProcess {
 impl ServerProcess {
     fn spawn(state: &Path, provider: &Path, token: &str, public_key: &[u8; 32]) -> Self {
         let binary = env!("CARGO_BIN_EXE_ccos-enterprise-mcp-server");
-        let public_hex: String = public_key.iter().map(|byte| format!("{byte:02x}")).collect();
+        let public_hex: String = public_key
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let mut child = Command::new(binary)
             .env("CCOS_ENTERPRISE_AUDIENCE", "context-test")
             .env("CCOS_ENTERPRISE_ISSUER_KID", "test-key")
@@ -138,7 +139,11 @@ impl ServerProcess {
             .unwrap();
         let input = child.stdin.take().unwrap();
         let output = BufReader::new(child.stdout.take().unwrap());
-        Self { child, input, output }
+        Self {
+            child,
+            input,
+            output,
+        }
     }
 
     fn request(&mut self, value: Value) -> Value {
@@ -146,14 +151,20 @@ impl ServerProcess {
         self.input.flush().unwrap();
         let mut line = String::new();
         self.output.read_line(&mut line).unwrap();
-        assert!(!line.is_empty(), "server exited before producing a response");
+        assert!(
+            !line.is_empty(),
+            "server exited before producing a response"
+        );
         serde_json::from_str(&line).unwrap()
     }
 
     fn stop(mut self) {
         let _ = self.child.kill();
         let status = self.child.wait().unwrap();
-        assert!(!status.success(), "kill is expected to terminate the test server");
+        assert!(
+            !status.success(),
+            "kill is expected to terminate the test server"
+        );
     }
 }
 
@@ -199,7 +210,10 @@ fn assert_context(response: &Value) {
     assert_eq!(items.len(), 1, "{structured}");
     assert_eq!(items[0]["asset_id"], "active");
     assert_eq!(items[0]["space"], "tenant");
-    assert_eq!(items[0]["payload_bytes"], json!([97, 99, 116, 105, 118, 101]));
+    assert_eq!(
+        items[0]["payload_bytes"],
+        json!([97, 99, 116, 105, 118, 101])
+    );
 }
 
 #[test]
@@ -214,7 +228,8 @@ fn real_stdio_serves_only_verified_active_context_and_recovers_after_process_dea
         seed: 42,
     };
     let store =
-        ProviderGenerationStore::initialize(&provider_root, authority(), config, &records()).unwrap();
+        ProviderGenerationStore::initialize(&provider_root, authority(), config, &records())
+            .unwrap();
     drop(store);
 
     let signing = SigningKey::from_bytes(&[9u8; 32]);

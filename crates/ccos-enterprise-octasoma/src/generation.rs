@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::recovery::{
-    restore_governed_memory, RecoveredGovernedMemory, RecoveryConfig, RecoveryError,
-    RecoveryImage, RecoveryRecord,
+    restore_governed_memory, RecoveredGovernedMemory, RecoveryConfig, RecoveryError, RecoveryImage,
+    RecoveryRecord,
 };
 
 pub const GENERATION_SELECTOR_VERSION: u32 = 1;
@@ -293,7 +293,9 @@ fn acquire_lock(root: &Path) -> Result<File, ProviderGenerationError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let lock = options.open(&path).map_err(|source| io_error(&path, source))?;
+    let lock = options
+        .open(&path)
+        .map_err(|source| io_error(&path, source))?;
     lock.try_lock().map_err(|error| match error {
         TryLockError::WouldBlock => ProviderGenerationError::AlreadyOpen { path },
         TryLockError::Error(source) => io_error(&path, source),
@@ -302,7 +304,7 @@ fn acquire_lock(root: &Path) -> Result<File, ProviderGenerationError> {
 }
 
 fn read_selector(path: &Path) -> Result<WireSelector, ProviderGenerationError> {
-    let mut file = match File::open(path) {
+    let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(ProviderGenerationError::MissingSelector {
@@ -377,7 +379,9 @@ fn publish_selector(root: &Path, selector: &WireSelector) -> Result<(), Provider
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&temp).map_err(|source| io_error(&temp, source))?;
+    let mut file = options
+        .open(&temp)
+        .map_err(|source| io_error(&temp, source))?;
     let temporary = TemporarySelector(temp);
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())

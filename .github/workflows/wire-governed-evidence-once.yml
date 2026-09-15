@@ -65,6 +65,14 @@ jobs:
           ])
           replace_once(old, new, 'effect receipt defaults')
 
+          old = '                skill_source_sha256: None,\n                output_sha256: Some("skill-output".into()),\n            };'
+          new = '                skill_source_sha256: None,\n                output_sha256: Some("skill-output".into()),\n                governed_generation: None,\n                governed_asset_id: None,\n                governed_image_sha256: None,\n            };'
+          replace_once(old, new, 'skill crash fixture')
+
+          old = '                skill_source_sha256: None,\n                output_sha256: Some("known-output".into()),\n            };'
+          new = '                skill_source_sha256: None,\n                output_sha256: Some("known-output".into()),\n                governed_generation: None,\n                governed_asset_id: None,\n                governed_image_sha256: None,\n            };'
+          replace_once(old, new, 'recovered success fixture')
+
           old = '        if config.governed_memory_root.is_some() {\n            ccos_enterprise_mcp::govern_governed_context(&mut deployment);\n        }\n'
           new = '        if config.governed_memory_root.is_some() {\n            ccos_enterprise_mcp::govern_governed_context(&mut deployment);\n            ccos_enterprise_mcp::govern_governed_evidence_write(&mut deployment);\n        }\n'
           count = text.count(old)

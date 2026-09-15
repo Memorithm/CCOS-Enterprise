@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod accepted_write;
 pub mod generation;
 pub mod recovery;
 

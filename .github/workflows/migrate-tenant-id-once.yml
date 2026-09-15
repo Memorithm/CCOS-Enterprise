@@ -1,0 +1,90 @@
+name: Migrate validated TenantId boundary once
+
+on:
+  push:
+    branches: [fix/validated-tenant-id-boundary]
+    paths: [.github/workflows/migrate-tenant-id-once.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - name: Apply mechanical TenantId migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          roots = [Path('crates'), Path('tests'), Path('tools')]
+          files = [p for root in roots if root.exists() for p in root.rglob('*.rs')]
+
+          literal_into = re.compile(r'\bTenantId\(\s*("(?:\\.|[^"\\])*")\s*\.into\(\)\s*\)')
+          literal_string = re.compile(r'\bTenantId\(\s*("(?:\\.|[^"\\])*")\s*\.to_string\(\)\s*\)')
+
+          replacements = [
+              ('.tenant.0.as_str()', '.tenant.as_str()'),
+              ('.tenant.0.as_bytes()', '.tenant.as_str().as_bytes()'),
+              ('.tenant.0.clone()', '.tenant.as_str().to_string()'),
+              ('.tenant().0.as_str()', '.tenant().as_str()'),
+              ('.tenant().0.as_bytes()', '.tenant().as_str().as_bytes()'),
+              ('.tenant().0.clone()', '.tenant().as_str().to_string()'),
+          ]
+
+          changed = []
+          for path in files:
+              text = path.read_text()
+              original = text
+              text = literal_into.sub(r'TenantId::validated(\1).unwrap()', text)
+              text = literal_string.sub(r'TenantId::validated(\1).unwrap()', text)
+              for old, new in replacements:
+                  text = text.replace(old, new)
+              # Borrowed String-field accesses in validation/hash call sites.
+              text = re.sub(r'&([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\(\))*)\.tenant\.0\b', r'\1.tenant.as_str()', text)
+              text = re.sub(r'&([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\(\))*)\.tenant\(\)\.0\b', r'\1.tenant().as_str()', text)
+              if text != original:
+                  path.write_text(text)
+                  changed.append(str(path))
+          print('\n'.join(changed))
+          PY
+          cargo +1.89.0 fmt --all
+      - name: Compile every Enterprise target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.89.0 check --workspace --all-targets --all-features --locked
+          git diff --exit-code -- Cargo.lock
+      - name: Qualify tenancy and workspace lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.89.0 test -p ccos-enterprise-tenancy --locked
+          cargo +1.89.0 clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --all-targets --locked -- -D warnings
+          git diff --exit-code -- Cargo.lock
+      - name: Commit product migration only
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=$(git diff --name-only | grep -Ev '^(crates|tests|tools)/.*\.rs$' || true)
+          if [ -n "$bad" ]; then
+            printf 'unexpected changed paths:\n%s\n' "$bad" >&2
+            exit 1
+          fi
+          git config user.name 'ZEKRITI Tarek'
+          git config user.email contact@checkupauto.fr
+          git add crates tests tools
+          git diff --cached --quiet && exit 1
+          git commit -m 'fix(tenancy): enforce validated TenantId construction'
+          git push origin HEAD:fix/validated-tenant-id-boundary

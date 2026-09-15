@@ -1,0 +1,123 @@
+name: Qualify scoped Core BEIR synchronization
+
+on:
+  push:
+    branches: [audit/sync-strict-beir-core]
+    paths: [.github/workflows/sync-beir-once.yml]
+
+permissions:
+  contents: write
+
+env:
+  BEIR_SOURCE_COMMIT: d5b564eac008321d53db711276d0781ee8cc8a79
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Checkout exact upstream benchmark revision
+        uses: actions/checkout@v4
+        with:
+          repository: Memorithm/CCOS-Core
+          ref: d5b564eac008321d53db711276d0781ee8cc8a79
+          path: .upstream-beir
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Copy only the reviewed benchmark slice and record provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C .upstream-beir rev-parse HEAD)" = "$BEIR_SOURCE_COMMIT"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          source = Path('.upstream-beir')
+          mappings = {
+              'examples/beir_eval.rs': 'core/examples/beir_eval.rs',
+              'examples/support/beir_import.rs': 'core/examples/support/beir_import.rs',
+              'docs/BEIR_IMPORT_CONTRACT.md': 'core/docs/BEIR_IMPORT_CONTRACT.md',
+          }
+          rows = []
+          for old, new in mappings.items():
+              data = (source / old).read_bytes()
+              target = Path(new)
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+              rows.append({
+                  'source': old, 'target': new,
+                  'sha256': hashlib.sha256(data).hexdigest(),
+                  'git_blob': subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD:' + old], text=True).strip(),
+              })
+          marker = {
+              'schema_version': 1,
+              'repository': 'Memorithm/CCOS-Core',
+              'commit': os.environ['BEIR_SOURCE_COMMIT'],
+              'scope': 'BEIR import and benchmark only; not a complete Core synchronization',
+              'upstream_pr': 26,
+              'enterprise_issue': 149,
+              'files': rows,
+          }
+          Path('core/UPSTREAM_CCOS_BEIR.json').write_text(json.dumps(marker, indent=2) + '\n', encoding='utf-8')
+          workflow = (source / '.github/workflows/beir-import.yml').read_text()
+          anchor = '      - name: Parser regressions and lint\n'
+          check = '''      - name: Verify scoped BEIR source provenance
+                  run: |
+                    python3 - <<'PYLINEAGE'
+                    import hashlib
+                    import json
+                    from pathlib import Path
+                    marker = json.loads(Path('core/UPSTREAM_CCOS_BEIR.json').read_text())
+                    assert marker['schema_version'] == 1
+                    assert marker['repository'] == 'Memorithm/CCOS-Core'
+                    expected = {
+                        'examples/beir_eval.rs': 'core/examples/beir_eval.rs',
+                        'examples/support/beir_import.rs': 'core/examples/support/beir_import.rs',
+                        'docs/BEIR_IMPORT_CONTRACT.md': 'core/docs/BEIR_IMPORT_CONTRACT.md',
+                    }
+                    assert {row['source']: row['target'] for row in marker['files']} == expected
+                    assert len(marker['files']) == len(expected)
+                    for row in marker['files']:
+                        actual = hashlib.sha256(Path(row['target']).read_bytes()).hexdigest()
+                        assert actual == row['sha256'], row['target']
+                    print('BEIR source hashes match the scoped upstream provenance')
+                    PYLINEAGE
+          '''
+          # Remove the extra indentation used inside this Python string literal.
+          check = '\n'.join(line[8:] if line.startswith('        ') else line for line in check.splitlines()) + '\n'
+          if workflow.count(anchor) != 1:
+              raise SystemExit('upstream CI anchor changed')
+          Path('.github/workflows/beir-import.yml').write_text(workflow.replace(anchor, check + anchor, 1))
+          PY
+      - name: Validate source compatibility in the Enterprise workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test -p ccos-core --example beir_eval --locked
+          cargo clippy -p ccos-core --example beir_eval --locked -- -D warnings
+          cargo test -p ccos-core --features llm --lib eval::tests --locked -- --list > /tmp/ccos-eval-tests.txt
+          grep -E '^eval::tests::.*: test$' /tmp/ccos-eval-tests.txt
+          cargo test -p ccos-core --features llm --lib eval::tests --locked
+      - name: Commit only the validated synchronization
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ZEKRITI Tarek'
+          git config user.email contact@checkupauto.fr
+          git add core/examples/beir_eval.rs core/examples/support/beir_import.rs \
+            core/docs/BEIR_IMPORT_CONTRACT.md core/UPSTREAM_CCOS_BEIR.json \
+            .github/workflows/beir-import.yml
+          git diff --cached --quiet && exit 1
+          git commit -m 'fix(eval): sync strict BEIR imports from qualified CCOS-Core source'
+          git push origin HEAD:audit/sync-strict-beir-core

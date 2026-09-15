@@ -196,17 +196,35 @@ impl KnowledgeStore {
         self.state.next_sequence()
     }
 
+    /// Read and replay the journal without creating it.
+    ///
+    /// Only `NotFound` from opening the journal produces an empty state.
+    /// Other open/read errors preserve their path and I/O cause. A torn
+    /// final record is reported, not repaired by this read-only method.
+    /// Use `open` to acquire writer ownership and repair the tail.
+    ///
+    /// ```no_run
+    /// use ccos_enterprise_knowledge_store::KnowledgeStore;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let loaded = KnowledgeStore::load("/srv/ccos/acme/knowledge")?;
+    /// println!("{} complete records; {} tail bytes", loaded.entries.len(), loaded.torn_tail);
+    /// # Ok(()) }
+    /// ```
     pub fn load(root: impl AsRef<Path>) -> Result<Loaded, StoreError> {
         let journal_path = root.as_ref().join(JOURNAL_FILE);
-        if !journal_path.exists() {
-            return Ok(Loaded {
-                entries: Vec::new(),
-                state: KnowledgeState::new(),
-                torn_tail: 0,
-            });
-        }
-
-        let mut file = File::open(&journal_path).map_err(io(&journal_path))?;
+        // Attempt the read itself: exists() would hide metadata/access
+        // failures as absence and add a separate check/use window.
+        let mut file = match File::open(&journal_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Loaded {
+                    entries: Vec::new(),
+                    state: KnowledgeState::new(),
+                    torn_tail: 0,
+                });
+            }
+            Err(error) => return Err(io(&journal_path)(error)),
+        };
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(io(&journal_path))?;
         let (complete, torn_tail) = complete_prefix(&bytes);

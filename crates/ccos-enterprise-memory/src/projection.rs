@@ -5,6 +5,10 @@
 //! changes externally; atomic file replacement is not a multi-writer transaction
 //! or protection against restoring an older, otherwise valid snapshot.
 
+#[path = "projection_store.rs"]
+mod store;
+pub use store::{GovernedMemoryStore, GovernedMemoryStoreError};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};

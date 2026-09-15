@@ -148,9 +148,10 @@ reviewed_governance_slices:
       - admitted_request_identity_before_stored_context_assembly
       - explicit_reconciliation_and_reopen_after_publication_errors
     remaining_issues: [135, 136]
+    subsequent_provider_slice: PROVIDER_RECOVERY_2026_09_15
     not_yet_delivered:
-      - durable_provider_payload_embedding_and_configuration_reconstruction
-      - provider_generation_binding_to_the_governance_snapshot
+      - authoritative_capture_of_provider_inputs_from_accepted_writes
+      - trusted_receipt_persistence_and_atomic_provider_governance_generation_selection
       - real_stdio_tool_route_and_request_effect_quota_audit_settlement
       - process_death_and_full_protocol_restart_qualification
     limitations:
@@ -158,6 +159,53 @@ reviewed_governance_slices:
       - not_distributed_consistency_or_anti_rollback_protection
       - no_physical_power_cut_or_forced_termination_result
       - no_Core_backflow_or_SoulSystem_authorization_bypass
+
+reviewed_provider_recovery_slices:
+  - id: PROVIDER_RECOVERY_2026_09_15
+    status: merged
+    pr: 154
+    reviewed_commit: 780aa7cc762350d3a1646fdc590de9299575513c
+    merge_commit: f3e2d4061b8eb167ea21a00fa4936edecf18801a
+    accepted_runs: [34957325530, 34957325545, 34957325513, 34957325527, 34957325604, 34957325531]
+    preparation_run: 34957068674
+    contract: docs/GOVERNED_PROVIDER_RECOVERY_CONTRACT.md
+    adapter_revision: 2e2e0f1ed88d81675f301819529aeb3aa6053c72
+    delivers:
+      - bounded_immutable_recovery_images_from_complete_ordered_source_records
+      - exact_finite_f32_bits_payloads_config_and_logical_forget_markers
+      - image_digest_binding_to_exact_canonical_current_governance
+      - independently_supplied_expected_receipt_and_configuration_on_restore
+      - fresh_real_EnterpriseOctaSoma_reconstruction_through_existing_adapter_methods
+      - tenant_loadout_and_current_governance_checks_before_recovered_recall
+      - preserved_lineage_trust_filtering_and_forgotten_capacity_accounting
+      - permanent_Rust_1_89_and_stable_tests_with_actual_child_process_reconstruction
+    caller_requirements:
+      - complete_authoritative_input_population_and_original_insertion_order
+      - current_projection_from_acknowledged_governance_owner
+      - authenticated_admitted_tenant_before_adapter_access
+      - trusted_expected_image_receipt_and_configuration_not_snapshot_defaults
+      - no_generation_pointer_advance_after_uncertain_file_publication
+      - explicitly_selected_bootstrap_or_on_demand_loadout
+    remaining_issues: [135, 136]
+    not_yet_delivered:
+      - accepted_write_input_capture_and_live_index_export
+      - trusted_receipt_configuration_persistence_and_atomic_generation_selection
+      - actual_stdio_request_effect_execution_quota_and_audit_settlement
+      - real_protocol_restart_and_process_death_qualification
+    limitations:
+      - normal_fresh_process_reconstruction_is_not_forced_termination_or_power_loss
+      - checksum_is_not_authentication_anti_rollback_or_truth
+      - plaintext_provider_images_are_not_encryption_or_physical_purge
+      - input_limits_do_not_bound_all_heap_allocations_or_latency
+      - no_new_retrieval_quality_or_scale_result
+      - no_Core_source_change_or_external_dependency_version_update
+    related_consumer_review:
+      repository: Memorithm/SoulSystem
+      reviewed_commit: 9c1e8f6b5997f7414ebf2be9313ee54901073f4c
+      path: soul-bridge/src/ccos.rs
+      observation: existing_MCP_client_does_not_itself_implement_Enterprise_recovery
+      integration_rule: retain_recovery_and_authority_ownership_in_the_Enterprise_service
+      consumer_code_changed: false
 
 agent_operating_protocol:
   must_read_this_file:

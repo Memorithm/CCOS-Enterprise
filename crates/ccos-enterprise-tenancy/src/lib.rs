@@ -5,11 +5,14 @@
 //! slice: tenant-scoped namespacing that makes cross-tenant access a type
 //! error, not a convention.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// A tenant boundary. Memory, quotas, policies and audit are scoped to it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct TenantId(pub String);
+/// A validated tenant boundary. Memory, quotas, policies and audit are scoped to it.
+///
+/// The inner string is deliberately private: every Rust construction path and
+/// every deserialization path must cross the same canonical identifier rule.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+pub struct TenantId(String);
 
 impl TenantId {
     /// Construct a tenant id only if it is one this product will carry:
@@ -19,10 +22,8 @@ impl TenantId {
     /// The rule is restated here rather than imported from the runtime because
     /// tenancy is the lower crate and a dependency cycle is not worth the
     /// reuse — the same discipline `ccos_enterprise_auth` applies to
-    /// identities. A confusable or path-unsafe tenant id is at its most
-    /// expensive at construction, before it can name a store, a path or an
-    /// audit row; the raw tuple constructor remains for state read back from
-    /// a validated snapshot, where the restore path has already checked it.
+    /// identities. A confusable or path-unsafe tenant id is rejected before it
+    /// can name a store, a path, an authorization scope or an audit row.
     pub fn validated(id: &str) -> Option<Self> {
         let mut bytes = id.bytes();
         let first = bytes.next()?;
@@ -33,14 +34,26 @@ impl TenantId {
         ok.then(|| Self(id.to_string()))
     }
 
-    /// Validating constructor. Prefer this over the tuple constructor except
-    /// when reading back a snapshot that already passed restore checks.
+    /// Validating constructor for owned or borrowed string-like inputs.
     pub fn new(id: impl AsRef<str>) -> Option<Self> {
         Self::validated(id.as_ref())
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Serialized tenant ids are plain strings for wire compatibility, but decode
+/// is validating. A persisted or network-supplied invalid tenant therefore
+/// cannot bypass the constructor by using Serde directly.
+impl<'de> Deserialize<'de> for TenantId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::validated(&raw).ok_or_else(|| serde::de::Error::custom("invalid tenant id"))
     }
 }
 
@@ -85,12 +98,16 @@ impl<T> TenantScope<T> {
 mod tests {
     use super::*;
 
+    fn tenant(value: &str) -> TenantId {
+        TenantId::validated(value).unwrap()
+    }
+
     #[test]
     fn scopes_are_distinct() {
-        let a = TenantScope::new(TenantId("acme".into()), "memory-root");
-        let b = TenantScope::new(TenantId("globex".into()), "memory-root");
+        let a = TenantScope::new(tenant("acme"), "memory-root");
+        let b = TenantScope::new(tenant("globex"), "memory-root");
         assert_ne!(a.tenant, b.tenant, "same inner key, different tenants");
-        let c = a.clone().rescope(TenantId("globex".into()));
+        let c = a.clone().rescope(tenant("globex"));
         assert_eq!(
             c.tenant, b.tenant,
             "explicit rescope is visible in the type"
@@ -118,5 +135,23 @@ mod tests {
                 "{bad:?} must not become a tenant id"
             );
         }
+    }
+
+    #[test]
+    fn serde_cannot_bypass_validation() {
+        let tenant = tenant("acme");
+        let encoded = serde_json::to_string(&tenant).unwrap();
+        assert_eq!(encoded, "\"acme\"");
+        assert_eq!(serde_json::from_str::<TenantId>(&encoded).unwrap(), tenant);
+
+        for invalid in ["\"\"", "\"../acme\"", "\"Acme\"", "\"acmé\""] {
+            assert!(serde_json::from_str::<TenantId>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn nested_scope_deserialization_validates_tenant() {
+        let invalid = r#"{"tenant":"../acme","inner":"memory-root"}"#;
+        assert!(serde_json::from_str::<TenantScope<String>>(invalid).is_err());
     }
 }

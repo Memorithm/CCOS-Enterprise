@@ -59,7 +59,8 @@ pub use decision::{
     NoDecisionBackend,
 };
 pub use served_context::{
-    assemble_attested_served_context, assemble_served_governed_context, ServedContextError,
+    assemble_attested_served_context, assemble_served_governed_context,
+    assemble_stored_governed_context, ServedContextError,
 };
 pub use server::{govern_catalogue, AdvertisedTool, Backend, GovernedMcp, McpOutcome};
 pub use skill_audit::{

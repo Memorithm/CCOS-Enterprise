@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
-      - name: Normalize known test helper
+      - name: Repair legacy digest fixture and format
         shell: bash
         run: |
           set -euo pipefail
@@ -28,10 +28,28 @@ jobs:
           from pathlib import Path
           p = Path('crates/ccos-enterprise-octasoma/tests/generation_selector.rs')
           text = p.read_text()
-          old = '"image_sha256": image.digest().iter().map(|byte| format!("{byte:02x}")).collect::<String>(),'
-          new = '"image_sha256": hex(&image.digest()),'
-          if old in text:
-              text = text.replace(old, new, 1)
+          old_helper = '''fn hex(bytes: &[u8]) -> String {
+              let digest = Sha256::digest(bytes);
+              digest.iter().map(|byte| format!("{byte:02x}")).collect()
+          }'''
+          new_helper = '''fn raw_hex(bytes: &[u8]) -> String {
+              bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+          }
+
+          fn sha256_hex(bytes: &[u8]) -> String {
+              raw_hex(&Sha256::digest(bytes))
+          }'''
+          if old_helper not in text:
+              raise SystemExit('legacy digest helper anchor changed')
+          text = text.replace(old_helper, new_helper, 1)
+          old_image = '"image_sha256": image.digest().iter().map(|byte| format!("{byte:02x}")).collect::<String>(),'
+          if old_image not in text:
+              raise SystemExit('legacy image digest fixture anchor changed')
+          text = text.replace(old_image, '"image_sha256": raw_hex(&image.digest()),', 1)
+          old_governance = '"governance_sha256": hex(&governance_bytes),'
+          if old_governance not in text:
+              raise SystemExit('legacy governance digest fixture anchor changed')
+          text = text.replace(old_governance, '"governance_sha256": sha256_hex(&governance_bytes),', 1)
           p.write_text(text)
           PY
           cargo +1.89.0 fmt --all
@@ -52,7 +70,7 @@ jobs:
           cargo +1.89.0 test -p ccos-enterprise-mcp --test governed_context_stdio --locked
           cargo +1.89.0 clippy -p ccos-enterprise-mcp --all-targets --locked -- -D warnings
           git diff --exit-code -- Cargo.lock
-      - name: Commit product formatting only
+      - name: Commit product formatting and fixture repair
         run: |
           set -euo pipefail
           git config user.name 'ZEKRITI Tarek'

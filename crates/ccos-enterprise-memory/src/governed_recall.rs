@@ -84,9 +84,12 @@ pub fn admit_governed_recall(
 ) -> Result<Vec<GovernedMemoryObservation>, GovernedRecallGateError> {
     let mut admitted = Vec::new();
     for observation in observations {
-        let descriptor = gate.graph.descriptor(&observation.asset_id).ok_or_else(|| {
-            GovernedRecallGateError::ProviderReturnedUnknownAsset(observation.asset_id.clone())
-        })?;
+        let descriptor = gate
+            .graph
+            .descriptor(&observation.asset_id)
+            .ok_or_else(|| {
+                GovernedRecallGateError::ProviderReturnedUnknownAsset(observation.asset_id.clone())
+            })?;
         if descriptor.space != observation.space {
             return Err(GovernedRecallGateError::ProviderReturnedMismatchedSpace {
                 asset_id: observation.asset_id,

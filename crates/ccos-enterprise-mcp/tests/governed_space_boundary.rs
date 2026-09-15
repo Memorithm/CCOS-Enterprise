@@ -40,20 +40,19 @@ fn projection(include_private: bool) -> GovernedMemoryProjection {
                 id(),
                 private_space(),
                 MemoryStratum::Evidence,
-                MemoryLineage::root([MemoryEvidenceRef::new("audit:private").unwrap()])
-                    .unwrap(),
+                MemoryLineage::root([MemoryEvidenceRef::new("audit:private").unwrap()]).unwrap(),
             )
             .unwrap(),
         )
         .unwrap();
-    let mut bindings = vec![
-        MemoryLoadoutBinding::new(MemorySpace::Tenant, 100, MemoryUsageMode::Bootstrap)
-            .unwrap(),
-    ];
+    let mut bindings =
+        vec![
+            MemoryLoadoutBinding::new(MemorySpace::Tenant, 100, MemoryUsageMode::Bootstrap)
+                .unwrap(),
+        ];
     if include_private {
         bindings.push(
-            MemoryLoadoutBinding::new(private_space(), 80, MemoryUsageMode::Bootstrap)
-                .unwrap(),
+            MemoryLoadoutBinding::new(private_space(), 80, MemoryUsageMode::Bootstrap).unwrap(),
         );
     }
     GovernedMemoryProjection::new(
@@ -174,7 +173,10 @@ fn gate_returns_no_partial_prefix_after_a_later_mismatch() {
     assert_eq!(
         admit_governed_recall(
             gate(&projection),
-            [observation(private_space()), observation(MemorySpace::Tenant)],
+            [
+                observation(private_space()),
+                observation(MemorySpace::Tenant)
+            ],
         ),
         Err(mismatch())
     );

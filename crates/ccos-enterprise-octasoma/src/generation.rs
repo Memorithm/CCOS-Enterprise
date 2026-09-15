@@ -205,6 +205,11 @@ impl ProviderGenerationStore {
     }
 
     /// Open exactly the generation named by the trusted local selector.
+    ///
+    /// Before serving any visible selector, reopen synchronizes both the selector
+    /// file and its containing directory. This closes an uncertain-publication
+    /// window where a rename was visible but the directory sync previously failed:
+    /// reopen either establishes durability or fails without returning an owner.
     pub fn open(
         root: impl AsRef<Path>,
         expected_tenant: TenantId,
@@ -213,6 +218,7 @@ impl ProviderGenerationStore {
         let requested = root.as_ref();
         let root = fs::canonicalize(requested).map_err(|source| io_error(requested, source))?;
         let lock = acquire_lock(&root)?;
+        sync_visible_selector(&root)?;
         let selector = read_selector(&root.join(PROVIDER_SELECTOR_FILE))?;
         validate_selector(&selector, &expected_tenant)?;
         match selector.version {
@@ -301,10 +307,11 @@ impl ProviderGenerationStore {
     ///
     /// The receiver is consumed. If any step fails, this owner is dropped and
     /// the caller must reopen the selector explicitly. Provider/governance files
-    /// are immutable and may remain as inert orphans when publication stops
-    /// before the selector replacement. The selector replacement itself is one
-    /// filesystem rename followed by directory sync; no power-loss, anti-rollback
-    /// or distributed-transaction guarantee is claimed.
+    /// are immutable. A retry may reuse an orphan only when its bytes exactly
+    /// match the generation that is being retried; any collision with different
+    /// bytes fails closed. The selector replacement itself is one filesystem
+    /// rename followed by directory sync; no anti-rollback, distributed-
+    /// transaction, or broad physical power-loss guarantee is claimed.
     pub fn advance(
         self,
         authority: GovernedMemoryProjection,
@@ -327,12 +334,15 @@ impl ProviderGenerationStore {
         ensure_directory(&provider_generations)?;
 
         let governance_file = governance_generation_filename(generation);
-        write_new_bytes(
+        write_new_or_verify_exact(
             &governance_generations.join(&governance_file),
             &governance_bytes,
         )?;
         let image_file = provider_generation_filename(generation);
-        image.write_new(provider_generations.join(&image_file))?;
+        write_new_or_verify_exact(
+            &provider_generations.join(&image_file),
+            image.as_bytes(),
+        )?;
         let selector = WireSelector {
             version: GENERATION_SELECTOR_VERSION,
             tenant: tenant.as_str().to_string(),
@@ -468,6 +478,26 @@ fn acquire_lock(root: &Path) -> Result<File, ProviderGenerationError> {
         TryLockError::Error(source) => io_error(&path, source),
     })?;
     Ok(lock)
+}
+
+fn sync_visible_selector(root: &Path) -> Result<(), ProviderGenerationError> {
+    let path = root.join(PROVIDER_SELECTOR_FILE);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ProviderGenerationError::MissingSelector { path });
+        }
+        Err(source) => return Err(io_error(&path, source)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ProviderGenerationError::Invalid(
+            "selector is not a regular file",
+        ));
+    }
+    File::open(&path)
+        .and_then(|file| file.sync_all())
+        .map_err(|source| io_error(&path, source))?;
+    sync_directory(root)
 }
 
 fn read_selector(path: &Path) -> Result<WireSelector, ProviderGenerationError> {
@@ -617,6 +647,56 @@ fn write_new_bytes(path: &Path, bytes: &[u8]) -> Result<(), ProviderGenerationEr
         .and_then(|()| file.sync_all())
         .map_err(|source| io_error(path, source))?;
     sync_directory(parent)
+}
+
+fn write_new_or_verify_exact(path: &Path, bytes: &[u8]) -> Result<(), ProviderGenerationError> {
+    let parent = path.parent().ok_or(ProviderGenerationError::Invalid(
+        "generation artifact parent required",
+    ))?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|source| io_error(path, source))?;
+            sync_directory(parent)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(ProviderGenerationError::Invalid(
+                    "generation artifact is not a regular file",
+                ));
+            }
+            let file = File::open(path).map_err(|source| io_error(path, source))?;
+            let limit = bytes
+                .len()
+                .checked_add(1)
+                .ok_or(ProviderGenerationError::Invalid(
+                    "generation artifact size overflow",
+                ))?;
+            let mut existing = Vec::new();
+            (&file)
+                .take(limit as u64)
+                .read_to_end(&mut existing)
+                .map_err(|source| io_error(path, source))?;
+            if existing != bytes {
+                return Err(ProviderGenerationError::Invalid(
+                    "generation artifact collision",
+                ));
+            }
+            file.sync_all().map_err(|source| io_error(path, source))?;
+            sync_directory(parent)
+        }
+        Err(source) => Err(io_error(path, source)),
+    }
 }
 
 fn sync_directory(path: &Path) -> Result<(), ProviderGenerationError> {

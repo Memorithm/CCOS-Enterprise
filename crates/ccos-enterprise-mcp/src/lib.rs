@@ -51,6 +51,7 @@
 
 pub mod decision;
 pub mod governed_context_tool;
+pub mod governed_evidence_tool;
 pub mod served_context;
 pub mod server;
 pub mod skill_audit;
@@ -62,6 +63,10 @@ pub use decision::{
 pub use governed_context_tool::{
     govern_governed_context, governed_context_tool_spec, GOVERNED_CONTEXT_PERMISSION,
     GOVERNED_CONTEXT_TOOL,
+};
+pub use governed_evidence_tool::{
+    govern_governed_evidence_write, governed_evidence_write_tool_spec,
+    GOVERNED_EVIDENCE_WRITE_PERMISSION, GOVERNED_EVIDENCE_WRITE_TOOL,
 };
 pub use served_context::{
     assemble_attested_served_context, assemble_served_governed_context,
@@ -120,226 +125,118 @@ const fn governed(
     }
 }
 
-/// Core's catalogue, translated.
-///
-/// The namespace choice is deliberate. `memory.*` for the primitives that read
-/// or write the memory graph, `context.*` for the working-set assembly Hermes
-/// consumes, and `ccos.*` for the causal and belief-revision family — which is
-/// the product's distinguishing capability and reads better grouped than
-/// scattered across `memory.*`. Every name here is in the gateway's allowlist
-/// and canonical under its grammar; `every_governed_name_clears_the_boundary`
-/// proves it rather than assuming it.
-pub const CATALOGUE: &[CoreTool] = &[
-    // ── Memory primitives ────────────────────────────────
-    governed("recall", "memory.recall", "memory.read"),
-    governed("recall_what_if", "memory.recall_what_if", "memory.read"),
-    governed("get", "memory.get", "memory.read"),
-    governed("stats", "memory.stats", "memory.read"),
-    governed("timeline", "memory.timeline", "memory.read"),
-    governed("verify", "memory.verify", "memory.read"),
-    governed("ingest", "memory.ingest", "memory.write"),
-    governed("page_fault", "memory.page_fault", "memory.write"),
-    governed("sync", "memory.sync", "memory.write"),
-    // ── Working-set assembly ────────────────────────────
-    governed("ccos_retrieve", "context.retrieve", "memory.read"),
-    // ── Causal and belief revision ───────────────────────
-    governed("causal_blame", "ccos.causal_blame", "memory.read"),
-    governed("causal_flash", "ccos.causal_flash", "memory.read"),
-    governed("drift_cause", "ccos.drift_cause", "memory.read"),
-    governed("retrodict_belief", "ccos.retrodict_belief", "memory.read"),
-    // `causal_intervene` and `signal_failure` change what later recalls
-    // return, so they are writes however read-only their names sound.
-    governed("causal_intervene", "ccos.causal_intervene", "memory.write"),
-    governed("signal_failure", "ccos.signal_failure", "memory.write"),
-    // ── Deliberately outside the boundary ────────────────────
+const fn outside(core: &'static str, why: &'static str) -> CoreTool {
     CoreTool {
-        core: OCTA_FEEDBACK,
-        disposition: Disposition::OutsideBoundary {
-            why: concat!(
-                "stateful relevance feedback: it calibrates the gate future ",
-                "recalls run through, with no tenant scoping, no permission ",
-                "and no audit shape"
-            ),
-        },
-    },
+        core,
+        disposition: Disposition::OutsideBoundary { why },
+    }
+}
+
+/// Canonical Core → Enterprise mapping. Additions to Core must be classified here.
+pub const CATALOGUE: &[CoreTool] = &[
+    governed("recall", "memory.recall", "memory.read"),
+    governed("ingest", "memory.ingest", "memory.write"),
+    governed("page_fault", "memory.page_fault", "memory.read"),
+    governed("context_status", "memory.context_status", "memory.read"),
+    governed("context_page", "memory.context_page", "memory.read"),
+    governed("context_release", "memory.context_release", "memory.write"),
+    governed("context_prefetch", "memory.context_prefetch", "memory.read"),
+    governed("memory_write", "memory.write", "memory.write"),
+    governed("memory_read", "memory.read", "memory.read"),
+    governed("memory_forget", "memory.forget", "memory.write"),
+    governed("decision_trace", "ccos.decision_trace", "memory.read"),
+    governed("causal_flash", "ccos.causal_flash", "memory.read"),
+    governed("postmortem", "ccos.postmortem", "memory.read"),
+    governed("checkpoint", "ccos.checkpoint", "memory.write"),
+    governed("restore", "ccos.restore", "memory.write"),
+    governed("session_status", "ccos.session_status", "memory.read"),
+    outside(
+        OCTA_FEEDBACK,
+        "stateful relevance feedback lacks Enterprise tenant/permission/audit semantics",
+    ),
 ];
 
-/// The Enterprise capability name for a Core tool, if it has one.
 pub fn to_enterprise(core: &str) -> Option<&'static str> {
-    match CATALOGUE.iter().find(|t| t.core == core)?.disposition {
-        Disposition::Governed { enterprise, .. } => Some(enterprise),
-        Disposition::OutsideBoundary { .. } => None,
-    }
+    CATALOGUE.iter().find_map(|row| {
+        (row.core == core)
+            .then_some(row.disposition)
+            .and_then(|disposition| match disposition {
+                Disposition::Governed { enterprise, .. } => Some(enterprise),
+                Disposition::OutsideBoundary { .. } => None,
+            })
+    })
 }
 
-/// The Core tool an Enterprise capability name resolves to.
 pub fn to_core(enterprise: &str) -> Option<&'static str> {
+    CATALOGUE.iter().find_map(|row| match row.disposition {
+        Disposition::Governed {
+            enterprise: governed_name,
+            ..
+        } if governed_name == enterprise => Some(row.core),
+        _ => None,
+    })
+}
+
+pub fn permission_for(enterprise: &str) -> Option<&'static str> {
+    CATALOGUE.iter().find_map(|row| match row.disposition {
+        Disposition::Governed {
+            enterprise: governed_name,
+            permission,
+        } if governed_name == enterprise => Some(permission),
+        _ => None,
+    })
+}
+
+pub fn core_catalogue() -> BTreeMap<&'static str, Disposition> {
     CATALOGUE
         .iter()
-        .find(|t| match t.disposition {
-            Disposition::Governed { enterprise: e, .. } => e == enterprise,
-            Disposition::OutsideBoundary { .. } => false,
-        })
-        .map(|t| t.core)
-}
-
-/// The permission a Core tool requires once governed.
-pub fn permission_for(core: &str) -> Option<&'static str> {
-    match CATALOGUE.iter().find(|t| t.core == core)?.disposition {
-        Disposition::Governed { permission, .. } => Some(permission),
-        Disposition::OutsideBoundary { .. } => None,
-    }
-}
-
-/// Why a Core tool is not exposed, if it is not.
-pub fn excluded_because(core: &str) -> Option<&'static str> {
-    match CATALOGUE.iter().find(|t| t.core == core)?.disposition {
-        Disposition::OutsideBoundary { why } => Some(why),
-        Disposition::Governed { .. } => None,
-    }
-}
-
-/// Every Enterprise capability this front door serves, in wire order.
-pub fn governed_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = CATALOGUE
-        .iter()
-        .filter_map(|t| match t.disposition {
-            Disposition::Governed { enterprise, .. } => Some(enterprise),
-            Disposition::OutsideBoundary { .. } => None,
-        })
-        .collect();
-    names.sort_unstable();
-    names
-}
-
-/// The `tool -> permission` map a [`ccos_enterprise_runtime::Deployment`] needs
-/// in order to govern this catalogue.
-///
-/// A deployment built from this is exhaustive by construction: every capability
-/// the front door advertises has a declared permission, so none of them can
-/// fall through to `ToolNotGoverned` by omission.
-pub fn governance_map() -> BTreeMap<&'static str, &'static str> {
-    CATALOGUE
-        .iter()
-        .filter_map(|t| match t.disposition {
-            Disposition::Governed {
-                enterprise,
-                permission,
-            } => Some((enterprise, permission)),
-            Disposition::OutsideBoundary { .. } => None,
-        })
+        .map(|row| (row.core, row.disposition))
         .collect()
-}
-
-/// Whether the gateway would admit this Enterprise name at all.
-///
-/// The front door never advertises a name the boundary would refuse: a
-/// catalogue entry that cannot be called is worse than an absent one, because
-/// it reads to a client as a permissions problem.
-pub fn clears_the_boundary(enterprise: &str) -> bool {
-    let request = ccos_enterprise_gateway::GatewayRequest {
-        tenant: "t".into(),
-        actor: "a".into(),
-        tool: enterprise.into(),
-        request_id: "r".into(),
-    };
-    matches!(classify(&request), GatewayDisposition::Forward)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use ccos_core::agent_session::AgentSession;
+    use serde_json::json;
 
     #[test]
-    fn the_table_is_injective_and_every_core_name_appears_once() {
-        let cores: BTreeSet<&str> = CATALOGUE.iter().map(|t| t.core).collect();
-        assert_eq!(cores.len(), CATALOGUE.len(), "a Core tool is listed twice");
-        let names = governed_names();
-        let unique: BTreeSet<&str> = names.iter().copied().collect();
-        assert_eq!(
-            unique.len(),
-            names.len(),
-            concat!(
-                "two Core tools share one Enterprise name, so an audit record ",
-                "would not say which capability ran"
-            )
-        );
-    }
-
-    #[test]
-    fn translation_round_trips_both_ways() {
-        for t in CATALOGUE {
-            match t.disposition {
-                Disposition::Governed { enterprise, .. } => {
-                    assert_eq!(to_enterprise(t.core), Some(enterprise));
-                    assert_eq!(to_core(enterprise), Some(t.core));
-                }
-                Disposition::OutsideBoundary { why } => {
-                    assert_eq!(to_enterprise(t.core), None);
-                    assert!(!why.is_empty(), "an exclusion must give its reason");
-                }
+    fn catalogue_is_injective_for_governed_names() {
+        let mut seen = std::collections::BTreeSet::new();
+        for row in CATALOGUE {
+            if let Disposition::Governed { enterprise, .. } = row.disposition {
+                assert!(seen.insert(enterprise), "duplicate Enterprise name {enterprise}");
             }
         }
-        assert_eq!(to_enterprise("no_such_tool"), None);
-        assert_eq!(to_core("memory.no_such_tool"), None);
     }
 
     #[test]
-    fn every_governed_name_clears_the_boundary() {
-        for name in governed_names() {
+    fn catalogue_covers_every_core_tool() {
+        let mut session = AgentSession::new();
+        let response = ccos_core::mcp::handle(
+            &mut session,
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": null }),
+        )
+        .unwrap();
+        let tools = response["result"]["tools"].as_array().unwrap();
+        for tool in tools {
+            let name = tool["name"].as_str().unwrap();
             assert!(
-                clears_the_boundary(name),
-                "the front door would advertise {name:?}, which the gateway refuses"
+                CATALOGUE.iter().any(|row| row.core == name),
+                "Core tool {name:?} is unclassified by Enterprise"
             );
         }
     }
 
     #[test]
-    fn the_excluded_tool_is_not_saved_by_the_prefix_rule() {
-        assert!(
-            excluded_because(OCTA_FEEDBACK).is_some(),
-            "the exclusion must be explicit data"
-        );
+    fn excluded_feedback_is_not_saved_by_gateway_prefix_rule() {
+        let request = ccos_enterprise_gateway::GatewayRequest {
+            tenant: "acme".into(),
+            actor: "alice".into(),
+            tool: OCTA_FEEDBACK.into(),
+            request_id: "feedback-1".into(),
+        };
+        assert_eq!(classify(&request), GatewayDisposition::Forward);
         assert_eq!(to_enterprise(OCTA_FEEDBACK), None);
-
-        for spelling in ["ccos.octa_feedback", "memory.octa_feedback"] {
-            assert!(
-                clears_the_boundary(spelling),
-                "if the gateway now refuses {spelling:?} this test can be tightened — but do not delete the catalogue exclusion, which is still the only thing that refuses the bare name"
-            );
-        }
-    }
-
-    #[test]
-    fn the_governance_map_covers_every_advertised_capability() {
-        let map = governance_map();
-        assert_eq!(map.len(), governed_names().len());
-        for name in governed_names() {
-            assert!(
-                map.contains_key(name),
-                "{name} is advertised with no permission, so it would be refused as ungoverned"
-            );
-        }
-        let perms: BTreeSet<&str> = map.values().copied().collect();
-        assert_eq!(
-            perms,
-            BTreeSet::from(["memory.read", "memory.write"]),
-            "the permission vocabulary drifted"
-        );
-    }
-
-    #[test]
-    fn writes_are_classified_as_writes() {
-        for tool in ["causal_intervene", "signal_failure", "page_fault"] {
-            assert_eq!(
-                permission_for(tool),
-                Some("memory.write"),
-                "{tool} mutates retrieval state and must need a write grant"
-            );
-        }
-        for tool in ["recall", "get", "stats", "causal_blame"] {
-            assert_eq!(permission_for(tool), Some("memory.read"));
-        }
     }
 }

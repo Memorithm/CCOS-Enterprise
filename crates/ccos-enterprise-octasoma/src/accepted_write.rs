@@ -8,9 +8,9 @@
 //! promotes its trust state.
 
 use ccos_enterprise_memory::{
-    GovernedMemoryProjection, MemoryAssetDescriptor, MemoryAssetId, MemoryError, MemoryEvidenceRef,
-    MemoryGraphError, MemoryLineage, MemorySpace, MemoryStratum, MemoryTrustMetadata,
-    MemoryValidationState,
+    GovernedMemoryProjection, MemoryAssetDescriptor, MemoryAssetId, MemoryError,
+    MemoryEvidenceRef, MemoryGraphError, MemoryLineage, MemorySpace, MemoryStratum,
+    MemoryTrustMetadata, MemoryValidationState,
 };
 
 use crate::generation::{ProviderGenerationError, ProviderGenerationStore};
@@ -30,6 +30,7 @@ pub struct AcceptedEvidenceWrite {
 /// Preparation is side-effect-free. The fields are private so callers cannot
 /// substitute another authority, population or provider configuration before
 /// committing it.
+#[derive(Debug)]
 pub struct PreparedEvidenceGeneration {
     base_generation: u64,
     base_digest: [u8; 32],
@@ -67,9 +68,9 @@ impl std::fmt::Display for AcceptedEvidenceWriteError {
             Self::EmptyPayload => f.write_str("governed evidence payload must not be empty"),
             Self::Memory(error) => write!(f, "governed evidence input: {error}"),
             Self::Lineage(error) => write!(f, "governed evidence lineage: {error}"),
-            Self::StalePreparation => f.write_str(
-                "prepared evidence generation no longer matches selected provider state",
-            ),
+            Self::StalePreparation => {
+                f.write_str("prepared evidence generation no longer matches selected provider state")
+            }
             Self::Generation(error) => write!(f, "governed evidence generation: {error}"),
         }
     }
@@ -118,12 +119,7 @@ impl ProviderGenerationStore {
         if write.payload.is_empty() {
             return Err(AcceptedEvidenceWriteError::EmptyPayload);
         }
-        if self
-            .governance()
-            .graph
-            .descriptor(&write.asset_id)
-            .is_some()
-        {
+        if self.governance().graph.descriptor(&write.asset_id).is_some() {
             return Err(AcceptedEvidenceWriteError::DuplicateAsset(write.asset_id));
         }
 

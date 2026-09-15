@@ -10,8 +10,8 @@ use ccos_enterprise_memory::{
     MemoryLineage, MemoryLineageGraph, MemoryLoadoutBinding, MemoryLoadoutPlan, MemorySpace,
     MemoryStratum, MemoryTrustMetadata, MemoryUsageMode, MemoryValidationState,
 };
-use ccos_enterprise_octasoma::generation::ProviderGenerationStore;
-use ccos_enterprise_octasoma::recovery::{RecoveryConfig, RecoveryRecord};
+use ccos_enterprise_provider_adapter::generation::ProviderGenerationStore;
+use ccos_enterprise_provider_adapter::recovery::{RecoveryConfig, RecoveryRecord};
 use ccos_enterprise_tenancy::TenantId;
 use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};

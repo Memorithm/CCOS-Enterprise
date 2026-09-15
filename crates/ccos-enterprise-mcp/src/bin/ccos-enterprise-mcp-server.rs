@@ -678,7 +678,7 @@ struct Server {
     skill_projection: ProjectionState,
     correlation: execution::ExecutionJournal,
     front_door: GovernedMcp<JournaledBackend>,
-    governed_memory: Option<ccos_enterprise_octasoma::generation::ProviderGenerationStore>,
+    governed_memory: Option<ccos_enterprise_provider_adapter::generation::ProviderGenerationStore>,
     poisoned: Option<String>,
 }
 
@@ -890,7 +890,7 @@ impl Server {
 
         let governed_memory = match &config.governed_memory_root {
             Some(root) => Some(
-                ccos_enterprise_octasoma::generation::ProviderGenerationStore::open(
+                ccos_enterprise_provider_adapter::generation::ProviderGenerationStore::open(
                     root,
                     ccos_enterprise_tenancy::TenantId::validated(&config.tenant).ok_or_else(
                         || "configured tenant cannot select governed memory".to_string(),

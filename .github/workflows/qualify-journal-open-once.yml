@@ -1,0 +1,238 @@
+name: Qualify journal open errors
+
+on:
+  push:
+    branches: [fix/journal-open-errors]
+    paths: [.github/workflows/qualify-journal-open-once.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - name: Add the same real-filesystem regressions to both journal loaders
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          template = '''//! Loading errors must not be reinterpreted as an empty journal.
+          use std::fs;
+          use std::path::PathBuf;
+          use std::sync::atomic::{AtomicU64, Ordering};
+          use @CRATE@::{@STORE@ as Store, StoreError, JOURNAL_FILE};
+
+          static NEXT: AtomicU64 = AtomicU64::new(0);
+          struct Directory(PathBuf);
+          impl Directory {
+              fn new() -> Self {
+                  let root = std::env::temp_dir().join(format!("ccos-load-@KIND@-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+                  fs::create_dir(&root).unwrap();
+                  Self(root)
+              }
+          }
+          impl Drop for Directory {
+              fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+          }
+
+          #[test]
+          fn absent_journal_keeps_the_documented_empty_read_without_creation() {
+              let dir = Directory::new();
+              let loaded = Store::load(&dir.0).unwrap();
+              assert!(loaded.entries.is_empty());
+              assert_eq!(loaded.torn_tail, 0);
+              assert!(!dir.0.join(JOURNAL_FILE).exists());
+              let missing = dir.0.join("missing-parent");
+              assert!(Store::load(&missing).unwrap().entries.is_empty());
+              assert!(!missing.exists());
+          }
+
+          #[test]
+          fn an_existing_empty_regular_journal_is_still_valid() {
+              let dir = Directory::new();
+              fs::write(dir.0.join(JOURNAL_FILE), b"").unwrap();
+              let loaded = Store::load(&dir.0).unwrap();
+              assert!(loaded.entries.is_empty());
+              assert_eq!(loaded.torn_tail, 0);
+          }
+
+          #[test]
+          fn non_directory_root_is_not_an_empty_journal() {
+              let dir = Directory::new();
+              let root = dir.0.join("not-a-directory");
+              fs::write(&root, b"existing unrelated file").unwrap();
+              let result = Store::load(&root);
+              assert!(matches!(result, Err(StoreError::Io { ref path, ref source })
+                  if *path == root.join(JOURNAL_FILE) && source.kind() != std::io::ErrorKind::NotFound), "{result:?}");
+              assert_eq!(fs::read(root).unwrap(), b"existing unrelated file");
+          }
+
+          #[test]
+          fn directory_at_journal_path_is_an_io_error() {
+              let dir = Directory::new();
+              let path = dir.0.join(JOURNAL_FILE);
+              fs::create_dir(&path).unwrap();
+              assert!(matches!(Store::load(&dir.0), Err(StoreError::Io { path: found, .. }) if found == path));
+              assert!(path.is_dir());
+          }
+
+          #[cfg(unix)]
+          #[test]
+          fn symbolic_link_loop_is_an_error_not_empty_authority() {
+              let dir = Directory::new();
+              let path = dir.0.join(JOURNAL_FILE);
+              std::os::unix::fs::symlink(JOURNAL_FILE, &path).unwrap();
+              assert!(matches!(Store::load(&dir.0), Err(StoreError::Io { path: found, source })
+                  if found == path && source.kind() != std::io::ErrorKind::NotFound));
+              assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+          }
+          '''
+          for kind, store in [('knowledge', 'KnowledgeStore'), ('decision', 'DecisionStore')]:
+              crate = f'ccos_enterprise_{kind}_store'
+              path = Path(f'crates/ccos-enterprise-{kind}-store/tests/load_io_errors.rs')
+              path.parent.mkdir(parents=True, exist_ok=True)
+              if path.exists():
+                  raise SystemExit(f'{path} already exists')
+              path.write_text(template.replace('@CRATE@', crate).replace('@STORE@', store).replace('@KIND@', kind))
+          PY
+      - name: Reproduce the pre-fix masking of a non-directory path
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.89.0 metadata --locked --format-version 1 >/dev/null
+          for kind in knowledge decision; do
+            log="$RUNNER_TEMP/$kind-load-before.log"
+            if cargo +1.89.0 test -p "ccos-enterprise-$kind-store" --locked --test load_io_errors \
+              non_directory_root_is_not_an_empty_journal -- --exact > "$log" 2>&1; then
+              cat "$log"
+              echo 'pre-fix journal regression unexpectedly passed' >&2
+              exit 1
+            else
+              status=$?
+              cat "$log"
+              test "$status" -eq 101
+              grep -q 'test result: FAILED' "$log"
+              grep -q 'panicked at' "$log"
+            fi
+          done
+      - name: Open once and propagate every error except explicit NotFound
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          for kind, state, store in [('knowledge', 'KnowledgeState', 'KnowledgeStore'), ('decision', 'DecisionState', 'DecisionStore')]:
+              path = Path(f'crates/ccos-enterprise-{kind}-store/src/lib.rs')
+              text = path.read_text()
+              old = '''        if !journal_path.exists() {
+                      return Ok(Loaded {
+                          entries: Vec::new(),
+                          state: @STATE@::new(),
+                          torn_tail: 0,
+                      });
+                  }
+
+                  let mut file = File::open(&journal_path).map_err(io(&journal_path))?;'''.replace('@STATE@', state)
+              new = '''        // Attempt the read itself: exists() would hide metadata/access
+                  // failures as absence and add a separate check/use window.
+                  let mut file = match File::open(&journal_path) {
+                      Ok(file) => file,
+                      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                          return Ok(Loaded {
+                              entries: Vec::new(),
+                              state: @STATE@::new(),
+                              torn_tail: 0,
+                          });
+                      }
+                      Err(error) => return Err(io(&journal_path)(error)),
+                  };'''.replace('@STATE@', state)
+              assert text.count(old) == 1, path
+              text = text.replace(old, new, 1)
+              signature = '    pub fn load(root: impl AsRef<Path>) -> Result<Loaded, StoreError> {'
+              docs = '''    /// Read and replay the journal without creating it.
+                  ///
+                  /// Only `NotFound` from opening the journal produces an empty state.
+                  /// Other open/read errors preserve their path and I/O cause. A torn
+                  /// final record is reported, not repaired by this read-only method.
+                  /// Use `open` to acquire writer ownership and repair the tail.
+                  ///
+                  /// ```no_run
+                  /// use @CRATE@::@STORE@;
+                  /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+                  /// let loaded = @STORE@::load("/srv/ccos/acme/@KIND@")?;
+                  /// println!("{} complete records; {} tail bytes", loaded.entries.len(), loaded.torn_tail);
+                  /// # Ok(()) }
+                  /// ```
+              '''.replace('@CRATE@', f'ccos_enterprise_{kind}_store').replace('@STORE@', store).replace('@KIND@', kind)
+              assert text.count(signature) == 1
+              path.write_text(text.replace(signature, docs + signature, 1))
+          Path('docs/JOURNAL_LOAD_ERROR_CONTRACT.md').write_text('''# Knowledge and Decision journal load errors
+
+          Follow-up to the remaining A01 read-boundary observation in the September
+          2026 audit. This is not a second repair of the already-fixed torn-tail append
+          bug, and it does not change JSONL framing or claim crash-atomic batches.
+
+          Both `KnowledgeStore::load` and `DecisionStore::load` now attempt `File::open`
+          directly. Only the OS `NotFound` result keeps the existing empty-state
+          behavior, including a missing parent directory. Every other open/read error
+          is returned as `StoreError::Io` with the exact journal path and original
+          cause. No directory or file is created by load, and read-only loading does
+          not repair an interrupted final record. Writer locking and repair remain
+          in `open`; append validation and poisoning semantics are unchanged.
+
+          Five filesystem regression cases are applied to each store: absent input
+          without creation, valid empty file, a non-directory root, a directory at the
+          journal filename, and a Unix symlink loop. The non-directory-root case is
+          run before the fix to demonstrate the actual empty-state error, then both
+          suites must pass after the repair. No privileged permission-denial test,
+          power-cut experiment or real deployment access is claimed.
+
+          The operating-system treatment of symbolic links is preserved. A dangling
+          link that makes `File::open` return `NotFound` still follows the documented
+          empty-read behavior; this is not a filesystem sandbox or mandatory-presence
+          policy. Served governance projections have a distinct mandatory-state API.
+
+          ```bash
+          cargo +1.89.0 test -p ccos-enterprise-knowledge-store --locked
+          cargo +1.89.0 test -p ccos-enterprise-decision-store --locked
+          ```
+
+          Source: Memorithm/CCOS-Enterprise baseline
+          `72e22014c6711cb85fd31b4fb3d087477f50bd0f`, both journal modules reviewed
+          15 September 2026. Rust standard library `Path::exists` documentation,
+          consulted 15 September 2026, explains that metadata errors are coerced to
+          false: https://doc.rust-lang.org/std/path/struct.Path.html#method.exists
+          ''')
+          PY
+      - name: Format and qualify both real journal implementations
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt +1.89.0 --edition 2021 crates/ccos-enterprise-knowledge-store/src/lib.rs \
+            crates/ccos-enterprise-decision-store/src/lib.rs \
+            crates/ccos-enterprise-knowledge-store/tests/load_io_errors.rs \
+            crates/ccos-enterprise-decision-store/tests/load_io_errors.rs
+          cargo +1.89.0 test -p ccos-enterprise-knowledge-store -p ccos-enterprise-decision-store --locked
+          cargo +1.89.0 clippy -p ccos-enterprise-knowledge-store -p ccos-enterprise-decision-store --all-targets --locked -- -D warnings
+          cargo +1.89.0 fmt --all -- --check
+          git diff --exit-code -- Cargo.lock
+      - name: Commit only the qualified journal repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ZEKRITI Tarek'
+          git config user.email contact@checkupauto.fr
+          git add crates/ccos-enterprise-knowledge-store/src/lib.rs \
+            crates/ccos-enterprise-decision-store/src/lib.rs \
+            crates/ccos-enterprise-knowledge-store/tests/load_io_errors.rs \
+            crates/ccos-enterprise-decision-store/tests/load_io_errors.rs \
+            docs/JOURNAL_LOAD_ERROR_CONTRACT.md
+          git commit -m 'fix(store): preserve journal open errors instead of fabricating empty state'
+          git push origin HEAD:fix/journal-open-errors

@@ -16,7 +16,7 @@ use ccos_enterprise_knowledge_model::{
 use ccos_enterprise_parse::{parse, ParseError, ParsedDocument, ParsedUnit};
 use sha2::{Digest, Sha256};
 
-pub const EXTRACTION_CONTRACT_VERSION: u32 = 1;
+pub const EXTRACTION_CONTRACT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CandidateId(pub String);
@@ -136,7 +136,7 @@ pub fn extract(raw: &RawArtifact) -> Result<ExtractionBatch, ExtractError> {
         "application/json" => extract_json_document(raw, &parsed)?,
         "application/x-ndjson" => extract_ndjson(raw, &parsed)?,
         "text/csv" => extract_csv(raw, &parsed)?,
-        "text/plain" | "text/markdown" => Vec::new(),
+        "text/plain" | "text/markdown" => extract_prose(raw, &parsed),
         _ => Vec::new(),
     };
     Ok(ExtractionBatch {
@@ -220,6 +220,32 @@ fn extracted_value(value: serde_json::Value) -> ExtractedValue {
             ExtractedValue::Json(canonical)
         }
     }
+}
+
+/// Preserve non-empty prose units as evidence-bound observations.
+///
+/// This deliberately performs no entity recognition, alias inference or
+/// factual promotion. The normalized text is observational payload only;
+/// the evidence locator still points at the exact immutable raw bytes.
+fn extract_prose(raw: &RawArtifact, parsed: &ParsedDocument) -> Vec<RecordCandidate> {
+    let mut candidates = Vec::new();
+    for unit in &parsed.units {
+        if unit.normalized_text.trim().is_empty() {
+            continue;
+        }
+        let attributes = BTreeMap::from([
+            (
+                "format".to_string(),
+                ExtractedValue::String(unit.kind.as_str().to_string()),
+            ),
+            (
+                "text".to_string(),
+                ExtractedValue::String(unit.normalized_text.clone()),
+            ),
+        ]);
+        candidates.push(build_candidate(raw, unit, 0, attributes));
+    }
+    candidates
 }
 
 fn extract_csv(
@@ -533,8 +559,80 @@ mod tests {
     }
 
     #[test]
-    fn unstructured_text_is_not_invented_into_entities() {
-        let batch = extract(&raw("text/plain", b"Alice works at Acme\n")).unwrap();
-        assert!(batch.candidates.is_empty());
+    fn prose_lines_become_observations_without_entity_inference() {
+        let batch = extract(&raw(
+            "text/plain",
+            b"\xef\xbb\xbfAlice works at Acme\r\n   \r\nbeta\r\n",
+        ))
+        .unwrap();
+        assert_eq!(batch.contract_version, 2);
+        assert_eq!(batch.candidates.len(), 2);
+        assert_eq!(batch.candidates[0].kind, AssertionKind::Observation);
+        assert_eq!(batch.candidates[0].unit_ordinal, 0);
+        assert_eq!(batch.candidates[1].unit_ordinal, 2);
+        assert_eq!(
+            batch.candidates[0].attributes,
+            BTreeMap::from([
+                (
+                    "format".to_string(),
+                    ExtractedValue::String("text-line".into()),
+                ),
+                (
+                    "text".to_string(),
+                    ExtractedValue::String("Alice works at Acme".into()),
+                ),
+            ])
+        );
+        assert_eq!(
+            batch.candidates[0].evidence.locator.as_deref(),
+            Some("bytes:3-22")
+        );
+        assert_eq!(
+            batch.candidates[1].evidence.locator.as_deref(),
+            Some("bytes:29-33")
+        );
+    }
+
+    #[test]
+    fn markdown_is_preserved_as_observed_text_not_promoted_semantics() {
+        let batch = extract(&raw(
+            "text/markdown",
+            b"# Acme\r\n[site](https://example.com)\r\n",
+        ))
+        .unwrap();
+        assert_eq!(batch.candidates.len(), 2);
+        assert_eq!(
+            batch.candidates[0].attributes["format"],
+            ExtractedValue::String("markdown-line".into())
+        );
+        assert_eq!(
+            batch.candidates[0].attributes["text"],
+            ExtractedValue::String("# Acme".into())
+        );
+        assert_eq!(
+            batch.candidates[1].attributes["text"],
+            ExtractedValue::String("[site](https://example.com)".into())
+        );
+        assert!(batch
+            .candidates
+            .iter()
+            .all(|candidate| candidate.kind == AssertionKind::Observation));
+    }
+
+    #[test]
+    fn prose_extraction_is_deterministic_and_source_bound() {
+        let artifact = raw("text/plain", b"alpha\nbeta\n");
+        let first = extract(&artifact).unwrap();
+        let second = extract(&artifact).unwrap();
+        assert_eq!(first, second);
+
+        let mut other = artifact.clone();
+        other.source_id = SourceId::from("source:other");
+        let other = extract(&other).unwrap();
+        assert_ne!(first.candidates[0].id, other.candidates[0].id);
+        assert_ne!(
+            first.candidates[0].evidence.id,
+            other.candidates[0].evidence.id
+        );
     }
 }

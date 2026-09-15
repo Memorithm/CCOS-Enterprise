@@ -7,8 +7,8 @@
 //! converted to a retryable tool failure.
 
 use super::*;
-use ccos_enterprise_memory::{MemoryAssetId, MemoryEvidenceRef};
 use ccos_enterprise_mcp::GOVERNED_EVIDENCE_WRITE_TOOL;
+use ccos_enterprise_memory::{MemoryAssetId, MemoryEvidenceRef};
 use ccos_enterprise_provider_adapter::accepted_write::{
     AcceptedEvidenceWrite, EvidenceGenerationReceipt,
 };
@@ -86,7 +86,10 @@ impl Server {
 
                 let store = self.governed_memory.take().ok_or_else(|| {
                     self.poisoned = Some("governed provider generation disappeared".into());
-                    (-32000, "Enterprise governed memory is unavailable".to_string())
+                    (
+                        -32000,
+                        "Enterprise governed memory is unavailable".to_string(),
+                    )
                 })?;
                 if store.tenant().as_str() != request.tenant {
                     self.governed_memory = Some(store);
@@ -107,9 +110,7 @@ impl Server {
                         request,
                         &execution,
                         effect,
-                        format!(
-                            "embedding dimension mismatch: expected {expected}, found {found}"
-                        ),
+                        format!("embedding dimension mismatch: expected {expected}, found {found}"),
                     );
                 }
 
@@ -292,10 +293,9 @@ pub(super) fn validate_recovered_evidence_effect(
         .ok_or_else(|| "governed evidence effect requires configured provider root".to_string())?;
     let tenant = TenantId::validated(&config.tenant)
         .ok_or_else(|| "configured tenant cannot validate governed evidence receipt".to_string())?;
-    let store = ccos_enterprise_provider_adapter::generation::ProviderGenerationStore::open(
-        root, tenant,
-    )
-    .map_err(|error| format!("cannot reopen governed evidence generation: {error}"))?;
+    let store =
+        ccos_enterprise_provider_adapter::generation::ProviderGenerationStore::open(root, tenant)
+            .map_err(|error| format!("cannot reopen governed evidence generation: {error}"))?;
     let receipt = EvidenceGenerationReceipt {
         generation,
         asset_id: asset,

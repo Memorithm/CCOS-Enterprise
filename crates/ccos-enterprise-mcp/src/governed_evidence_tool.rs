@@ -78,12 +78,7 @@ mod tests {
         deployment.add_tenant("memorithm", "acme", tenant);
         deployment.assign("memorithm", "alice", "writer");
         let identity = actor("memorithm", "alice", AuthStrength::Token);
-        let request = request(
-            "acme",
-            "alice",
-            GOVERNED_EVIDENCE_WRITE_TOOL,
-            "write-1",
-        );
+        let request = request("acme", "alice", GOVERNED_EVIDENCE_WRITE_TOOL, "write-1");
         assert!(matches!(
             deployment.admit(Call {
                 actor: &identity,

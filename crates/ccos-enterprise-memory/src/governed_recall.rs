@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::{
-    GovernedMemoryObservation, MemoryAssetId, MemoryAssetState, MemoryLineageGraph,
+    GovernedMemoryObservation, MemoryAssetId, MemoryAssetState, MemoryLineageGraph, MemorySpace,
     MemoryTrustMetadata, MemoryValidationState,
 };
 
@@ -31,6 +31,12 @@ pub struct GovernedRecallGate<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GovernedRecallGateError {
     ProviderReturnedUnknownAsset(MemoryAssetId),
+    /// A provider must preserve the canonical space, even within one loadout.
+    ProviderReturnedMismatchedSpace {
+        asset_id: MemoryAssetId,
+        expected: MemorySpace,
+        observed: MemorySpace,
+    },
     MissingTrustMetadata(MemoryAssetId),
 }
 
@@ -41,6 +47,15 @@ impl fmt::Display for GovernedRecallGateError {
                 f,
                 "governed memory provider returned unknown asset {}",
                 id.as_str()
+            ),
+            Self::ProviderReturnedMismatchedSpace {
+                asset_id,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "governed memory asset {} has space {observed:?}, expected {expected:?}",
+                asset_id.as_str()
             ),
             Self::MissingTrustMetadata(id) => write!(
                 f,
@@ -53,18 +68,32 @@ impl fmt::Display for GovernedRecallGateError {
 
 impl std::error::Error for GovernedRecallGateError {}
 
-/// Apply lineage state and categorical trust policy to provider recall results.
+/// Apply canonical space, lineage state and trust policy to provider results.
 ///
 /// The function preserves provider order and only narrows the result set. Unknown
-/// provider identities and missing trust metadata fail closed because silently
-/// treating either case as valid would sever the governance join established by
-/// `MemoryAssetId`.
+/// provider identities, mismatched canonical spaces and missing trust metadata
+/// fail closed. Loadout membership alone does not prove an asset's space: the
+/// descriptor check precedes inactive/trust filtering and applies to every
+/// observation passed to this gate. No admitted prefix is returned on error.
+///
+/// This boundary does not authenticate a tenant or bind payload bytes to evidence.
+/// Those remain separate request and content-integrity contracts.
 pub fn admit_governed_recall(
     gate: GovernedRecallGate<'_>,
     observations: impl IntoIterator<Item = GovernedMemoryObservation>,
 ) -> Result<Vec<GovernedMemoryObservation>, GovernedRecallGateError> {
     let mut admitted = Vec::new();
     for observation in observations {
+        let descriptor = gate.graph.descriptor(&observation.asset_id).ok_or_else(|| {
+            GovernedRecallGateError::ProviderReturnedUnknownAsset(observation.asset_id.clone())
+        })?;
+        if descriptor.space != observation.space {
+            return Err(GovernedRecallGateError::ProviderReturnedMismatchedSpace {
+                asset_id: observation.asset_id,
+                expected: descriptor.space.clone(),
+                observed: observation.space,
+            });
+        }
         let state = gate.graph.state(&observation.asset_id).ok_or_else(|| {
             GovernedRecallGateError::ProviderReturnedUnknownAsset(observation.asset_id.clone())
         })?;

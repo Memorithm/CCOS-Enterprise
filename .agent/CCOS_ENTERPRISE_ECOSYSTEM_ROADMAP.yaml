@@ -128,6 +128,37 @@ reviewed_core_slices:
       - does_not_close_served_memory_issues_135_or_136
       - existing_licensing_only_lineage_marker_is_not_a_full_functional_Core_sync
 
+reviewed_governance_slices:
+  - id: PROJECTION_OWNER_2026_09_15
+    status: merged
+    pr: 152
+    reviewed_commit: 4820cd167eca899fa337649eb268341dea7e659f
+    merge_commit: 1449111ec93a071608fc1c0b30ea065486d47160
+    accepted_runs: [34944911717, 34944911713, 34944911860, 34944911738, 34944911784]
+    contract: docs/GOVERNED_MEMORY_STORE_CONTRACT.md
+    owns:
+      - exclusive_cooperating_writer_lock_on_a_stable_separate_file
+      - explicit_provisioning_vs_mandatory_existing_authority_startup
+      - expected_tenant_validation_before_provider_dispatch
+      - immutable_acknowledged_projection_and_validated_replacement
+      - blocked_reads_and_writes_after_uncertain_publication
+    caller_requirements:
+      - trusted_directory_and_cooperating_writers
+      - no_direct_low_level_save_while_an_owner_is_live
+      - admitted_request_identity_before_stored_context_assembly
+      - explicit_reconciliation_and_reopen_after_publication_errors
+    remaining_issues: [135, 136]
+    not_yet_delivered:
+      - durable_provider_payload_embedding_and_configuration_reconstruction
+      - provider_generation_binding_to_the_governance_snapshot
+      - real_stdio_tool_route_and_request_effect_quota_audit_settlement
+      - process_death_and_full_protocol_restart_qualification
+    limitations:
+      - not_authentication_or_a_sealed_admission_token
+      - not_distributed_consistency_or_anti_rollback_protection
+      - no_physical_power_cut_or_forced_termination_result
+      - no_Core_backflow_or_SoulSystem_authorization_bypass
+
 agent_operating_protocol:
   must_read_this_file:
     - at_start_of_every_agent_session

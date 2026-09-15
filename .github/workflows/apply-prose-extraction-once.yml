@@ -70,13 +70,12 @@ jobs:
           ''')
           text = text.replace(anchor, prose + anchor, 1)
 
-          old_test = dedent(r'''
-              #[test]
+          old_test = '''    #[test]
               fn unstructured_text_is_not_invented_into_entities() {
-                  let batch = extract(&raw("text/plain", b"Alice works at Acme\n")).unwrap();
+                  let batch = extract(&raw("text/plain", b"Alice works at Acme\\n")).unwrap();
                   assert!(batch.candidates.is_empty());
               }
-          ''')
+          '''.replace('              ', '    ')
           if old_test not in text:
               raise SystemExit('old prose test anchor changed')
           new_tests = dedent(r'''

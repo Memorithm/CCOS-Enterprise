@@ -5,12 +5,12 @@
 //! governance settlement. It owns no independent authorization state.
 
 use super::*;
+use ccos_enterprise_mcp::GOVERNED_CONTEXT_TOOL;
 use ccos_enterprise_memory::{
     assemble_governed_bootstrap_context, attest_governed_context, BudgetedMemoryRecall,
     GovernedRecallTrustPolicy, MemoryContextBudget, MemoryRecallBudget, MemorySpace,
     MemoryValidationState,
 };
-use ccos_enterprise_mcp::GOVERNED_CONTEXT_TOOL;
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 
 struct GovernedContextArguments {
@@ -243,9 +243,8 @@ impl Server {
             parsed.context_budget,
         )
         .map_err(|error| error.to_string())?;
-        let attestations =
-            attest_governed_context(&assembly, &authority.graph, &authority.trust)
-                .map_err(|error| error.to_string())?;
+        let attestations = attest_governed_context(&assembly, &authority.graph, &authority.trust)
+            .map_err(|error| error.to_string())?;
         if assembly.len() != attestations.len() {
             return Err("governed context attestation cardinality mismatch".into());
         }

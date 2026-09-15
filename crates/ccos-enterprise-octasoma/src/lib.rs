@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod generation;
 pub mod recovery;
 
 use std::collections::{BTreeMap, BTreeSet};

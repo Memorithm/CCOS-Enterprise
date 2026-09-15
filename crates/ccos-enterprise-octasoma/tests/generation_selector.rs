@@ -102,13 +102,18 @@ fn records() -> Vec<RecoveryRecord> {
 #[test]
 fn explicit_initialization_reopens_and_reconstructs_the_real_provider() {
     let dir = Directory::new();
-    let store = ProviderGenerationStore::initialize(&dir.0, projection(), config(), &records())
-        .unwrap();
+    let store =
+        ProviderGenerationStore::initialize(&dir.0, projection(), config(), &records()).unwrap();
     assert_eq!(store.generation(), 0);
     assert_eq!(store.config(), config());
     assert_eq!(store.recovered().stored_records(), 1);
 
-    let loadout = store.governance().loadout.bootstrap_loadout().unwrap().unwrap();
+    let loadout = store
+        .governance()
+        .loadout
+        .bootstrap_loadout()
+        .unwrap()
+        .unwrap();
     let admitted = store
         .recovered()
         .recall(
@@ -141,11 +146,12 @@ fn explicit_initialization_reopens_and_reconstructs_the_real_provider() {
 #[test]
 fn selector_governance_digest_is_independent_and_fail_closed() {
     let dir = Directory::new();
-    let store = ProviderGenerationStore::initialize(&dir.0, projection(), config(), &records())
-        .unwrap();
+    let store =
+        ProviderGenerationStore::initialize(&dir.0, projection(), config(), &records()).unwrap();
     drop(store);
     let path = dir.0.join(PROVIDER_SELECTOR_FILE);
-    let mut selector: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut selector: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     selector["governance_sha256"] = serde_json::Value::String("00".repeat(32));
     fs::write(&path, serde_json::to_vec_pretty(&selector).unwrap()).unwrap();
     assert!(matches!(
@@ -157,8 +163,8 @@ fn selector_governance_digest_is_independent_and_fail_closed() {
 #[test]
 fn selector_cannot_choose_an_arbitrary_path_or_tenant() {
     let dir = Directory::new();
-    let store = ProviderGenerationStore::initialize(&dir.0, projection(), config(), &records())
-        .unwrap();
+    let store =
+        ProviderGenerationStore::initialize(&dir.0, projection(), config(), &records()).unwrap();
     drop(store);
     let path = dir.0.join(PROVIDER_SELECTOR_FILE);
     let original = fs::read(&path).unwrap();
@@ -168,7 +174,9 @@ fn selector_cannot_choose_an_arbitrary_path_or_tenant() {
     fs::write(&path, serde_json::to_vec_pretty(&selector).unwrap()).unwrap();
     assert!(matches!(
         ProviderGenerationStore::open(&dir.0, tenant()),
-        Err(ProviderGenerationError::Invalid("non-canonical image filename"))
+        Err(ProviderGenerationError::Invalid(
+            "non-canonical image filename"
+        ))
     ));
 
     fs::write(&path, &original).unwrap();

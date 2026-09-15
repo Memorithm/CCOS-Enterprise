@@ -17,6 +17,8 @@
 mod execution;
 #[path = "../execution_backend.rs"]
 mod execution_backend;
+#[path = "../served_governed_stdio.rs"]
+mod served_governed_stdio;
 #[path = "../skill_projection.rs"]
 mod skill_projection;
 
@@ -81,6 +83,7 @@ struct Config {
     token_budget: u64,
     call_cost_tokens: u64,
     state_dir: PathBuf,
+    governed_memory_root: Option<PathBuf>,
 }
 
 impl Config {
@@ -93,6 +96,13 @@ impl Config {
         if model.len() > 256 {
             return Err("CCOS_ENTERPRISE_MODEL is too long".into());
         }
+        let governed_memory_root = match std::env::var_os("CCOS_ENTERPRISE_GOVERNED_MEMORY_ROOT") {
+            None => None,
+            Some(value) if value.is_empty() => {
+                return Err("CCOS_ENTERPRISE_GOVERNED_MEMORY_ROOT is empty".into());
+            }
+            Some(value) => Some(PathBuf::from(value)),
+        };
         Ok(Self {
             audience: required_env("CCOS_ENTERPRISE_AUDIENCE")?,
             issuer_kid: required_env("CCOS_ENTERPRISE_ISSUER_KID")?,
@@ -112,6 +122,7 @@ impl Config {
                 .transpose()?
                 .unwrap_or(1),
             state_dir: PathBuf::from(required_env("CCOS_ENTERPRISE_STATE_DIR")?),
+            governed_memory_root,
         })
     }
 }
@@ -667,6 +678,7 @@ struct Server {
     skill_projection: ProjectionState,
     correlation: execution::ExecutionJournal,
     front_door: GovernedMcp<JournaledBackend>,
+    governed_memory: Option<ccos_enterprise_octasoma::generation::ProviderGenerationStore>,
     poisoned: Option<String>,
 }
 
@@ -676,6 +688,9 @@ impl Server {
         deployment.add_role(ROLE_NAME, &["memory.read", "memory.write"]);
         govern_catalogue(&mut deployment);
         govern_skill_catalogue(&mut deployment);
+        if config.governed_memory_root.is_some() {
+            ccos_enterprise_mcp::govern_governed_context(&mut deployment);
+        }
         let mut tenant = TenantState::new(config.token_budget);
         tenant.allow_model(&config.model);
         if !deployment.add_tenant(org, &config.tenant, tenant) {
@@ -798,6 +813,9 @@ impl Server {
         // static tool mapping. Reapplying the same permission is idempotent.
         govern_skill_catalogue(&mut deployment);
         govern_skill_audit(&mut deployment);
+        if config.governed_memory_root.is_some() {
+            ccos_enterprise_mcp::govern_governed_context(&mut deployment);
+        }
 
         let skills_root = config.state_dir.join(SKILLS_DIR).join(&config.tenant);
         let skill_store = SkillStore::open(&skills_root)
@@ -870,6 +888,19 @@ impl Server {
         .map_err(|error| format!("cannot open Enterprise host-correlation journal: {error}"))?
         .journal;
 
+        let governed_memory = match &config.governed_memory_root {
+            Some(root) => Some(
+                ccos_enterprise_octasoma::generation::ProviderGenerationStore::open(
+                    root,
+                    ccos_enterprise_tenancy::TenantId::validated(&config.tenant).ok_or_else(
+                        || "configured tenant cannot select governed memory".to_string(),
+                    )?,
+                )
+                .map_err(|error| format!("cannot open governed provider generation: {error}"))?,
+            ),
+            None => None,
+        };
+
         Ok(Self {
             config,
             authenticator,
@@ -880,6 +911,7 @@ impl Server {
             skill_projection,
             correlation,
             front_door,
+            governed_memory,
             poisoned: None,
         })
     }
@@ -985,7 +1017,8 @@ impl Server {
                 "serverInfo": { "name": "ccos-enterprise", "version": env!("CARGO_PKG_VERSION") }
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => enterprise_specs().map(|tools| json!({ "tools": tools })),
+            "tools/list" => enterprise_specs(self.governed_memory.is_some())
+                .map(|tools| json!({ "tools": tools })),
             "tools/call" => self.call_tool(message.get("params").unwrap_or(&Value::Null)),
             OPERATOR_AUDIT_METHOD => {
                 self.call_operator_audit(message.get("params").unwrap_or(&Value::Null))
@@ -1533,6 +1566,11 @@ impl Server {
             tool: tool.to_string(),
             request_id: meta.request_id.clone(),
         };
+        if request.tool == ccos_enterprise_mcp::GOVERNED_CONTEXT_TOOL
+            && self.governed_memory.is_some()
+        {
+            return self.call_governed_context(&identity, &request, &meta, &arguments);
+        }
         if request.tool == SKILL_READ_TOOL {
             return self.call_skill_tool(&identity, &request, &meta, &arguments);
         }
@@ -1725,7 +1763,7 @@ fn tool_error(message: &str) -> Value {
     })
 }
 
-fn enterprise_specs() -> Result<Vec<Value>, (i64, String)> {
+fn enterprise_specs(include_governed_context: bool) -> Result<Vec<Value>, (i64, String)> {
     let mut session = AgentSession::new();
     let response = ccos_core::mcp::handle(
         &mut session,
@@ -1768,6 +1806,18 @@ fn enterprise_specs() -> Result<Vec<Value>, (i64, String)> {
         ));
     }
     governed.push(skill_tool_spec());
+    if include_governed_context {
+        if governed.iter().any(|tool| {
+            tool.get("name").and_then(Value::as_str)
+                == Some(ccos_enterprise_mcp::GOVERNED_CONTEXT_TOOL)
+        }) {
+            return Err((
+                -32000,
+                "Enterprise governed-context capability collides with catalogue".to_string(),
+            ));
+        }
+        governed.push(ccos_enterprise_mcp::governed_context_tool_spec());
+    }
     governed.sort_by(|left, right| {
         left.get("name")
             .and_then(Value::as_str)
@@ -1850,6 +1900,7 @@ mod tests {
                 "ccos-enterprise-mcp-{label}-{}",
                 std::process::id()
             )),
+            governed_memory_root: None,
         }
     }
 
@@ -1944,7 +1995,7 @@ mod tests {
 
     #[test]
     fn catalogue_uses_governed_names_and_core_schemas() {
-        let tools = enterprise_specs().unwrap();
+        let tools = enterprise_specs(false).unwrap();
         assert!(tools.iter().any(|tool| tool["name"] == "memory.recall"));
         assert!(tools.iter().any(|tool| tool["name"] == "memory.ingest"));
         assert!(tools.iter().any(|tool| tool["name"] == SKILL_READ_TOOL));
@@ -2256,7 +2307,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(forged["error"]["code"], -32001);
-        let tools = enterprise_specs().unwrap();
+        let tools = enterprise_specs(false).unwrap();
         assert!(!tools
             .iter()
             .any(|tool| tool["name"] == "ccos/execution/event"));

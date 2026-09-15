@@ -20,7 +20,7 @@ ccos-enterprise-execution = { path = "../ccos-enterprise-execution" }
 ccos-enterprise-skills = { path = "../ccos-enterprise-skills" }
 ccos-enterprise-skills-audit = { path = "../ccos-enterprise-skills-audit" }
 ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
-ccos-enterprise-octasoma = { path = "../ccos-enterprise-octasoma" }
+ccos-enterprise-provider-adapter.workspace = true
 ccos-core.workspace = true
 ed25519-dalek = "2"
 rand.workspace = true

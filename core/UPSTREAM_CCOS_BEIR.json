@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "repository": "Memorithm/CCOS-Core",
+  "commit": "d5b564eac008321d53db711276d0781ee8cc8a79",
+  "scope": "BEIR import and benchmark only; not a complete Core synchronization",
+  "upstream_pr": 26,
+  "enterprise_issue": 149,
+  "files": [
+    {
+      "source": "examples/beir_eval.rs",
+      "target": "core/examples/beir_eval.rs",
+      "sha256": "97a80ad192f990de05b5607284a92406dc1f15cc04bd7ac80e7798b39fcdc068",
+      "git_blob": "42b01e173c56b90916ae79da3c7e651dc67ab527"
+    },
+    {
+      "source": "examples/support/beir_import.rs",
+      "target": "core/examples/support/beir_import.rs",
+      "sha256": "31b23ba4a2e75a0a318a76f9a4faf6f2e97a2dc0f3f7ceab3a081c1068565a78",
+      "git_blob": "c0fed19438cac322fb796c91efd2b8d48e633b0a"
+    },
+    {
+      "source": "docs/BEIR_IMPORT_CONTRACT.md",
+      "target": "core/docs/BEIR_IMPORT_CONTRACT.md",
+      "sha256": "e8d2aa7750407bff543a583b9b9ca31bb4e42ccdbd5f12ccf411c0fac9b50fe5",
+      "git_blob": "a0e931c27286d9044cf30cb1cded1b0bbf249203"
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+name: Strict BEIR import
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Verify scoped BEIR source provenance
+        run: |
+          python3 - <<'PYLINEAGE'
+          import hashlib
+          import json
+          from pathlib import Path
+          marker = json.loads(Path('core/UPSTREAM_CCOS_BEIR.json').read_text())
+          assert marker['schema_version'] == 1
+          assert marker['repository'] == 'Memorithm/CCOS-Core'
+          expected = {
+              'examples/beir_eval.rs': 'core/examples/beir_eval.rs',
+              'examples/support/beir_import.rs': 'core/examples/support/beir_import.rs',
+              'docs/BEIR_IMPORT_CONTRACT.md': 'core/docs/BEIR_IMPORT_CONTRACT.md',
+          }
+          assert {row['source']: row['target'] for row in marker['files']} == expected
+          assert len(marker['files']) == len(expected)
+          for row in marker['files']:
+              actual = hashlib.sha256(Path(row['target']).read_bytes()).hexdigest()
+              assert actual == row['sha256'], row['target']
+          print('BEIR source hashes match the scoped upstream provenance')
+          PYLINEAGE
+      - name: Parser regressions and lint
+        run: |
+          cargo test -p ccos-core --example beir_eval --locked
+          cargo clippy -p ccos-core --example beir_eval --locked -- -D warnings
+          cargo build -p ccos-core --example beir_eval --locked
+      - name: CLI refuses invalid input before index construction
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import subprocess
+          import tempfile
+
+          binary = pathlib.Path('target/debug/examples/beir_eval').resolve()
+          with tempfile.TemporaryDirectory(prefix='beir-import-') as tmp:
+              root = pathlib.Path(tmp)
+              (root / 'qrels').mkdir()
+              corpus = '{"_id":"d1","text":"document evidence"}\n'
+              queries = '{"_id":"q1","text":"question"}\n'
+              qrels = 'query-id\tcorpus-id\tscore\nq1\td1\t1\n'
+              def write(c, q, r):
+                  for name, text in [('corpus.jsonl', c), ('queries.jsonl', q), ('qrels/test.tsv', r)]:
+                      (root / name).write_text(text, encoding='utf-8')
+              write(corpus, queries, qrels)
+              ok = subprocess.run([str(binary), str(root), '--validate-only'], text=True, capture_output=True, timeout=30)
+              assert ok.returncode == 0, ok.stderr
+              assert 'indexing and scoring not performed' in ok.stdout
+              assert 'corpus_rows=1 query_rows=1 qrel_rows=1' in ok.stderr
+              cases = [
+                  (corpus + corpus, queries, qrels, 'corpus.jsonl:2:'),
+                  (corpus, queries + queries, qrels, 'queries.jsonl:2:'),
+                  ('{"_id":"d1","text":null}\n', queries, qrels, 'corpus.jsonl:1:'),
+                  (corpus, '{"_id":"q1"}\n', qrels, 'queries.jsonl:1:'),
+                  (corpus, queries, qrels + 'q1\tmissing\t1\n', 'test.tsv:3:'),
+              ]
+              for c, q, r, diagnostic in cases:
+                  write(c, q, r)
+                  bad = subprocess.run([str(binary), str(root)], text=True, capture_output=True, timeout=30)
+                  assert bad.returncode == 2, (bad.returncode, bad.stderr)
+                  assert diagnostic in bad.stderr, bad.stderr
+                  assert not bad.stdout, bad.stdout
+                  assert 'index:' not in bad.stderr, bad.stderr
+              print('CLI: valid import and five fail-before-index cases passed')
+          PY
+      - name: LLM harness tests are genuinely enabled
+        shell: bash
+        run: |
+          cargo test -p ccos-core --features llm --lib eval::tests --locked -- --list > /tmp/ccos-eval-tests.txt
+          grep -E '^eval::tests::.*: test$' /tmp/ccos-eval-tests.txt
+          cargo test -p ccos-core --features llm --lib eval::tests --locked

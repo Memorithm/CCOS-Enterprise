@@ -269,9 +269,14 @@ fn context_call(id: u64, request_id: &str, attempt: &str) -> Value {
     })
 }
 
-fn advance_offline(provider: &Path, asset: &str) -> ccos_enterprise_provider_adapter::accepted_write::EvidenceGenerationReceipt {
+fn advance_offline(
+    provider: &Path,
+    asset: &str,
+) -> ccos_enterprise_provider_adapter::accepted_write::EvidenceGenerationReceipt {
     let store = ProviderGenerationStore::open(provider, tenant()).unwrap();
-    let prepared = store.prepare_unverified_evidence(write_input(asset)).unwrap();
+    let prepared = store
+        .prepare_unverified_evidence(write_input(asset))
+        .unwrap();
     let (store, receipt) = store.commit_prepared_evidence(prepared).unwrap();
     assert_eq!(store.generation(), receipt.generation);
     drop(store);
@@ -306,7 +311,11 @@ fn write_effect_fixture(
         value["governed_asset_id"] = json!(receipt.asset_id.as_str());
         value["governed_image_sha256"] = json!(digest_hex(receipt.image_digest));
     }
-    std::fs::write(effect_path(state), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    std::fs::write(
+        effect_path(state),
+        serde_json::to_vec_pretty(&value).unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -314,32 +323,52 @@ fn real_stdio_write_advances_generation_and_restart_keeps_new_evidence_unverifie
     let root = Directory::new();
     let provider = root.0.join("provider");
     let state = root.0.join("server");
-    let store = ProviderGenerationStore::initialize(&provider, authority(), config(), &records()).unwrap();
+    let store =
+        ProviderGenerationStore::initialize(&provider, authority(), config(), &records()).unwrap();
     drop(store);
     let (token, public) = token();
 
     let mut server = ServerProcess::spawn(&state, &provider, &token, &public);
-    let listed = server.request(json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":null}));
-    assert!(listed["result"]["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "memory.evidence.write"));
+    let listed =
+        server.request(json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":null}));
+    assert!(listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "memory.evidence.write"));
     let written = server.request(write_call(2, "write-live", "attempt-write", "fresh-live"));
     assert!(written.get("error").is_none(), "{written}");
     assert_eq!(written["result"]["structuredContent"]["generation"], 1);
-    assert_eq!(written["result"]["structuredContent"]["trust_state"], "unverified");
+    assert_eq!(
+        written["result"]["structuredContent"]["trust_state"],
+        "unverified"
+    );
     let context = server.request(context_call(3, "context-live", "attempt-context"));
     let structured = &context["result"]["structuredContent"];
     assert_eq!(structured["generation"], 1);
-    assert!(structured["items"].as_array().unwrap().iter().all(|item| item["asset_id"] != "fresh-live"));
+    assert!(structured["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["asset_id"] != "fresh-live"));
     server.stop();
 
     let store = ProviderGenerationStore::open(&provider, tenant()).unwrap();
     assert_eq!(store.generation(), 1);
-    assert_eq!(store.governance().trust[&id("fresh-live")].state(), MemoryValidationState::Unverified);
+    assert_eq!(
+        store.governance().trust[&id("fresh-live")].state(),
+        MemoryValidationState::Unverified
+    );
     drop(store);
 
     let mut restarted = ServerProcess::spawn(&state, &provider, &token, &public);
     let context = restarted.request(context_call(4, "context-restart", "attempt-restart"));
     assert_eq!(context["result"]["structuredContent"]["generation"], 1);
-    assert!(context["result"]["structuredContent"]["items"].as_array().unwrap().iter().all(|item| item["asset_id"] != "fresh-live"));
+    assert!(context["result"]["structuredContent"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["asset_id"] != "fresh-live"));
     restarted.stop();
 }
 
@@ -348,7 +377,8 @@ fn published_generation_with_started_marker_fails_closed_on_restart() {
     let root = Directory::new();
     let provider = root.0.join("provider");
     let state = root.0.join("server");
-    let store = ProviderGenerationStore::initialize(&provider, authority(), config(), &records()).unwrap();
+    let store =
+        ProviderGenerationStore::initialize(&provider, authority(), config(), &records()).unwrap();
     drop(store);
     let (token, public) = token();
     bootstrap_state(&state, &provider, &token, &public);
@@ -359,9 +389,16 @@ fn published_generation_with_started_marker_fails_closed_on_restart() {
     let output = startup(&state, &provider, &token, &public);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("crossed the durable start boundary"), "{stderr}");
+    assert!(
+        stderr.contains("crossed the durable start boundary"),
+        "{stderr}"
+    );
     let store = ProviderGenerationStore::open(&provider, tenant()).unwrap();
-    assert_eq!(store.generation(), 1, "restart must not reexecute the write");
+    assert_eq!(
+        store.generation(),
+        1,
+        "restart must not reexecute the write"
+    );
 }
 
 #[test]
@@ -369,7 +406,8 @@ fn succeeded_receipt_is_verified_then_settled_without_reexecuting_generation() {
     let root = Directory::new();
     let provider = root.0.join("provider");
     let state = root.0.join("server");
-    let store = ProviderGenerationStore::initialize(&provider, authority(), config(), &records()).unwrap();
+    let store =
+        ProviderGenerationStore::initialize(&provider, authority(), config(), &records()).unwrap();
     drop(store);
     let (token, public) = token();
     bootstrap_state(&state, &provider, &token, &public);
@@ -377,11 +415,20 @@ fn succeeded_receipt_is_verified_then_settled_without_reexecuting_generation() {
     write_effect_fixture(&state, "succeeded", Some(&receipt));
 
     let output = startup(&state, &provider, &token, &public);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let settled: Value = serde_json::from_slice(&std::fs::read(effect_path(&state)).unwrap()).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let settled: Value =
+        serde_json::from_slice(&std::fs::read(effect_path(&state)).unwrap()).unwrap();
     assert_eq!(settled["state"], "settled");
     assert_eq!(settled["governed_generation"], 1);
     let store = ProviderGenerationStore::open(&provider, tenant()).unwrap();
-    assert_eq!(store.generation(), 1, "recovery must settle, not execute generation 2");
+    assert_eq!(
+        store.generation(),
+        1,
+        "recovery must settle, not execute generation 2"
+    );
     assert!(store.matches_evidence_receipt(&receipt));
 }

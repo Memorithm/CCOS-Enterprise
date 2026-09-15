@@ -34,6 +34,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Reconcile lock metadata without changing external packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp Cargo.lock /tmp/ccos-lock-before.toml
+          cargo metadata --format-version 1 > /tmp/ccos-metadata.json
+          python3 - <<'PYLOCK'
+          import tomllib
+          from pathlib import Path
+          old = tomllib.loads(Path('/tmp/ccos-lock-before.toml').read_text())['package']
+          new = tomllib.loads(Path('Cargo.lock').read_text())['package']
+          def key(row):
+              return (row['name'], row['version'], row.get('source'), row.get('checksum'))
+          before = {key(row): row for row in old}
+          after = {key(row): row for row in new}
+          assert before.keys() == after.keys(), 'package identity/version/source/checksum changed'
+          for identity in before:
+              if before[identity] != after[identity]:
+                  assert identity[2] is None and identity[0].startswith('ccos-'), identity
+                  print('local lock entry repair:', identity[0])
+                  print('before:', before[identity])
+                  print('after: ', after[identity])
+          PYLOCK
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff -- Cargo.lock
       - name: Copy only the reviewed benchmark slice and record provenance
         shell: bash
         run: |
@@ -119,9 +144,9 @@ jobs:
           set -euo pipefail
           git config user.name 'ZEKRITI Tarek'
           git config user.email contact@checkupauto.fr
-          git add core/examples/beir_eval.rs core/examples/support/beir_import.rs \
+          git add Cargo.lock core/examples/beir_eval.rs core/examples/support/beir_import.rs \
             core/docs/BEIR_IMPORT_CONTRACT.md core/UPSTREAM_CCOS_BEIR.json \
             .github/workflows/beir-import.yml
           git diff --cached --quiet && exit 1
-          git commit -m 'fix(eval): sync strict BEIR imports from qualified CCOS-Core source'
+          git commit -m 'fix(eval): sync strict BEIR imports and reconcile local lock metadata'
           git push origin HEAD:audit/sync-strict-beir-core

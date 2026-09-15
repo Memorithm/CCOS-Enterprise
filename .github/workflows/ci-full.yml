@@ -10,112 +10,161 @@ on:
 permissions:
   contents: read
 
+# Contract tests use the pinned/MSRV baseline. Current stable is a distinct fast-CI job.
+env:
+  RUSTUP_TOOLCHAIN: 1.89.0
+
 jobs:
   contract:
     name: boundary + contract tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - name: Actual toolchain and committed lockfile
+        run: |
+          rustc --version --verbose
+          cargo --version
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code HEAD -- Cargo.lock
       - name: gateway namespace contract (Hermes/OpenClaw surface)
-        run: cargo test -p ccos-enterprise-gateway --release
+        run: cargo test -p ccos-enterprise-gateway --release --locked
       - name: Knowledge Plane P0 conformance
         run: |
-          cargo test -p ccos-enterprise-knowledge-model -p ccos-enterprise-knowledge -p ccos-enterprise-knowledge-store --release
-          cargo test -p ccos-knowledge-conformance --test p0 --release
+          cargo test -p ccos-enterprise-knowledge-model -p ccos-enterprise-knowledge -p ccos-enterprise-knowledge-store --release --locked
+          cargo test -p ccos-knowledge-conformance --test p0 --release --locked
       - name: Knowledge Plane P1 local ingestion
         run: |
-          cargo test -p ccos-enterprise-ingest --release
-          cargo test -p ccos-knowledge-conformance --test p1_local_ingest --release
+          cargo test -p ccos-enterprise-ingest --release --locked
+          cargo test -p ccos-knowledge-conformance --test p1_local_ingest --release --locked
       - name: Knowledge Plane P1 normalization
         run: |
-          cargo test -p ccos-enterprise-normalize --release
-          cargo test -p ccos-knowledge-conformance --test p1_normalize --release
+          cargo test -p ccos-enterprise-normalize --release --locked
+          cargo test -p ccos-knowledge-conformance --test p1_normalize --release --locked
       - name: Knowledge Plane P1 source-span parsing
         run: |
-          cargo test -p ccos-enterprise-parse --release
-          cargo test -p ccos-knowledge-conformance --test p1_parse --release
+          cargo test -p ccos-enterprise-parse --release --locked
+          cargo test -p ccos-knowledge-conformance --test p1_parse --release --locked
       - name: Knowledge Plane P2 structural extraction
         run: |
-          cargo test -p ccos-enterprise-extract --release
-          cargo test -p ccos-knowledge-conformance --test p2_extract --release
+          cargo test -p ccos-enterprise-extract --release --locked
+          cargo test -p ccos-knowledge-conformance --test p2_extract --release --locked
       - name: Knowledge Plane P2 exact-key resolution
         run: |
-          cargo test -p ccos-enterprise-resolution --release
-          cargo test -p ccos-knowledge-conformance --test p2_resolution --release
+          cargo test -p ccos-enterprise-resolution --release --locked
+          cargo test -p ccos-knowledge-conformance --test p2_resolution --release --locked
       - name: Knowledge Plane P3 canonical graph view
         run: |
-          cargo test -p ccos-enterprise-kg --release
-          cargo test -p ccos-knowledge-conformance --test p3_graph --release
+          cargo test -p ccos-enterprise-kg --release --locked
+          cargo test -p ccos-knowledge-conformance --test p3_graph --release --locked
       - name: Knowledge Plane P4 ontology validation
         run: |
-          cargo test -p ccos-enterprise-ontology --release
-          cargo test -p ccos-knowledge-conformance --test p4_ontology --release
+          cargo test -p ccos-enterprise-ontology --release --locked
+          cargo test -p ccos-knowledge-conformance --test p4_ontology --release --locked
       - name: Knowledge Plane P4 typed canonical promotion
         run: |
-          cargo test -p ccos-enterprise-promotion --release
-          cargo test -p ccos-knowledge-conformance --test p4_promotion --release
+          cargo test -p ccos-enterprise-promotion --release --locked
+          cargo test -p ccos-knowledge-conformance --test p4_promotion --release --locked
       - name: Knowledge Plane P4 reversible ontology migration
         run: |
-          cargo test -p ccos-enterprise-ontology-migration --release
-          cargo test -p ccos-knowledge-conformance --test p4_migration --release
+          cargo test -p ccos-enterprise-ontology-migration --release --locked
+          cargo test -p ccos-knowledge-conformance --test p4_migration --release --locked
       - name: Knowledge Plane P4 semantic interoperability
         run: |
-          cargo test -p ccos-enterprise-semantic --release
-          cargo test -p ccos-knowledge-conformance --test p4_semantic --release
+          cargo test -p ccos-enterprise-semantic --release --locked
+          cargo test -p ccos-knowledge-conformance --test p4_semantic --release --locked
       - name: Knowledge Plane P5 Decision Intelligence
         run: |
-          cargo test -p ccos-enterprise-decision --release
-          cargo test -p ccos-knowledge-conformance --test p5_decision --release
+          cargo test -p ccos-enterprise-decision --release --locked
+          cargo test -p ccos-knowledge-conformance --test p5_decision --release --locked
       - name: Knowledge Plane P5b1 durable decision journal
         run: |
-          cargo test -p ccos-enterprise-decision-store --release
-          cargo test -p ccos-knowledge-conformance --test p5b_decision_store --release
+          cargo test -p ccos-enterprise-decision-store --release --locked
+          cargo test -p ccos-knowledge-conformance --test p5b_decision_store --release --locked
       - name: Knowledge Plane P5b2 governed decision tools
         run: |
-          cargo test -p ccos-enterprise-decision-service --release
-          cargo test -p ccos-enterprise-mcp --test decision_surface --release
-          cargo test -p ccos-enterprise-conformance --test decision_tools --release
+          cargo test -p ccos-enterprise-decision-service --release --locked
+          cargo test -p ccos-enterprise-mcp --test decision_surface --release --locked
+          cargo test -p ccos-enterprise-conformance --test decision_tools --release --locked
       - name: RBAC + tenancy + policy contracts
-        run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release
+        run: cargo test -p ccos-enterprise-rbac -p ccos-enterprise-tenancy -p ccos-enterprise-policy --release --locked
       - name: governance wire formats (claim, manifest, revocation)
-        run: cargo test -p ccos-enterprise-governance --all-features --release
+        run: cargo test -p ccos-enterprise-governance --all-features --release --locked
       - name: license server integration
-        run: cargo test -p ccos-license-server --release
+        run: cargo test -p ccos-license-server --release --locked
       - name: Hermes/OpenClaw tool-catalogue contract
-        run: cargo test -p ccos-enterprise-conformance --test boundary_contract --release
+        run: cargo test -p ccos-enterprise-conformance --test boundary_contract --release --locked
       - name: governed request path (identity → tenancy → authz → policy → boundary → audit)
-        run: cargo test -p ccos-enterprise-conformance --test governed_path --release
+        run: cargo test -p ccos-enterprise-conformance --test governed_path --release --locked
       - name: tenant isolation + cross-tenant leakage + concurrency
-        run: cargo test -p ccos-enterprise-conformance --test isolation --release
+        run: cargo test -p ccos-enterprise-conformance --test isolation --release --locked
       - name: adversarial (escalation, quota abuse, forged restore, admin trail)
-        run: cargo test -p ccos-enterprise-conformance --test adversarial --release
+        run: cargo test -p ccos-enterprise-conformance --test adversarial --release --locked
+      - name: No implicit lockfile repair
+        if: always()
+        run: git diff --exit-code HEAD -- Cargo.lock
 
   conformance:
     name: Core dependency conformance
     runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Exactly one Core in the tree (never a copy)
-        run: |
-          test "$(cargo metadata --no-deps --format-version 1 \
-                  | python3 -c 'import json,sys; print(sum(1 for p in json.load(sys.stdin)["packages"] if p["name"]=="ccos-core"))')" = 1
-          ! find crates tools -name '*.rs' | xargs grep -l 'pub fn qbelief' | grep -v target
-          echo "one Core, referenced not duplicated"
-      - name: "Enterprise boundary (§4.2): no Research-Lab in the product graph"
-        run: |
-          for p in $(cargo metadata --no-deps --format-version 1 \
-                     | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"] if p["name"].startswith("ccos-enterprise")]'); do
-            cargo tree -p "$p" --edges normal --prefix none 2>/dev/null \
-              | grep -qiE 'research-lab|ccos-forge|ccos-rsi' \
-              && { echo "BOUNDARY VIOLATION: $p reaches a forbidden crate"; exit 1; }
-          done
-          echo "no Enterprise crate reaches Research-Lab, Forge or RSI"
-
-  msrv:
-    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
-      - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features
+      - name: Actual toolchain and committed lockfile
+        run: |
+          rustc --version --verbose
+          cargo --version
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code HEAD -- Cargo.lock
+      - name: Exactly one Core in the tree (never a copy)
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/ci-guards.sh
+          cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/ccos-workspace.json"
+          python3 - "$RUNNER_TEMP/ccos-workspace.json" "$RUNNER_TEMP/ccos-enterprise-packages" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          metadata = json.loads(Path(sys.argv[1]).read_text())
+          packages = metadata['packages']
+          if sum(p['name'] == 'ccos-core' for p in packages) != 1:
+              raise SystemExit('expected exactly one Core package')
+          names = sorted(p['name'] for p in packages if p['name'].startswith('ccos-enterprise'))
+          if not names or len(names) != len(set(names)):
+              raise SystemExit('empty or duplicate Enterprise package population')
+          Path(sys.argv[2]).write_text('\n'.join(names) + '\n')
+          PY
+          require_no_matches grep -Rnl --include='*.rs' --exclude-dir=target 'pub fn qbelief' crates tools
+          echo 'one Core, referenced not duplicated'
+      - name: "Enterprise boundary (§4.2): no Research-Lab in the product graph"
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/ci-guards.sh
+          while IFS= read -r package; do
+            require_clean_output 'research-lab|ccos-forge|ccos-rsi' \
+              cargo tree --locked -p "$package" --edges normal --prefix none --color never
+          done < "$RUNNER_TEMP/ccos-enterprise-packages"
+          echo 'no Enterprise crate reaches Research-Lab, Forge or RSI'
+      - name: No implicit lockfile repair
+        if: always()
+        run: git diff --exit-code HEAD -- Cargo.lock
+
+  msrv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - name: Actual MSRV and committed lockfile
+        run: |
+          rustc --version --verbose
+          cargo --version
+          cargo metadata --locked --format-version 1 > /dev/null
+      - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --locked
+      - name: No implicit lockfile repair
+        if: always()
+        run: git diff --exit-code HEAD -- Cargo.lock

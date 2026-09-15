@@ -11,7 +11,7 @@ pub use store::{GovernedMemoryStore, GovernedMemoryStoreError};
 
 #[path = "projection_codec.rs"]
 mod codec;
-pub use codec::encode_governed_memory_projection;
+pub use codec::{decode_governed_memory_projection, encode_governed_memory_projection};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};

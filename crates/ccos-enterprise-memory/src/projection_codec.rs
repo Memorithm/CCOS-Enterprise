@@ -1,4 +1,6 @@
 //! Canonical version-1 projection bytes shared by save and recovery binding.
+use ccos_enterprise_tenancy::TenantId;
+
 use super::{
     projection_corrupt, GovernedMemoryProjection, GovernedMemoryProjectionError,
     MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
@@ -31,4 +33,24 @@ pub fn encode_governed_memory_projection(
         ));
     }
     Ok(bytes)
+}
+
+/// Decode canonical governed-memory projection bytes through the same validating
+/// constructors used by the durable projection store.
+///
+/// This helper is intended for immutable generation artifacts. The expected
+/// tenant is independent caller input: bytes never select their own authority
+/// scope. The 16 MiB wire limit is checked before JSON decoding.
+pub fn decode_governed_memory_projection(
+    bytes: &[u8],
+    expected_tenant: &TenantId,
+) -> Result<GovernedMemoryProjection, GovernedMemoryProjectionError> {
+    if bytes.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
+        return Err(projection_corrupt(
+            "projection exceeds the 16 MiB byte limit",
+        ));
+    }
+    let document: super::WireDocument =
+        serde_json::from_slice(bytes).map_err(|error| projection_corrupt(&error.to_string()))?;
+    GovernedMemoryProjection::from_wire(Some(expected_tenant), document)
 }

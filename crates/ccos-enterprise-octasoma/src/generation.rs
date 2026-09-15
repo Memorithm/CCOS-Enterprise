@@ -1,13 +1,15 @@
-//! Trusted selector for one reconstructed governed provider generation.
+//! Trusted selector for reconstructed governed provider generations.
 //!
-//! The immutable recovery image remains data. This module stores the independent
-//! receipt/configuration/tenant selection required to decide which image may be
-//! served, then opens the existing `GovernedMemoryStore` and reconstructs the
-//! actual `EnterpriseOctaSoma` through `recovery`.
+//! Version 1 selectors bound a provider image to a separately mutable
+//! `GovernedMemoryStore`. Version 2 instead publishes two immutable generation
+//! artifacts — canonical governance bytes and the provider recovery image — and
+//! makes them authoritative together by atomically replacing one small selector.
+//! The selector is always published last, so unreferenced artifacts are inert.
 //!
-//! It is deliberately read-only after open. Accepted-write capture and generation
-//! advancement require a separate crash-safe mutation protocol; callers must not
-//! rewrite the selector behind a live owner.
+//! Version 1 remains readable for existing deployments. New initialization and
+//! generation advancement emit version 2 only. `advance` consumes the current
+//! owner: if publication becomes uncertain the caller cannot keep serving the
+//! old in-memory owner and must explicitly reopen the durable selector.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
@@ -15,8 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ccos_enterprise_memory::{
-    encode_governed_memory_projection, GovernedMemoryProjection, GovernedMemoryProjectionError,
-    GovernedMemoryStore, GovernedMemoryStoreError,
+    decode_governed_memory_projection, encode_governed_memory_projection, GovernedMemoryProjection,
+    GovernedMemoryProjectionError, GovernedMemoryStore, GovernedMemoryStoreError,
+    MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
 };
 use ccos_enterprise_tenancy::TenantId;
 use serde::{Deserialize, Serialize};
@@ -27,9 +30,12 @@ use crate::recovery::{
     RecoveryRecord,
 };
 
-pub const GENERATION_SELECTOR_VERSION: u32 = 1;
+const LEGACY_GENERATION_SELECTOR_VERSION: u32 = 1;
+pub const GENERATION_SELECTOR_VERSION: u32 = 2;
+/// Legacy v1 mutable governance directory. Version 2 does not write here.
 pub const GOVERNANCE_DIR: &str = "governance";
 pub const PROVIDER_GENERATIONS_DIR: &str = "provider-generations";
+pub const GOVERNANCE_GENERATIONS_DIR: &str = "governance-generations";
 pub const PROVIDER_SELECTOR_FILE: &str = "provider-current.json";
 const PROVIDER_LOCK_FILE: &str = ".provider-generation.lock";
 const MAX_SELECTOR_BYTES: usize = 64 * 1024;
@@ -48,6 +54,7 @@ pub enum ProviderGenerationError {
     Invalid(&'static str),
     TenantMismatch,
     GovernanceMismatch,
+    GenerationOverflow,
 }
 
 impl std::fmt::Display for ProviderGenerationError {
@@ -70,8 +77,9 @@ impl std::fmt::Display for ProviderGenerationError {
                 f.write_str("provider generation belongs to a different tenant")
             }
             Self::GovernanceMismatch => {
-                f.write_str("provider generation selector does not match current governance")
+                f.write_str("provider generation selector does not match its governance")
             }
+            Self::GenerationOverflow => f.write_str("provider generation counter overflow"),
         }
     }
 }
@@ -115,17 +123,24 @@ struct WireSelector {
     generation: u64,
     image_file: String,
     image_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    governance_file: Option<String>,
     governance_sha256: String,
     config: RecoveryConfig,
 }
 
-/// Exclusive read-only owner of one provider generation and its governance.
+enum GenerationGovernance {
+    Legacy(GovernedMemoryStore),
+    Immutable(GovernedMemoryProjection),
+}
+
+/// Exclusive owner of one selected provider generation and its exact governance.
 pub struct ProviderGenerationStore {
     root: PathBuf,
     tenant: TenantId,
     generation: u64,
     config: RecoveryConfig,
-    governance: GovernedMemoryStore,
+    governance: GenerationGovernance,
     recovered: RecoveredGovernedMemory,
     _lock: File,
 }
@@ -137,11 +152,11 @@ impl Drop for ProviderGenerationStore {
 }
 
 impl ProviderGenerationStore {
-    /// Provision generation zero from a complete authoritative record set.
+    /// Provision generation zero from one complete authoritative record set.
     ///
-    /// Provisioning is explicit and refuses every existing selector/generation
-    /// directory entry. A failure may leave files that require operator recovery;
-    /// it never treats partial state as initialized authority.
+    /// Both version-2 generation artifacts are immutable and durably written
+    /// before `provider-current.json` is created. A failure may leave unreferenced
+    /// artifacts, but they are never authoritative without the selector.
     pub fn initialize(
         root: impl AsRef<Path>,
         authority: GovernedMemoryProjection,
@@ -154,45 +169,47 @@ impl ProviderGenerationStore {
         fs::create_dir_all(requested).map_err(|source| io_error(requested, source))?;
         let root = fs::canonicalize(requested).map_err(|source| io_error(requested, source))?;
         let lock = acquire_lock(&root)?;
-        let selector_path = root.join(PROVIDER_SELECTOR_FILE);
-        reject_existing(&selector_path)?;
+        reject_existing(&root.join(PROVIDER_SELECTOR_FILE))?;
 
-        let generations = root.join(PROVIDER_GENERATIONS_DIR);
-        match fs::create_dir(&generations) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(ProviderGenerationError::AlreadyInitialized { path: generations })
-            }
-            Err(source) => return Err(io_error(&generations, source)),
-        }
+        let provider_generations = root.join(PROVIDER_GENERATIONS_DIR);
+        create_exclusive_directory(&provider_generations)?;
+        let governance_generations = root.join(GOVERNANCE_GENERATIONS_DIR);
+        create_exclusive_directory(&governance_generations)?;
         sync_directory(&root)?;
 
-        let governance = GovernedMemoryStore::initialize(root.join(GOVERNANCE_DIR), authority)?;
-        let current = governance.projection_for(&tenant)?;
-        let image = RecoveryImage::capture(current, config, records)?;
+        let governance_bytes = encode_governed_memory_projection(&authority)?;
+        let current = decode_governed_memory_projection(&governance_bytes, &tenant)?;
+        let image = RecoveryImage::capture(&current, config, records)?;
         let generation = 0;
-        let image_file = generation_filename(generation);
-        let image_path = generations.join(&image_file);
-        image.write_new(&image_path)?;
+        let governance_file = governance_generation_filename(generation);
+        write_new_bytes(
+            &governance_generations.join(&governance_file),
+            &governance_bytes,
+        )?;
+        let image_file = provider_generation_filename(generation);
+        image.write_new(provider_generations.join(&image_file))?;
         let selector = WireSelector {
             version: GENERATION_SELECTOR_VERSION,
             tenant: tenant.as_str().to_string(),
             generation,
             image_file,
             image_sha256: hex_digest(image.digest()),
-            governance_sha256: sha256_hex(&encode_governed_memory_projection(current)?),
+            governance_file: Some(governance_file),
+            governance_sha256: sha256_hex(&governance_bytes),
             config,
         };
-        publish_selector(&root, &selector)?;
+        publish_initial_selector(&root, &selector)?;
 
-        // `open` reacquires both locks and revalidates the bytes from disk rather
-        // than returning objects derived from the provisioning call.
-        drop(governance);
         drop(lock);
         Self::open(&root, tenant)
     }
 
     /// Open exactly the generation named by the trusted local selector.
+    ///
+    /// Before serving any visible selector, reopen synchronizes both the selector
+    /// file and its containing directory. This closes an uncertain-publication
+    /// window where a rename was visible but the directory sync previously failed:
+    /// reopen either establishes durability or fails without returning an owner.
     pub fn open(
         root: impl AsRef<Path>,
         expected_tenant: TenantId,
@@ -201,39 +218,141 @@ impl ProviderGenerationStore {
         let requested = root.as_ref();
         let root = fs::canonicalize(requested).map_err(|source| io_error(requested, source))?;
         let lock = acquire_lock(&root)?;
+        sync_visible_selector(&root)?;
+        let selector = read_selector(&root.join(PROVIDER_SELECTOR_FILE))?;
+        validate_selector(&selector, &expected_tenant)?;
+        match selector.version {
+            LEGACY_GENERATION_SELECTOR_VERSION => {
+                Self::open_v1(root, lock, expected_tenant, selector)
+            }
+            GENERATION_SELECTOR_VERSION => Self::open_v2(root, lock, expected_tenant, selector),
+            _ => Err(ProviderGenerationError::Invalid(
+                "unsupported selector version",
+            )),
+        }
+    }
+
+    fn open_v1(
+        root: PathBuf,
+        lock: File,
+        expected_tenant: TenantId,
+        selector: WireSelector,
+    ) -> Result<Self, ProviderGenerationError> {
+        if selector.governance_file.is_some() {
+            return Err(ProviderGenerationError::Invalid(
+                "legacy selector cannot name a governance generation",
+            ));
+        }
         let governance =
             GovernedMemoryStore::open(root.join(GOVERNANCE_DIR), expected_tenant.clone())?;
         let current = governance.projection_for(&expected_tenant)?;
-        let selector_path = root.join(PROVIDER_SELECTOR_FILE);
-        let selector = read_selector(&selector_path)?;
-        validate_selector(&selector, &expected_tenant)?;
-
         let expected_governance = sha256_hex(&encode_governed_memory_projection(current)?);
         if selector.governance_sha256 != expected_governance {
             return Err(ProviderGenerationError::GovernanceMismatch);
         }
-
-        let expected_file = generation_filename(selector.generation);
-        if selector.image_file != expected_file {
-            return Err(ProviderGenerationError::Invalid(
-                "non-canonical image filename",
-            ));
-        }
-        let digest = parse_digest(&selector.image_sha256)?;
-        let image_path = root
-            .join(PROVIDER_GENERATIONS_DIR)
-            .join(&selector.image_file);
-        let image = File::open(&image_path).map_err(|source| io_error(&image_path, source))?;
-        let recovered = restore_governed_memory(image, digest, current, selector.config)?;
+        let recovered = open_provider_image(&root, &selector, current)?;
         Ok(Self {
             root,
             tenant: expected_tenant,
             generation: selector.generation,
             config: selector.config,
-            governance,
+            governance: GenerationGovernance::Legacy(governance),
             recovered,
             _lock: lock,
         })
+    }
+
+    fn open_v2(
+        root: PathBuf,
+        lock: File,
+        expected_tenant: TenantId,
+        selector: WireSelector,
+    ) -> Result<Self, ProviderGenerationError> {
+        let expected_governance_file = governance_generation_filename(selector.generation);
+        let governance_file =
+            selector
+                .governance_file
+                .as_deref()
+                .ok_or(ProviderGenerationError::Invalid(
+                    "version-2 selector requires governance file",
+                ))?;
+        if governance_file != expected_governance_file {
+            return Err(ProviderGenerationError::Invalid(
+                "non-canonical governance filename",
+            ));
+        }
+        let governance_path = root.join(GOVERNANCE_GENERATIONS_DIR).join(governance_file);
+        let governance_bytes = read_bounded_file(
+            &governance_path,
+            MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
+            "governance generation exceeds byte limit",
+        )?;
+        if sha256_hex(&governance_bytes) != selector.governance_sha256 {
+            return Err(ProviderGenerationError::GovernanceMismatch);
+        }
+        let current = decode_governed_memory_projection(&governance_bytes, &expected_tenant)?;
+        let recovered = open_provider_image(&root, &selector, &current)?;
+        Ok(Self {
+            root,
+            tenant: expected_tenant,
+            generation: selector.generation,
+            config: selector.config,
+            governance: GenerationGovernance::Immutable(current),
+            recovered,
+            _lock: lock,
+        })
+    }
+
+    /// Publish one complete next generation and reopen it from durable bytes.
+    ///
+    /// The receiver is consumed. If any step fails, this owner is dropped and
+    /// the caller must reopen the selector explicitly. Provider/governance files
+    /// are immutable. A retry may reuse an orphan only when its bytes exactly
+    /// match the generation that is being retried; any collision with different
+    /// bytes fails closed. The selector replacement itself is one filesystem
+    /// rename followed by directory sync; no anti-rollback, distributed-
+    /// transaction, or broad physical power-loss guarantee is claimed.
+    pub fn advance(
+        self,
+        authority: GovernedMemoryProjection,
+        config: RecoveryConfig,
+        records: &[RecoveryRecord],
+    ) -> Result<Self, ProviderGenerationError> {
+        let root = self.root.clone();
+        let tenant = self.tenant.clone();
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(ProviderGenerationError::GenerationOverflow)?;
+        let governance_bytes = encode_governed_memory_projection(&authority)?;
+        let current = decode_governed_memory_projection(&governance_bytes, &tenant)?;
+        let image = RecoveryImage::capture(&current, config, records)?;
+
+        let governance_generations = root.join(GOVERNANCE_GENERATIONS_DIR);
+        ensure_directory(&governance_generations)?;
+        let provider_generations = root.join(PROVIDER_GENERATIONS_DIR);
+        ensure_directory(&provider_generations)?;
+
+        let governance_file = governance_generation_filename(generation);
+        write_new_or_verify_exact(
+            &governance_generations.join(&governance_file),
+            &governance_bytes,
+        )?;
+        let image_file = provider_generation_filename(generation);
+        write_new_or_verify_exact(&provider_generations.join(&image_file), image.as_bytes())?;
+        let selector = WireSelector {
+            version: GENERATION_SELECTOR_VERSION,
+            tenant: tenant.as_str().to_string(),
+            generation,
+            image_file,
+            image_sha256: hex_digest(image.digest()),
+            governance_file: Some(governance_file),
+            governance_sha256: sha256_hex(&governance_bytes),
+            config,
+        };
+        replace_selector(&root, &selector)?;
+        drop(self);
+        Self::open(&root, tenant)
     }
 
     pub fn root(&self) -> &Path {
@@ -253,14 +372,37 @@ impl ProviderGenerationStore {
     }
 
     pub fn governance(&self) -> &GovernedMemoryProjection {
-        self.governance
-            .projection_for(&self.tenant)
-            .expect("owned tenant was validated when the generation opened")
+        match &self.governance {
+            GenerationGovernance::Legacy(store) => store
+                .projection_for(&self.tenant)
+                .expect("legacy generation governance was validated when opened"),
+            GenerationGovernance::Immutable(projection) => projection,
+        }
     }
 
     pub fn recovered(&self) -> &RecoveredGovernedMemory {
         &self.recovered
     }
+}
+
+fn open_provider_image(
+    root: &Path,
+    selector: &WireSelector,
+    current: &GovernedMemoryProjection,
+) -> Result<RecoveredGovernedMemory, ProviderGenerationError> {
+    let expected_file = provider_generation_filename(selector.generation);
+    if selector.image_file != expected_file {
+        return Err(ProviderGenerationError::Invalid(
+            "non-canonical image filename",
+        ));
+    }
+    let digest = parse_digest(&selector.image_sha256)?;
+    let image_path = root
+        .join(PROVIDER_GENERATIONS_DIR)
+        .join(&selector.image_file);
+    let image = File::open(&image_path).map_err(|source| io_error(&image_path, source))?;
+    restore_governed_memory(image, digest, current, selector.config)
+        .map_err(ProviderGenerationError::Recovery)
 }
 
 fn validate_tenant(tenant: &TenantId) -> Result<(), ProviderGenerationError> {
@@ -280,8 +422,40 @@ fn reject_existing(path: &Path) -> Result<(), ProviderGenerationError> {
     }
 }
 
-fn generation_filename(generation: u64) -> String {
+fn create_exclusive_directory(path: &Path) -> Result<(), ProviderGenerationError> {
+    match fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(ProviderGenerationError::AlreadyInitialized {
+                path: path.to_path_buf(),
+            })
+        }
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
+fn ensure_directory(path: &Path) -> Result<(), ProviderGenerationError> {
+    match fs::create_dir(path) {
+        Ok(()) => sync_directory(path.parent().unwrap_or_else(|| Path::new("."))),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(ProviderGenerationError::Invalid(
+                    "generation directory is not a real directory",
+                ));
+            }
+            Ok(())
+        }
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
+fn provider_generation_filename(generation: u64) -> String {
     format!("generation-{generation:020}.json")
+}
+
+fn governance_generation_filename(generation: u64) -> String {
+    format!("generation-{generation:020}.governance.json")
 }
 
 fn acquire_lock(root: &Path) -> Result<File, ProviderGenerationError> {
@@ -303,33 +477,68 @@ fn acquire_lock(root: &Path) -> Result<File, ProviderGenerationError> {
     Ok(lock)
 }
 
+fn sync_visible_selector(root: &Path) -> Result<(), ProviderGenerationError> {
+    let path = root.join(PROVIDER_SELECTOR_FILE);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ProviderGenerationError::MissingSelector { path });
+        }
+        Err(source) => return Err(io_error(&path, source)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ProviderGenerationError::Invalid(
+            "selector is not a regular file",
+        ));
+    }
+    File::open(&path)
+        .and_then(|file| file.sync_all())
+        .map_err(|source| io_error(&path, source))?;
+    sync_directory(root)
+}
+
 fn read_selector(path: &Path) -> Result<WireSelector, ProviderGenerationError> {
+    let bytes = read_bounded_file(path, MAX_SELECTOR_BYTES, "selector exceeds byte limit")?;
+    serde_json::from_slice(&bytes).map_err(ProviderGenerationError::Json)
+}
+
+fn read_bounded_file(
+    path: &Path,
+    max_bytes: usize,
+    limit_message: &'static str,
+) -> Result<Vec<u8>, ProviderGenerationError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(ProviderGenerationError::MissingSelector {
-                path: path.to_path_buf(),
-            })
+            if path
+                .file_name()
+                .is_some_and(|name| name == PROVIDER_SELECTOR_FILE)
+            {
+                return Err(ProviderGenerationError::MissingSelector {
+                    path: path.to_path_buf(),
+                });
+            }
+            return Err(io_error(path, error));
         }
         Err(source) => return Err(io_error(path, source)),
     };
     let mut bytes = Vec::new();
-    file.take(MAX_SELECTOR_BYTES as u64 + 1)
+    file.take(max_bytes as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|source| io_error(path, source))?;
-    if bytes.len() > MAX_SELECTOR_BYTES {
-        return Err(ProviderGenerationError::Invalid(
-            "selector exceeds byte limit",
-        ));
+    if bytes.len() > max_bytes {
+        return Err(ProviderGenerationError::Invalid(limit_message));
     }
-    serde_json::from_slice(&bytes).map_err(ProviderGenerationError::Json)
+    Ok(bytes)
 }
 
 fn validate_selector(
     selector: &WireSelector,
     tenant: &TenantId,
 ) -> Result<(), ProviderGenerationError> {
-    if selector.version != GENERATION_SELECTOR_VERSION {
+    if selector.version != LEGACY_GENERATION_SELECTOR_VERSION
+        && selector.version != GENERATION_SELECTOR_VERSION
+    {
         return Err(ProviderGenerationError::Invalid(
             "unsupported selector version",
         ));
@@ -337,15 +546,13 @@ fn validate_selector(
     if selector.tenant != tenant.as_str() {
         return Err(ProviderGenerationError::TenantMismatch);
     }
-    if selector.governance_sha256.len() != 64
-        || !selector
-            .governance_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
+    if !valid_hex_digest(&selector.governance_sha256) {
         return Err(ProviderGenerationError::Invalid(
             "invalid governance digest",
         ));
+    }
+    if !valid_hex_digest(&selector.image_sha256) {
+        return Err(ProviderGenerationError::Invalid("invalid image digest"));
     }
     Ok(())
 }
@@ -358,9 +565,37 @@ impl Drop for TemporarySelector {
     }
 }
 
-fn publish_selector(root: &Path, selector: &WireSelector) -> Result<(), ProviderGenerationError> {
+fn publish_initial_selector(
+    root: &Path,
+    selector: &WireSelector,
+) -> Result<(), ProviderGenerationError> {
     let path = root.join(PROVIDER_SELECTOR_FILE);
     reject_existing(&path)?;
+    write_selector(root, &path, selector)
+}
+
+fn replace_selector(root: &Path, selector: &WireSelector) -> Result<(), ProviderGenerationError> {
+    let path = root.join(PROVIDER_SELECTOR_FILE);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(ProviderGenerationError::Invalid(
+                "selector is not a regular file",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ProviderGenerationError::MissingSelector { path });
+        }
+        Err(source) => return Err(io_error(&path, source)),
+    }
+    write_selector(root, &path, selector)
+}
+
+fn write_selector(
+    root: &Path,
+    path: &Path,
+    selector: &WireSelector,
+) -> Result<(), ProviderGenerationError> {
     let bytes = serde_json::to_vec_pretty(selector).map_err(ProviderGenerationError::Json)?;
     if bytes.len() > MAX_SELECTOR_BYTES {
         return Err(ProviderGenerationError::Invalid(
@@ -387,8 +622,78 @@ fn publish_selector(root: &Path, selector: &WireSelector) -> Result<(), Provider
         .and_then(|()| file.sync_all())
         .map_err(|source| io_error(&temporary.0, source))?;
     drop(file);
-    fs::rename(&temporary.0, &path).map_err(|source| io_error(&path, source))?;
+    fs::rename(&temporary.0, path).map_err(|source| io_error(path, source))?;
     sync_directory(root)
+}
+
+fn write_new_bytes(path: &Path, bytes: &[u8]) -> Result<(), ProviderGenerationError> {
+    let parent = path.parent().ok_or(ProviderGenerationError::Invalid(
+        "generation artifact parent required",
+    ))?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|source| io_error(path, source))?;
+    sync_directory(parent)
+}
+
+fn write_new_or_verify_exact(path: &Path, bytes: &[u8]) -> Result<(), ProviderGenerationError> {
+    let parent = path.parent().ok_or(ProviderGenerationError::Invalid(
+        "generation artifact parent required",
+    ))?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|source| io_error(path, source))?;
+            sync_directory(parent)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(ProviderGenerationError::Invalid(
+                    "generation artifact is not a regular file",
+                ));
+            }
+            let file = File::open(path).map_err(|source| io_error(path, source))?;
+            let limit = bytes
+                .len()
+                .checked_add(1)
+                .ok_or(ProviderGenerationError::Invalid(
+                    "generation artifact size overflow",
+                ))?;
+            let mut existing = Vec::new();
+            (&file)
+                .take(limit as u64)
+                .read_to_end(&mut existing)
+                .map_err(|source| io_error(path, source))?;
+            if existing != bytes {
+                return Err(ProviderGenerationError::Invalid(
+                    "generation artifact collision",
+                ));
+            }
+            file.sync_all().map_err(|source| io_error(path, source))?;
+            sync_directory(parent)
+        }
+        Err(source) => Err(io_error(path, source)),
+    }
 }
 
 fn sync_directory(path: &Path) -> Result<(), ProviderGenerationError> {
@@ -410,8 +715,12 @@ fn hex_digest(digest: [u8; 32]) -> String {
     output
 }
 
+fn valid_hex_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn parse_digest(value: &str) -> Result<[u8; 32], ProviderGenerationError> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !valid_hex_digest(value) {
         return Err(ProviderGenerationError::Invalid("invalid image digest"));
     }
     let mut digest = [0u8; 32];

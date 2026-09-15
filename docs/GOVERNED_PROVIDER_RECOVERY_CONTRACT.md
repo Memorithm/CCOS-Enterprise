@@ -1,11 +1,12 @@
-# Governed provider recovery images
+# Governed provider recovery and generation publication
 
-Incremental A07/A08 recovery work after #152, for #135/#136. This is a
-reconstructible provider data artifact, not complete authenticated MCP serving.
-The existing governance owner remains authoritative. No Core or raw OctaSoma
-API is copied into another product.
+Incremental A07/A08 recovery work after #152/#154/#155, tracked by #136.
+This contract covers reconstructible provider data plus local generation
+selection. It does not claim that arbitrary Core `memory.ingest` calls already
+produce governed semantic records, nor does it create authority from retrieval
+similarity. No Core or raw OctaSoma API is copied into another product.
 
-## What this implements
+## Recovery image contract
 
 `RecoveryImage::capture` accepts the complete ordered source records and a
 validated `GovernedMemoryProjection`, with explicit dimension, SimHash width,
@@ -16,83 +17,133 @@ trust for each asset are required; stale/invalidated assets are retained, not
 reactivated or silently dropped. Forgotten rows continue to consume capacity.
 The source order is retained because replay order is part of the input contract.
 
-The artifact includes canonical governance bytes, format version and the exact
+The image includes canonical governance bytes, format version and the exact
 supported OctaSoma revision. Its SHA-256 receipt covers the entire encoded image.
 `restore_governed_memory` requires that receipt, expected configuration and
 current governance independently from the caller; it never obtains authority
-by trusting the snapshot's own labels. It validates all rows before constructing
-a new real `EnterpriseOctaSoma`, then replays through the adapter's existing
+by trusting the image's own labels. It validates all rows before constructing a
+new real `EnterpriseOctaSoma`, then replays through the adapter's existing
 insertion and forget methods. No partially reconstructed provider is returned.
 
 The recovered wrapper exposes no mutable backend or governance state. Each
 recall requires the caller's current authority, an explicit tenant/loadout and
 bounded recall request. It checks exact governance equality and tenant before
 provider access, limits requested spaces to configured spaces, then applies the
-existing canonical-space/lineage/trust gate. The caller must select the proper
-bootstrap/on-demand subset and still pass authentication, RBAC and budget
-admission first. Existing memory assembly and attestation accept the results.
+existing canonical-space/lineage/trust gate. Authentication, RBAC, runtime
+budget admission, context budgets and served settlement remain separate gates.
 
 `encode_governed_memory_projection` is the shared validating encoding used by
-existing governance save and image binding. The governance version-1 wire format
-is unchanged; its exact bytes are regression-tested against on-disk persistence.
+projection persistence and provider generation binding.
+`decode_governed_memory_projection` validates bounded canonical bytes through
+the same typed constructors and requires an independently supplied expected
+tenant. The governance version-1 wire format itself remains unchanged.
+
+## Generation selector v2
+
+`ProviderGenerationStore` now supports two selector generations:
+
+- selector **v1** remains readable for existing deployments and binds the
+  provider image to the separately owned `GovernedMemoryStore`;
+- selector **v2** is emitted by new initialization and by `advance`.
+
+A v2 generation consists of three durable objects under one provider root:
+
+1. an immutable canonical governance artifact in `governance-generations/`;
+2. an immutable provider recovery image in `provider-generations/`;
+3. `provider-current.json`, containing the tenant, generation number, exact
+   canonical filenames, SHA-256 receipts and recovery configuration.
+
+The governance and provider files are created and synchronized before the
+selector is published. The selector is the only authority pointer and is
+published last via one rename followed by directory synchronization. Files that
+exist but are not named by the selector are inert orphan artifacts and are never
+selected implicitly.
+
+`ProviderGenerationStore::advance(self, authority, config, records)` consumes
+the current owner. It writes generation `n+1`, then replaces the selector and
+reopens from durable bytes. Because the receiver is consumed, any failure means
+the caller no longer possesses an owner that can continue serving potentially
+uncertain in-memory state. If publication stops before selector replacement, the
+previous selector remains authoritative and can be reopened. A failure after a
+rename is an explicit reopen/recovery boundary, not a successful rollback.
+
+The selector never accepts arbitrary generation paths: provider and governance
+filenames are derived from the selected numeric generation and compared exactly.
+Tenant identity is independently supplied at open. Version-2 governance bytes
+are digest-checked before typed decode; provider image digest/configuration and
+exact governance are revalidated again during provider reconstruction.
 
 ## Storage and error contract
 
-`write_new` creates a new generation file only, in an already-existing trusted
-parent directory, with Unix mode 0600. It refuses existing files and dangling
-symlinks, synchronizes the file and parent, and propagates errors. A failed call
-may have left a partial or complete file: no served generation pointer may be
-advanced after an error. This API intentionally does not replace a previous
-snapshot or implement the caller's atomic generation selector.
+Recovery images and immutable governance artifacts use create-new semantics.
+Existing paths, dangling symlinks or non-directory generation roots are not
+silently replaced. Files are synchronized before their parent directory.
+Selector temporary files are created exclusively. Normal Unix rename semantics
+provide one local pointer switch; an unsupported platform replacement failure
+leaves the old selector in place and fails closed.
 
 Restore reads at most 64 MiB + 1 byte and rejects oversized input. Limits also
 cover 16,384 records/capacity, dimension 8,192, SimHash width 4,096, 32 MiB of
-projector coefficients, 32 MiB of raw vectors and 16 MiB of payloads. These are
-input/resource policy bounds, not a guarantee on total heap or replay latency.
-The canonical governance encoder retains its existing 16 MiB wire bound and
-validation allocations. Archive input uses typed deny-unknown-fields decoding;
-malformed shapes, duplicate keys, unknown assets, incomplete populations,
-nonfinite vectors and unsupported revisions fail closed.
+projector coefficients, 32 MiB of raw vectors and 16 MiB of payloads. Canonical
+governance retains its existing 16 MiB wire bound. Archive input and selectors
+use deny-unknown-fields decoding; malformed shapes, duplicate keys, unknown
+assets, incomplete populations, nonfinite vectors, invalid digests and
+unsupported revisions fail closed.
+
+This protocol is **not** a distributed transaction, KMS layer, monotonic counter,
+power-cut qualification or anti-rollback mechanism. An attacker able to replace
+both older immutable artifacts and the trusted selector can still restore an
+older valid generation unless a higher-level admitted monotonic receipt prevents
+it.
 
 ## Validation commands
 
 ```bash
-cargo +1.89.0 test -p ccos-enterprise-octasoma --lib recovery::tests --locked
-cargo +1.89.0 test -p ccos-enterprise-octasoma --doc --locked
-cargo +1.89.0 clippy -p ccos-enterprise-memory -p ccos-enterprise-octasoma --all-targets --locked -- -D warnings
+cargo +1.89.0 test -p ccos-enterprise-memory --locked
+cargo +1.89.0 test -p ccos-enterprise-octasoma --test generation_selector --locked
+cargo +1.89.0 test -p ccos-enterprise-octasoma recovery --locked
+cargo +1.89.0 test -p ccos-enterprise-mcp --test governed_context_stdio --locked
+cargo +1.89.0 clippy -p ccos-enterprise-memory -p ccos-enterprise-octasoma -p ccos-enterprise-mcp --all-targets --locked -- -D warnings
 ```
 
-Tests compare original versus reconstructed real-provider results, preserve
-binary bytes/f32 bits/order/tombstones, reject changed authority or configuration,
-exercise read/sync errors and immutable file creation, and start a fresh child
-process that loads the persisted image and rebuilds its own provider. This is
-normal-process reconstruction, not forced termination or a power-cut experiment.
-No measured retrieval-quality or large-scale performance result is claimed.
+Generation-selector regressions cover v2 initialization/reopen, v1 read
+compatibility, provider/governance path traversal refusal, generation 0→1
+advancement, inert orphan artifacts, tenant mismatch and failure before selector
+publication preserving the previous authority. Recovery tests separately cover
+binary bytes/f32 bits/order/tombstones, changed authority/configuration,
+read/sync errors and fresh-process provider reconstruction. The real MCP stdio
+regression verifies that the selected provider generation still composes with
+the authenticated governed-context path delivered by #155.
 
-## Still required for the served vertical slice
+## Still required for #136
 
-1. Capture records from the authoritative accepted-write lifecycle. This API is
-   not an exporter from arbitrary live indexes; supplied records must be complete
-   and correspond to the intended source generation. Capture does not verify
-   truth, source resolution, or historical insertion success.
-2. Persist the expected receipt/configuration and select provider/governance
-   generations through the existing durable request/effect/settlement boundary.
-3. Wire actual authenticated stdio requests and prove restart/replay under the
-   real server's permissions, quotas, audit and invalidation lifecycle.
+1. **Authoritative accepted-write capture.** `memory.ingest` carries source text,
+   not the governed semantic tuple (`MemoryAssetId`, canonical `MemorySpace`,
+   embedding, payload). CCOS must define the authoritative producer of that tuple
+   and capture it only after the corresponding governed write is accepted. No
+   embedding may be fabricated from Core ingest input merely to populate a
+   recovery image.
+2. **Admitted generation advancement.** The server must invoke generation
+   advancement from the existing request/effect/execution/quota/audit lifecycle,
+   with a durable receipt identifying which accepted writes constitute the
+   complete next generation. A library-level `advance` call is not itself an MCP
+   authorization or settlement event.
+3. **Crash/restart qualification around live advancement.** The current tests
+   prove selector-last publication and fresh-process reopen, but do not claim a
+   forced-termination test at every server settlement boundary or a physical
+   power-loss/fsync experiment.
+4. **Optional anti-rollback/encryption work.** Generation receipts are integrity
+   bindings, not signatures, monotonic hardware counters or encryption. Images
+   contain plaintext payloads and embeddings. Logical forget remains distinct
+   from physical purge.
 
-A matching digest is integrity relative to a trusted receipt, not a signature,
-anti-rollback protection or proof of truth. Replaying an older image together
-with its older authority remains possible outside a monotonic admitted lifecycle.
-Images contain plaintext payloads and embeddings, not encryption or physical
-purge. Backend revisions fail closed; changing the dependency pin requires an
-explicit migration/compatibility decision rather than automatic acceptance.
+No measured retrieval-quality or large-scale performance superiority is claimed
+by this contract. The reusable consumer surface may later support SoulSystem or
+other Memorithm products, but those consumers must not create local authority or
+gain raw adapter state.
 
-The reusable consumer contract benefits the future SoulSystem integration, but
-SoulSystem must not create authority locally or gain access to raw adapter state.
-No unreviewed cross-repository integration is included.
-
-Sources: Memorithm/CCOS-Enterprise revision
-1a02ce6da6aca55c56d52ceaa8f3333282d35e32 (15 September 2026), projection owner,
-OctaSoma adapter and ecosystem roadmap. Rust standard-library docs consulted
-15 September 2026: https://doc.rust-lang.org/std/fs/struct.OpenOptions.html#method.create_new
-and https://doc.rust-lang.org/std/io/trait.Read.html#method.take.
+Source baseline: Memorithm/CCOS-Enterprise `main` at
+`f908fb7b6128e083bd8dafbc255272bb9e18f4f1` (15 September 2026), plus the
+#136 generation-v2 candidate. Rust standard-library filesystem guarantees are
+used conservatively; no claim extends them to malicious filesystems or power-loss
+behavior not explicitly tested.

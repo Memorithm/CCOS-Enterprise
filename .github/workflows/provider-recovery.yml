@@ -5,6 +5,7 @@ on:
     paths:
       - 'crates/ccos-enterprise-memory/**'
       - 'crates/ccos-enterprise-octasoma/**'
+      - 'crates/ccos-enterprise-mcp/**'
       - 'crates/ccos-enterprise-tenancy/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -14,6 +15,7 @@ on:
     paths:
       - 'crates/ccos-enterprise-memory/**'
       - 'crates/ccos-enterprise-octasoma/**'
+      - 'crates/ccos-enterprise-mcp/**'
       - 'crates/ccos-enterprise-tenancy/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -26,7 +28,7 @@ jobs:
   recovery:
     name: Recovery tests (${{ matrix.toolchain }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +44,7 @@ jobs:
         run: |
           rustc +"$TOOLCHAIN" --version --verbose
           cargo +"$TOOLCHAIN" metadata --locked --format-version 1 >/dev/null
-      - name: Provider reconstruction and generation publication regressions
+      - name: Provider reconstruction, publication and served lifecycle regressions
         env:
           TOOLCHAIN: ${{ matrix.toolchain }}
         run: |
@@ -51,5 +53,8 @@ jobs:
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --lib recovery::tests --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --test generation_selector --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --test generation_retry --locked
+          cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --test accepted_evidence_write --locked
+          cargo +"$TOOLCHAIN" test -p ccos-enterprise-mcp --test governed_context_stdio --locked
+          cargo +"$TOOLCHAIN" test -p ccos-enterprise-mcp --test governed_evidence_stdio --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --doc --locked
           git diff --exit-code -- Cargo.lock

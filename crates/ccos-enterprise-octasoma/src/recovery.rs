@@ -295,6 +295,7 @@ pub struct RecoveredGovernedMemory {
     authority: GovernedMemoryProjection,
     canonical_governance: Vec<u8>,
     digest: [u8; 32],
+    records: Vec<RecoveryRecord>,
 }
 
 impl RecoveredGovernedMemory {
@@ -306,6 +307,13 @@ impl RecoveredGovernedMemory {
     /// Count includes forgotten records, preserving append-only quota accounting.
     pub fn stored_records(&self) -> usize {
         self.provider.tenant_len(&self.authority.tenant)
+    }
+
+    /// Exact validated source rows reconstructed from the immutable recovery image.
+    /// Kept crate-private so generation publication can derive a complete next input
+    /// population without exposing an arbitrary live-index export API.
+    pub(crate) fn source_records(&self) -> &[RecoveryRecord] {
+        &self.records
     }
 
     /// Recall only after exact tenant, current-generation and loadout checks.
@@ -466,6 +474,7 @@ pub fn restore_governed_memory(
         authority: authority.clone(),
         canonical_governance,
         digest,
+        records,
     })
 }
 

@@ -1,7 +1,7 @@
 schema_version: 1
 kind: ccos_enterprise_ecosystem_agent_roadmap
 status: active
-last_updated: "2026-09-15"
+last_updated: "2026-09-16"
 repository: Memorithm/CCOS-Enterprise
 intended_consumer: autonomous_coding_agent
 merge_policy: never_merge_this_file_to_default_branch_unless_user_explicitly_requests
@@ -206,6 +206,47 @@ reviewed_provider_recovery_slices:
       observation: existing_MCP_client_does_not_itself_implement_Enterprise_recovery
       integration_rule: retain_recovery_and_authority_ownership_in_the_Enterprise_service
       consumer_code_changed: false
+
+reviewed_served_memory_write_slices:
+  - id: GOVERNED_EVIDENCE_WRITE_2026_09_16
+    status: merged
+    pr: 159
+    reviewed_commit: 93692c453671a92ece50fbd2d849d0335c919f49
+    merge_commit: 126ba294bf68c48a84007838789c777fed33ca10
+    accepted_runs: [35064875160, 35064875159, 35064875088, 35064875162, 35064875095, 35064875163]
+    closes_issues: [136]
+    prerequisite_slices:
+      - PROJECTION_OWNER_2026_09_15
+      - PROVIDER_RECOVERY_2026_09_15
+      - served_read_path_pr_155
+      - provider_generation_selector_v2_pr_157
+    delivers:
+      - enterprise_local_memory_evidence_write_under_existing_memory_write_permission
+      - caller_supplies_asset_evidence_embedding_and_payload_but_not_authority_fields
+      - server_derives_tenant_space_evidence_stratum_root_lineage_and_unverified_trust
+      - accepted_complete_population_published_through_selector_v2_generation_advance
+      - durable_effect_receipt_binds_generation_asset_and_provider_image_digest
+      - succeeded_receipt_revalidated_against_selected_generation_before_restart_settlement
+      - ambiguous_started_publication_state_fails_closed_without_automatic_reexecution
+      - real_stdio_write_restart_started_crash_and_succeeded_receipt_recovery_tests
+      - permanent_provider_recovery_matrix_runs_served_read_and_write_restart_tests_on_1_89_and_stable
+    authority_invariants:
+      - new_direct_evidence_is_unverified_and_excluded_from_verified_only_context
+      - memory_space_stratum_trust_parents_loadout_and_generation_are_not_client_controlled
+      - Core_memory_ingest_text_is_not_used_to_fabricate_semantic_embeddings
+      - no_raw_OctaSoma_or_research_namespace_is_exposed
+      - Deployment_admission_quota_execution_journal_effect_marker_and_audit_settlement_remain_in_path
+    limitations:
+      - no_distributed_transaction_claim
+      - no_anti_rollback_claim
+      - no_encryption_or_KMS_claim
+      - no_physical_purge_claim
+      - no_forced_power_cut_guarantee
+      - semantic_similarity_is_not_authority_or_truth
+      - no_Core_source_change_or_dependency_backflow
+    issue_state_after_merge:
+      issue_135: already_closed_by_served_read_path_before_this_slice
+      issue_136: closed_by_pr_159
 
 agent_operating_protocol:
   must_read_this_file:

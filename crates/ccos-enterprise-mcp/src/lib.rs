@@ -51,6 +51,7 @@
 
 pub mod decision;
 pub mod governed_context_tool;
+pub mod governed_evidence_tool;
 pub mod served_context;
 pub mod server;
 pub mod skill_audit;
@@ -62,6 +63,10 @@ pub use decision::{
 pub use governed_context_tool::{
     govern_governed_context, governed_context_tool_spec, GOVERNED_CONTEXT_PERMISSION,
     GOVERNED_CONTEXT_TOOL,
+};
+pub use governed_evidence_tool::{
+    govern_governed_evidence_write, governed_evidence_write_tool_spec,
+    GOVERNED_EVIDENCE_WRITE_PERMISSION, GOVERNED_EVIDENCE_WRITE_TOOL,
 };
 pub use served_context::{
     assemble_attested_served_context, assemble_served_governed_context,

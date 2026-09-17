@@ -200,6 +200,9 @@ impl ProviderGenerationStore {
         };
         publish_initial_selector(&root, &selector)?;
 
+        let lock_path = root.join(PROVIDER_LOCK_FILE);
+        lock.unlock()
+            .map_err(|source| io_error(&lock_path, source))?;
         drop(lock);
         Self::open(&root, tenant)
     }

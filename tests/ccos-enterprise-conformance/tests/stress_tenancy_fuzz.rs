@@ -413,21 +413,21 @@ fn scope(tenant: &str, key: &str) -> TenantScope<String> {
 /// why the shape itself needs its own proof, since nothing else would exercise
 /// it with names like these again.
 #[derive(Default)]
-struct CellStore(BTreeMap<TenantId, BTreeMap<String, String>>);
+struct CellStore(BTreeMap<String, BTreeMap<String, String>>);
 
 impl CellStore {
-    fn put(&mut self, scope: &TenantScope<String>, value: &str) {
+    // Conformance-only raw nested-key model. It intentionally accepts strings
+    // that `TenantId` rejects so separator-confusion properties can still be
+    // stress-tested independently of the stronger production constructor.
+    fn put(&mut self, tenant: &str, key: &str, value: &str) {
         self.0
-            .entry(scope.tenant.clone())
+            .entry(tenant.to_string())
             .or_default()
-            .insert(scope.inner.clone(), value.to_string());
+            .insert(key.to_string(), value.to_string());
     }
 
-    fn get(&self, scope: &TenantScope<String>) -> Option<&str> {
-        self.0
-            .get(scope.tenant.as_str())?
-            .get(scope.inner.as_str())
-            .map(String::as_str)
+    fn get(&self, tenant: &str, key: &str) -> Option<&str> {
+        self.0.get(tenant)?.get(key).map(String::as_str)
     }
 
     fn cells_of(&self, tenant: &str) -> Vec<(&str, &str)> {
@@ -501,14 +501,14 @@ fn nested_keying_defeats_every_separator_confusion_attack() {
 
     let mut d = CellStore::default();
     for (i, (tenant, key)) in pairs.iter().enumerate() {
-        d.put(&scope(tenant, key), &format!("cell#{i}"));
+        d.put(tenant, key, &format!("cell#{i}"));
     }
 
     // Every pair reads back exactly its own value: no aliasing, no shadowing,
     // no last-write-wins between distinct pairs.
     for (i, (tenant, key)) in pairs.iter().enumerate() {
         assert_eq!(
-            d.get(&scope(tenant, key)),
+            d.get(tenant, key),
             Some(format!("cell#{i}").as_str()),
             "pair {i} ({tenant:?}, {key:?}) was aliased by another pair"
         );
@@ -576,14 +576,14 @@ fn nested_keying_defeats_every_separator_confusion_attack() {
             "flattening with {sep:?} aliases ({ta:?},{ka:?}) onto ({tb:?},{kb:?})"
         );
 
-        store.put(&scope(&ta, &ka), &format!("A{i}"));
-        store.put(&scope(&tb, &kb), &format!("B{i}"));
+        store.put(&ta, &ka, &format!("A{i}"));
+        store.put(&tb, &kb, &format!("B{i}"));
         assert_eq!(
-            store.get(&scope(&ta, &ka)),
+            store.get(&ta, &ka),
             Some(format!("A{i}").as_str()),
             "the tuple store keeps them apart despite separator {sep:?}"
         );
-        assert_eq!(store.get(&scope(&tb, &kb)), Some(format!("B{i}").as_str()));
+        assert_eq!(store.get(&tb, &kb), Some(format!("B{i}").as_str()));
     }
 }
 
@@ -642,7 +642,7 @@ fn a_hundred_thousand_hostile_pairs_never_alias_or_leak() {
         };
         // The value names its owner, so a leak cannot look like a hit.
         let value = format!("t{ti}#{i}");
-        d.put(&scope(&tenants[ti], &key), &value);
+        d.put(&tenants[ti], &key, &value);
         model.insert((tenants[ti].clone(), key.clone()), value);
         keys.push(key);
         owners.push(ti);
@@ -651,7 +651,7 @@ fn a_hundred_thousand_hostile_pairs_never_alias_or_leak() {
     // (a) Self-probes: what was written is what is read, and nothing else.
     for i in 0..PAIRS {
         let ti = owners[i];
-        let got = d.get(&scope(&tenants[ti], &keys[i]));
+        let got = d.get(&tenants[ti], &keys[i]);
         let want = model
             .get(&(tenants[ti].clone(), keys[i].clone()))
             .map(String::as_str);
@@ -672,7 +672,7 @@ fn a_hundred_thousand_hostile_pairs_never_alias_or_leak() {
     for i in 0..PAIRS {
         let ti = owners[i];
         let k = &keys[(i * 7919 + 13) % PAIRS];
-        let got = d.get(&scope(&tenants[ti], k));
+        let got = d.get(&tenants[ti], k);
         let want = model
             .get(&(tenants[ti].clone(), k.clone()))
             .map(String::as_str);
@@ -867,10 +867,10 @@ fn cells_of_order_is_byte_order_even_for_nul_and_astral_keys() {
     // test is about the *inner* key's ordering — see [`CellStore`].
     let mut d = CellStore::default();
     for (i, k) in keys.iter().enumerate() {
-        d.put(&scope("t", k), &format!("v{i}"));
+        d.put("t", k, &format!("v{i}"));
         // A decoy neighbour holding the same key, to be sure the listing is
         // filtered and not merely deduplicated.
-        d.put(&scope("t\0", k), "DECOY");
+        d.put("t\0", k, "DECOY");
     }
 
     let listed: Vec<&str> = d.cells_of("t").iter().map(|(k, _)| *k).collect();
@@ -1713,8 +1713,7 @@ fn oversized_keys_and_tenant_names_are_refused_and_the_rest_stays_isolated() {
     // A 1 MiB *tenant name* cannot be provisioned, so it cannot hold a cell.
     let huge_tenant = "t".repeat(MIB);
     assert!(!d.add_tenant(HOME_ORG, &huge_tenant, TenantState::new(0)));
-    assert!(!d.put(&scope(&huge_tenant, "memory-root"), "huge tenant's cell"));
-    assert_eq!(d.get(&scope(&huge_tenant, "memory-root")), None);
+    assert!(TenantId::new(&huge_tenant).is_none());
     assert_eq!(d.cells_of(&huge_tenant).len(), 0);
 }
 
@@ -1789,7 +1788,7 @@ fn a_tenant_name_is_held_once_however_many_cells_it_has() {
     // And the 64 KiB name that used to be amplified cannot even be created.
     let huge = "t".repeat(64 * 1024);
     assert!(!d.add_tenant(HOME_ORG, &huge, TenantState::new(0)));
-    assert!(!d.put(&scope(&huge, "k"), "v"));
+    assert!(TenantId::new(&huge).is_none());
 }
 
 /// **DEFECT 5, REPAIRED.** `get` used to build an owned `(TenantId, String)`
@@ -2384,8 +2383,8 @@ fn visually_identical_tenant_names_can_no_longer_be_provisioned() {
                 justification: None,
             })
             .refusal(),
-            Some(&Refusal::UnknownTenant),
-            "{t:?} must not be a working tenant"
+            Some(&Refusal::MalformedRequest("tenant".to_string())),
+            "{t:?} must be rejected before tenant lookup"
         );
     }
     let req = request("acme", "alice", "memory.recall", "r-real");
@@ -2445,10 +2444,10 @@ fn visually_identical_tenant_names_can_no_longer_be_provisioned() {
     );
     for hostile in ["Acme", "acme ", "\u{0430}cme", "../etc", "-rf", ""] {
         assert!(
-            !d.put(&scope(hostile, "memory-root"), "smuggled"),
-            "{hostile:?} got a namespace through the store"
+            TenantId::new(hostile).is_none(),
+            "{hostile:?} unexpectedly became a scoped tenant id"
         );
-        assert_eq!(d.get(&scope(hostile, "memory-root")), None);
+        assert!(d.cells_of(hostile).is_empty());
     }
     // The real `acme` is untouched by any of it.
     assert_eq!(d.get(&scope("acme", "memory-root")), Some("acme's secret"));

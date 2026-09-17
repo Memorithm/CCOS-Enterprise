@@ -109,21 +109,20 @@ fn restored_projection_preserves_real_provider_identity_space_and_evidence() {
     assert_eq!(observations.len(), 1);
     let admitted = admit_governed_recall(
         GovernedRecallGate {
-            graph: &restored.graph,
-            trust: &restored.trust,
+            expected_tenant: &restored.tenant,
+            projection: &restored,
             policy: GovernedRecallTrustPolicy::AnyNonQuarantined,
         },
         observations,
     )
     .unwrap();
     let assembly = assemble_governed_bootstrap_context(
-        &restored.loadout,
+        &restored,
         admitted,
         MemoryContextBudget::new(4, 1024).unwrap(),
     )
     .unwrap();
-    let attestations =
-        attest_governed_context(&assembly, &restored.graph, &restored.trust).unwrap();
+    let attestations = attest_governed_context(&assembly);
     assert_eq!(assembly.len(), 1);
     assert_eq!(assembly.chunks()[0].asset_id, asset);
     assert_eq!(assembly.chunks()[0].space, MemorySpace::Tenant);
@@ -161,8 +160,8 @@ fn restored_invalidation_blocks_a_still_retrievable_provider_record() {
     assert_eq!(observations.len(), 1);
     let admitted = admit_governed_recall(
         GovernedRecallGate {
-            graph: &restored.graph,
-            trust: &restored.trust,
+            expected_tenant: &restored.tenant,
+            projection: &restored,
             policy: GovernedRecallTrustPolicy::AnyNonQuarantined,
         },
         observations,

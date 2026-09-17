@@ -237,14 +237,10 @@ impl Server {
                 GovernedRecallTrustPolicy::VerifiedOnly,
             )
             .map_err(|error| error.to_string())?;
-        let assembly = assemble_governed_bootstrap_context(
-            &authority.loadout,
-            observations,
-            parsed.context_budget,
-        )
-        .map_err(|error| error.to_string())?;
-        let attestations = attest_governed_context(&assembly, &authority.graph, &authority.trust)
-            .map_err(|error| error.to_string())?;
+        let assembly =
+            assemble_governed_bootstrap_context(authority, observations, parsed.context_budget)
+                .map_err(|error| error.to_string())?;
+        let attestations = attest_governed_context(&assembly);
         if assembly.len() != attestations.len() {
             return Err("governed context attestation cardinality mismatch".into());
         }
@@ -258,6 +254,10 @@ impl Server {
                     "space": memory_space_label(&chunk.space),
                     "similarity": chunk.similarity,
                     "payload_bytes": &chunk.payload,
+                    "payload_sha256": attestation.payload_sha256,
+                    "tenant": attestation.tenant.as_str(),
+                    "projection_version": attestation.projection_version,
+                    "projection_sha256": attestation.projection_sha256,
                     "asset_state": "active",
                     "trust_state": validation_state_label(attestation.trust_state),
                     "parents": attestation.parents.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
@@ -278,6 +278,9 @@ impl Server {
                 "generation": store.generation(),
                 "trust_policy": "verified_only",
                 "payload_bytes": assembly.payload_bytes(),
+                "tenant": assembly.tenant().as_str(),
+                "projection_version": assembly.projection_version(),
+                "projection_sha256": assembly.projection_sha256_hex(),
                 "items": items
             }
         }))

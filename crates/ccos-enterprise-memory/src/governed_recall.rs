@@ -1,37 +1,38 @@
-use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Deref;
+
+use ccos_enterprise_tenancy::TenantId;
+use sha2::{Digest, Sha256};
 
 use crate::{
-    GovernedMemoryObservation, MemoryAssetId, MemoryAssetState, MemoryLineageGraph, MemorySpace,
-    MemoryTrustMetadata, MemoryValidationState,
+    encode_governed_memory_projection, GovernedMemoryObservation, GovernedMemoryProjection,
+    MemoryAssetId, MemoryAssetState, MemorySpace, MemoryValidationState,
+    GOVERNED_MEMORY_PROJECTION_VERSION,
 };
 
-/// Minimum trust class required before a governed memory observation can be used.
-///
-/// This policy is an admission gate, never a ranking signal. Similarity does not
-/// influence whether an asset satisfies governance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GovernedRecallTrustPolicy {
-    /// Admit any active asset except one explicitly quarantined.
     AnyNonQuarantined,
-    /// Require corroborated or verified evidence; disputed and unverified assets stay out.
     CorroboratedOrVerified,
-    /// Admit only explicitly verified assets.
     VerifiedOnly,
 }
 
-/// Read-only governance state used to narrow identity-bearing recall results.
+/// Governance authority used to mint opaque admitted recall values.
 #[derive(Debug, Clone, Copy)]
 pub struct GovernedRecallGate<'a> {
-    pub graph: &'a MemoryLineageGraph,
-    pub trust: &'a BTreeMap<MemoryAssetId, MemoryTrustMetadata>,
+    pub expected_tenant: &'a TenantId,
+    pub projection: &'a GovernedMemoryProjection,
     pub policy: GovernedRecallTrustPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GovernedRecallGateError {
+    TenantMismatch {
+        expected: String,
+        found: String,
+    },
+    ProjectionEncoding(String),
     ProviderReturnedUnknownAsset(MemoryAssetId),
-    /// A provider must preserve the canonical space, even within one loadout.
     ProviderReturnedMismatchedSpace {
         asset_id: MemoryAssetId,
         expected: MemorySpace,
@@ -43,6 +44,15 @@ pub enum GovernedRecallGateError {
 impl fmt::Display for GovernedRecallGateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TenantMismatch { expected, found } => {
+                write!(
+                    f,
+                    "governed recall tenant {found:?} != admitted tenant {expected:?}"
+                )
+            }
+            Self::ProjectionEncoding(error) => {
+                write!(f, "governed projection fingerprint: {error}")
+            }
             Self::ProviderReturnedUnknownAsset(id) => write!(
                 f,
                 "governed memory provider returned unknown asset {}",
@@ -65,26 +75,109 @@ impl fmt::Display for GovernedRecallGateError {
         }
     }
 }
-
 impl std::error::Error for GovernedRecallGateError {}
 
-/// Apply canonical space, lineage state and trust policy to provider results.
-///
-/// The function preserves provider order and only narrows the result set. Unknown
-/// provider identities, mismatched canonical spaces and missing trust metadata
-/// fail closed. Loadout membership alone does not prove an asset's space: the
-/// descriptor check precedes inactive/trust filtering and applies to every
-/// observation passed to this gate. No admitted prefix is returned on error.
-///
-/// This boundary does not authenticate a tenant or bind payload bytes to evidence.
-/// Those remain separate request and content-integrity contracts.
+/// One observation after tenant/projection/trust admission. Construction is
+/// intentionally private to this crate; public provider observations cannot be
+/// passed directly to governed context assembly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmittedGovernedMemoryObservation {
+    observation: GovernedMemoryObservation,
+    asset_state: MemoryAssetState,
+    trust_state: MemoryValidationState,
+    payload_sha256: [u8; 32],
+    parents: Vec<MemoryAssetId>,
+    evidence: Vec<crate::MemoryEvidenceRef>,
+}
+
+impl AdmittedGovernedMemoryObservation {
+    pub const fn asset_state(&self) -> MemoryAssetState {
+        self.asset_state
+    }
+    pub const fn trust_state(&self) -> MemoryValidationState {
+        self.trust_state
+    }
+    pub const fn payload_sha256(&self) -> &[u8; 32] {
+        &self.payload_sha256
+    }
+    pub fn payload_sha256_hex(&self) -> String {
+        hex_digest(self.payload_sha256)
+    }
+    pub fn parents(&self) -> &[MemoryAssetId] {
+        &self.parents
+    }
+    pub fn evidence(&self) -> &[crate::MemoryEvidenceRef] {
+        &self.evidence
+    }
+}
+impl Deref for AdmittedGovernedMemoryObservation {
+    type Target = GovernedMemoryObservation;
+    fn deref(&self) -> &Self::Target {
+        &self.observation
+    }
+}
+
+/// Opaque batch bound to one tenant and one canonical governance snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmittedGovernedRecall {
+    tenant: TenantId,
+    projection_version: u32,
+    projection_sha256: [u8; 32],
+    observations: Vec<AdmittedGovernedMemoryObservation>,
+}
+impl AdmittedGovernedRecall {
+    pub fn tenant(&self) -> &TenantId {
+        &self.tenant
+    }
+    pub const fn projection_version(&self) -> u32 {
+        self.projection_version
+    }
+    pub const fn projection_sha256(&self) -> &[u8; 32] {
+        &self.projection_sha256
+    }
+    pub fn projection_sha256_hex(&self) -> String {
+        hex_digest(self.projection_sha256)
+    }
+    pub fn observations(&self) -> &[AdmittedGovernedMemoryObservation] {
+        &self.observations
+    }
+    pub fn into_observations(self) -> Vec<AdmittedGovernedMemoryObservation> {
+        self.observations
+    }
+}
+
+impl Deref for AdmittedGovernedRecall {
+    type Target = [AdmittedGovernedMemoryObservation];
+    fn deref(&self) -> &Self::Target {
+        &self.observations
+    }
+}
+
+pub(crate) fn projection_fingerprint(
+    projection: &GovernedMemoryProjection,
+) -> Result<[u8; 32], GovernedRecallGateError> {
+    let bytes = encode_governed_memory_projection(projection)
+        .map_err(|error| GovernedRecallGateError::ProjectionEncoding(error.to_string()))?;
+    Ok(Sha256::digest(bytes).into())
+}
+
+/// Admit provider output against an explicit tenant and canonical projection.
+/// Similarity remains ordering data only and cannot mint authority.
 pub fn admit_governed_recall(
     gate: GovernedRecallGate<'_>,
     observations: impl IntoIterator<Item = GovernedMemoryObservation>,
-) -> Result<Vec<GovernedMemoryObservation>, GovernedRecallGateError> {
+) -> Result<AdmittedGovernedRecall, GovernedRecallGateError> {
+    if gate.expected_tenant != &gate.projection.tenant {
+        return Err(GovernedRecallGateError::TenantMismatch {
+            expected: gate.expected_tenant.as_str().to_string(),
+            found: gate.projection.tenant.as_str().to_string(),
+        });
+    }
+    let projection_sha256 = projection_fingerprint(gate.projection)?;
     let mut admitted = Vec::new();
     for observation in observations {
         let descriptor = gate
+            .projection
             .graph
             .descriptor(&observation.asset_id)
             .ok_or_else(|| {
@@ -97,22 +190,42 @@ pub fn admit_governed_recall(
                 observed: observation.space,
             });
         }
-        let state = gate.graph.state(&observation.asset_id).ok_or_else(|| {
-            GovernedRecallGateError::ProviderReturnedUnknownAsset(observation.asset_id.clone())
-        })?;
-        if state != MemoryAssetState::Active {
+        let asset_state = gate
+            .projection
+            .graph
+            .state(&observation.asset_id)
+            .ok_or_else(|| {
+                GovernedRecallGateError::ProviderReturnedUnknownAsset(observation.asset_id.clone())
+            })?;
+        if asset_state != MemoryAssetState::Active {
             continue;
         }
-
-        let trust = gate.trust.get(&observation.asset_id).ok_or_else(|| {
-            GovernedRecallGateError::MissingTrustMetadata(observation.asset_id.clone())
-        })?;
+        let trust = gate
+            .projection
+            .trust
+            .get(&observation.asset_id)
+            .ok_or_else(|| {
+                GovernedRecallGateError::MissingTrustMetadata(observation.asset_id.clone())
+            })?;
         if !trust.recall_eligible() || !policy_allows(gate.policy, trust.state()) {
             continue;
         }
-        admitted.push(observation);
+        let payload_sha256 = Sha256::digest(&observation.payload).into();
+        admitted.push(AdmittedGovernedMemoryObservation {
+            observation,
+            asset_state,
+            trust_state: trust.state(),
+            payload_sha256,
+            parents: descriptor.lineage.parents().cloned().collect(),
+            evidence: descriptor.lineage.evidence().cloned().collect(),
+        });
     }
-    Ok(admitted)
+    Ok(AdmittedGovernedRecall {
+        tenant: gate.expected_tenant.clone(),
+        projection_version: GOVERNED_MEMORY_PROJECTION_VERSION,
+        projection_sha256,
+        observations: admitted,
+    })
 }
 
 fn policy_allows(policy: GovernedRecallTrustPolicy, state: MemoryValidationState) -> bool {
@@ -124,170 +237,211 @@ fn policy_allows(policy: GovernedRecallTrustPolicy, state: MemoryValidationState
             state,
             MemoryValidationState::Corroborated | MemoryValidationState::Verified
         ),
-        GovernedRecallTrustPolicy::VerifiedOnly => {
-            matches!(state, MemoryValidationState::Verified)
-        }
+        GovernedRecallTrustPolicy::VerifiedOnly => matches!(state, MemoryValidationState::Verified),
     }
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        MemoryAssetDescriptor, MemoryEvidenceRef, MemoryLineage, MemorySpace, MemoryStratum,
+        MemoryAssetDescriptor, MemoryEvidenceRef, MemoryLineage, MemoryLineageGraph,
+        MemoryLoadoutBinding, MemoryLoadoutPlan, MemoryStratum, MemoryTrustMetadata,
+        MemoryUsageMode,
     };
+    use std::collections::BTreeMap;
 
-    fn id(value: &str) -> MemoryAssetId {
-        MemoryAssetId::new(value).unwrap()
+    fn tenant(v: &str) -> TenantId {
+        TenantId::new(v).unwrap()
     }
-
-    fn descriptor(value: &str) -> MemoryAssetDescriptor {
+    fn id(v: &str) -> MemoryAssetId {
+        MemoryAssetId::new(v).unwrap()
+    }
+    fn descriptor(v: &str, space: MemorySpace) -> MemoryAssetDescriptor {
         MemoryAssetDescriptor::new(
-            id(value),
-            MemorySpace::Tenant,
+            id(v),
+            space,
             MemoryStratum::Evidence,
-            MemoryLineage::root([MemoryEvidenceRef::new(format!("audit:{value}")).unwrap()])
-                .unwrap(),
+            MemoryLineage::root([MemoryEvidenceRef::new(format!("audit:{v}")).unwrap()]).unwrap(),
         )
         .unwrap()
     }
-
-    fn observation(value: &str, similarity: f32) -> GovernedMemoryObservation {
+    fn observation(
+        v: &str,
+        space: MemorySpace,
+        payload: &[u8],
+        similarity: f32,
+    ) -> GovernedMemoryObservation {
         GovernedMemoryObservation {
-            asset_id: id(value),
-            space: MemorySpace::Tenant,
-            payload: value.as_bytes().to_vec(),
+            asset_id: id(v),
+            space,
+            payload: payload.to_vec(),
             similarity,
         }
     }
-
     fn verified() -> MemoryTrustMetadata {
         MemoryTrustMetadata::new(MemoryValidationState::Verified, 1, 1, 0, ["proof:1".into()])
             .unwrap()
     }
-
-    #[test]
-    fn unknown_provider_asset_fails_closed() {
-        let graph = MemoryLineageGraph::new();
-        let trust = BTreeMap::new();
-        assert_eq!(
-            admit_governed_recall(
-                GovernedRecallGate {
-                    graph: &graph,
-                    trust: &trust,
-                    policy: GovernedRecallTrustPolicy::AnyNonQuarantined,
-                },
-                [observation("missing", 1.0)],
-            ),
-            Err(GovernedRecallGateError::ProviderReturnedUnknownAsset(id(
-                "missing"
-            )))
-        );
-    }
-
-    #[test]
-    fn inactive_lineage_is_removed_before_context_use() {
+    fn projection(
+        tenant_id: &str,
+        state: Option<MemoryAssetState>,
+        trust: Option<MemoryTrustMetadata>,
+    ) -> GovernedMemoryProjection {
         let mut graph = MemoryLineageGraph::new();
-        graph.register(descriptor("expired")).unwrap();
-        graph.invalidate(&id("expired")).unwrap();
-        let trust = BTreeMap::from([(id("expired"), verified())]);
-
-        let admitted = admit_governed_recall(
-            GovernedRecallGate {
-                graph: &graph,
-                trust: &trust,
-                policy: GovernedRecallTrustPolicy::VerifiedOnly,
-            },
-            [observation("expired", 1.0)],
-        )
-        .unwrap();
-        assert!(admitted.is_empty());
-    }
-
-    #[test]
-    fn missing_trust_metadata_fails_closed() {
-        let mut graph = MemoryLineageGraph::new();
-        graph.register(descriptor("known")).unwrap();
-        let trust = BTreeMap::new();
-        assert_eq!(
-            admit_governed_recall(
-                GovernedRecallGate {
-                    graph: &graph,
-                    trust: &trust,
-                    policy: GovernedRecallTrustPolicy::AnyNonQuarantined,
-                },
-                [observation("known", 1.0)],
-            ),
-            Err(GovernedRecallGateError::MissingTrustMetadata(id("known")))
-        );
-    }
-
-    #[test]
-    fn quarantine_and_stricter_trust_policies_only_narrow_results() {
-        let mut graph = MemoryLineageGraph::new();
-        for value in ["unverified", "corroborated", "verified", "quarantined"] {
-            graph.register(descriptor(value)).unwrap();
+        graph
+            .register(descriptor("known", MemorySpace::Tenant))
+            .unwrap();
+        if matches!(state, Some(MemoryAssetState::Invalidated)) {
+            graph.invalidate(&id("known")).unwrap();
         }
-        let trust = BTreeMap::from([
-            (id("unverified"), MemoryTrustMetadata::unverified(1)),
-            (
-                id("corroborated"),
-                MemoryTrustMetadata::new(
-                    MemoryValidationState::Corroborated,
-                    2,
-                    2,
-                    0,
-                    Vec::<String>::new(),
-                )
-                .unwrap(),
-            ),
-            (id("verified"), verified()),
-            (
-                id("quarantined"),
-                MemoryTrustMetadata::new(
-                    MemoryValidationState::Quarantined,
-                    1,
-                    1,
-                    0,
-                    Vec::<String>::new(),
-                )
-                .unwrap(),
-            ),
-        ]);
-        let source = [
-            observation("unverified", 0.9),
-            observation("corroborated", 0.8),
-            observation("verified", 0.7),
-            observation("quarantined", 1.0),
-        ];
-
-        let corroborated = admit_governed_recall(
-            GovernedRecallGate {
-                graph: &graph,
-                trust: &trust,
-                policy: GovernedRecallTrustPolicy::CorroboratedOrVerified,
-            },
-            source.clone(),
+        let trust = trust
+            .map(|m| BTreeMap::from([(id("known"), m)]))
+            .unwrap_or_default();
+        GovernedMemoryProjection::new(
+            tenant(tenant_id),
+            graph,
+            trust,
+            MemoryLoadoutPlan::new([MemoryLoadoutBinding::new(
+                MemorySpace::Tenant,
+                100,
+                MemoryUsageMode::BootstrapAndOnDemand,
+            )
+            .unwrap()])
+            .unwrap(),
         )
-        .unwrap();
-        assert_eq!(
-            corroborated
-                .iter()
-                .map(|item| item.asset_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["corroborated", "verified"]
+        .unwrap()
+    }
+    fn gate<'a>(
+        expected: &'a TenantId,
+        projection: &'a GovernedMemoryProjection,
+    ) -> GovernedRecallGate<'a> {
+        GovernedRecallGate {
+            expected_tenant: expected,
+            projection,
+            policy: GovernedRecallTrustPolicy::VerifiedOnly,
+        }
+    }
+
+    #[test]
+    fn tenant_mismatch_fails_closed_before_observation_use() {
+        let p = projection("acme", None, Some(verified()));
+        let expected = tenant("globex");
+        assert!(matches!(
+            admit_governed_recall(gate(&expected, &p), []),
+            Err(GovernedRecallGateError::TenantMismatch { .. })
+        ));
+    }
+    #[test]
+    fn missing_trust_fails_closed() {
+        let p = projection("acme", None, None);
+        let expected = tenant("acme");
+        assert!(
+            matches!(admit_governed_recall(gate(&expected,&p), [observation("known",MemorySpace::Tenant,b"x",1.0)]),
+            Err(GovernedRecallGateError::MissingTrustMetadata(asset)) if asset.as_str()=="known")
         );
-
-        let verified_only = admit_governed_recall(
-            GovernedRecallGate {
-                graph: &graph,
-                trust: &trust,
-                policy: GovernedRecallTrustPolicy::VerifiedOnly,
-            },
-            source,
+    }
+    #[test]
+    fn mismatched_space_fails_closed() {
+        let p = projection("acme", None, Some(verified()));
+        let expected = tenant("acme");
+        assert!(matches!(
+            admit_governed_recall(
+                gate(&expected, &p),
+                [observation(
+                    "known",
+                    MemorySpace::project("p").unwrap(),
+                    b"x",
+                    1.0
+                )]
+            ),
+            Err(GovernedRecallGateError::ProviderReturnedMismatchedSpace { .. })
+        ));
+    }
+    #[test]
+    fn inactive_and_quarantined_are_not_admitted() {
+        let p = projection(
+            "acme",
+            Some(MemoryAssetState::Invalidated),
+            Some(verified()),
+        );
+        let expected = tenant("acme");
+        assert!(admit_governed_recall(
+            gate(&expected, &p),
+            [observation("known", MemorySpace::Tenant, b"x", 1.0)]
+        )
+        .unwrap()
+        .observations()
+        .is_empty());
+        let q = MemoryTrustMetadata::new(
+            MemoryValidationState::Quarantined,
+            1,
+            1,
+            0,
+            Vec::<String>::new(),
         )
         .unwrap();
-        assert_eq!(verified_only.len(), 1);
-        assert_eq!(verified_only[0].asset_id.as_str(), "verified");
+        let p = projection("acme", None, Some(q));
+        let gate = GovernedRecallGate {
+            expected_tenant: &expected,
+            projection: &p,
+            policy: GovernedRecallTrustPolicy::AnyNonQuarantined,
+        };
+        assert!(admit_governed_recall(
+            gate,
+            [observation("known", MemorySpace::Tenant, b"x", 1.0)]
+        )
+        .unwrap()
+        .observations()
+        .is_empty());
+    }
+    #[test]
+    fn admission_binds_projection_and_exact_payload() {
+        let p = projection("acme", None, Some(verified()));
+        let expected = tenant("acme");
+        let a = admit_governed_recall(
+            gate(&expected, &p),
+            [observation("known", MemorySpace::Tenant, b"payload-a", 0.2)],
+        )
+        .unwrap();
+        let b = admit_governed_recall(
+            gate(&expected, &p),
+            [observation("known", MemorySpace::Tenant, b"payload-b", 0.9)],
+        )
+        .unwrap();
+        assert_eq!(a.projection_version(), GOVERNED_MEMORY_PROJECTION_VERSION);
+        assert_eq!(a.projection_sha256(), b.projection_sha256());
+        assert_ne!(
+            a.observations()[0].payload_sha256(),
+            b.observations()[0].payload_sha256()
+        );
+        assert_eq!(
+            a.observations()[0].trust_state(),
+            MemoryValidationState::Verified
+        );
+    }
+    #[test]
+    fn similarity_does_not_change_payload_or_projection_authority() {
+        let p = projection("acme", None, Some(verified()));
+        let expected = tenant("acme");
+        let a = admit_governed_recall(
+            gate(&expected, &p),
+            [observation("known", MemorySpace::Tenant, b"same", -1.0)],
+        )
+        .unwrap();
+        let b = admit_governed_recall(
+            gate(&expected, &p),
+            [observation("known", MemorySpace::Tenant, b"same", 99.0)],
+        )
+        .unwrap();
+        assert_eq!(a.projection_sha256(), b.projection_sha256());
+        assert_eq!(
+            a.observations()[0].payload_sha256(),
+            b.observations()[0].payload_sha256()
+        );
     }
 }

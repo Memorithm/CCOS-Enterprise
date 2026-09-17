@@ -10,19 +10,16 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use ccos_enterprise_memory::{
-    admit_governed_recall, encode_governed_memory_projection, BudgetedMemoryRecall,
-    GovernedMemoryProjection, GovernedMemoryProjectionError, GovernedRecallGate,
-    GovernedRecallGateError, GovernedRecallTrustPolicy, GovernedSemanticMemoryProviderExt,
-    MemoryRecallBudgetError,
+    admit_governed_recall, encode_governed_memory_projection, AdmittedGovernedRecall,
+    BudgetedMemoryRecall, GovernedMemoryProjection, GovernedMemoryProjectionError,
+    GovernedRecallGate, GovernedRecallGateError, GovernedRecallTrustPolicy,
+    GovernedSemanticMemoryProviderExt, MemoryRecallBudgetError,
 };
 use ccos_enterprise_tenancy::TenantScope;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{
-    EnterpriseMemoryError, EnterpriseOctaSoma, GovernedMemoryObservation, GovernedMemoryWrite,
-    MemoryAssetId,
-};
+use crate::{EnterpriseMemoryError, EnterpriseOctaSoma, GovernedMemoryWrite, MemoryAssetId};
 
 pub const MAX_RECOVERY_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RECORDS: usize = 16_384;
@@ -337,7 +334,7 @@ impl RecoveredGovernedMemory {
         current: &GovernedMemoryProjection,
         request: TenantScope<BudgetedMemoryRecall<'_>>,
         policy: GovernedRecallTrustPolicy,
-    ) -> Result<Vec<GovernedMemoryObservation>, RecoveryError> {
+    ) -> Result<AdmittedGovernedRecall, RecoveryError> {
         if request.tenant != self.authority.tenant || current.tenant != self.authority.tenant {
             return Err(RecoveryError::TenantMismatch);
         }
@@ -357,14 +354,15 @@ impl RecoveredGovernedMemory {
                 ));
             }
         }
+        let request_tenant = request.tenant.clone();
         let observations = self
             .provider
             .recall_governed_bounded(request)
             .map_err(RecoveryError::Budget)?;
         admit_governed_recall(
             GovernedRecallGate {
-                graph: &current.graph,
-                trust: &current.trust,
+                expected_tenant: &request_tenant,
+                projection: current,
                 policy,
             },
             observations,

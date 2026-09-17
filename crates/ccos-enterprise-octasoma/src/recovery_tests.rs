@@ -292,12 +292,12 @@ fn recovery_preserves_filtering_and_can_build_an_attested_context() {
         Some(MemoryAssetState::Stale)
     );
     let context = assemble_governed_bootstrap_context(
-        &authority.loadout,
+        &authority,
         admitted,
         MemoryContextBudget::new(2, 128).unwrap(),
     )
     .unwrap();
-    let attested = attest_governed_context(&context, &authority.graph, &authority.trust).unwrap();
+    let attested = attest_governed_context(&context);
     assert_eq!(context.len(), 1);
     assert_eq!(attested[0].asset_id, id("a-live"));
     let permissive = recovered

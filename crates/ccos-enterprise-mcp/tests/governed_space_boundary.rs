@@ -66,8 +66,8 @@ fn projection(include_private: bool) -> GovernedMemoryProjection {
 
 fn gate(projection: &GovernedMemoryProjection) -> GovernedRecallGate<'_> {
     GovernedRecallGate {
-        graph: &projection.graph,
-        trust: &projection.trust,
+        expected_tenant: &projection.tenant,
+        projection,
         policy: GovernedRecallTrustPolicy::AnyNonQuarantined,
     }
 }
@@ -103,9 +103,9 @@ fn assert_both_refuse(projection: &GovernedMemoryProjection) {
     let provider = Provider(vec![observation(MemorySpace::Tenant)]);
     let plain = assemble_served_governed_context(
         &provider,
-        projection.tenant.clone(),
-        &projection.loadout,
-        gate(projection),
+        &projection.tenant,
+        projection,
+        GovernedRecallTrustPolicy::AnyNonQuarantined,
         &[1.0, 0.0],
         MemoryRecallBudget::new(4, 8, 128).unwrap(),
         MemoryContextBudget::new(4, 128).unwrap(),
@@ -199,9 +199,9 @@ fn matching_canonical_space_preserves_both_context_variants() {
     let provider = Provider(vec![source.clone()]);
     let plain = assemble_served_governed_context(
         &provider,
-        projection.tenant.clone(),
-        &projection.loadout,
-        gate(&projection),
+        &projection.tenant,
+        &projection,
+        GovernedRecallTrustPolicy::AnyNonQuarantined,
         &[1.0, 0.0],
         MemoryRecallBudget::new(4, 8, 128).unwrap(),
         MemoryContextBudget::new(4, 128).unwrap(),
@@ -217,7 +217,9 @@ fn matching_canonical_space_preserves_both_context_variants() {
     )
     .unwrap();
     assert_eq!(plain, attested);
-    assert_eq!(plain.chunks(), &[source]);
+    assert_eq!(plain.chunks().len(), 1);
+    assert_eq!(plain.chunks()[0].asset_id, source.asset_id);
+    assert_eq!(plain.chunks()[0].payload, source.payload);
     assert_eq!(evidence.len(), 1);
     assert_eq!(evidence[0].asset_id, id());
     assert_eq!(evidence[0].evidence[0].as_str(), "audit:private");

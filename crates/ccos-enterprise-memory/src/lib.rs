@@ -31,7 +31,8 @@ pub use context_budget::{
 
 mod governed_recall;
 pub use governed_recall::{
-    admit_governed_recall, GovernedRecallGate, GovernedRecallGateError, GovernedRecallTrustPolicy,
+    admit_governed_recall, AdmittedGovernedMemoryObservation, AdmittedGovernedRecall,
+    GovernedRecallGate, GovernedRecallGateError, GovernedRecallTrustPolicy,
 };
 
 mod governed_recall_budget;

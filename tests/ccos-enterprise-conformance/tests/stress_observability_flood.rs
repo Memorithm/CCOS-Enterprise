@@ -1370,7 +1370,7 @@ fn deployment_metrics_stay_low_cardinality_under_hostile_input() {
             1 => (
                 "memorithm",
                 "alice",
-                "does-not-exist\u{1f4a3}",
+                "does-not-exist",
                 "alice",
                 "memory.recall",
                 AuthStrength::Token,

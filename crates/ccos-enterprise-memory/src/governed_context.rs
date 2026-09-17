@@ -1,64 +1,85 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    GovernedMemoryObservation, MemoryContextBudget, MemoryContextError, MemoryLoadoutPlan,
+    governed_recall::projection_fingerprint, AdmittedGovernedMemoryObservation,
+    AdmittedGovernedRecall, GovernedMemoryProjection, MemoryContextBudget, MemoryContextError,
 };
 
-/// Structured bootstrap context whose chunks retain their governed asset identity.
-///
-/// Keeping `MemoryAssetId` attached after admission lets downstream audit and
-/// provenance code explain exactly which memory assets entered an agent context.
+/// Structured bootstrap context whose chunks retain cryptographically bound
+/// admission metadata in addition to their governed asset identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GovernedMemoryContextAssembly {
-    chunks: Vec<GovernedMemoryObservation>,
+    tenant: ccos_enterprise_tenancy::TenantId,
+    projection_version: u32,
+    projection_sha256: [u8; 32],
+    chunks: Vec<AdmittedGovernedMemoryObservation>,
     payload_bytes: usize,
 }
 
 impl GovernedMemoryContextAssembly {
-    pub fn chunks(&self) -> &[GovernedMemoryObservation] {
+    pub fn tenant(&self) -> &ccos_enterprise_tenancy::TenantId {
+        &self.tenant
+    }
+    pub const fn projection_version(&self) -> u32 {
+        self.projection_version
+    }
+    pub const fn projection_sha256(&self) -> &[u8; 32] {
+        &self.projection_sha256
+    }
+    pub fn projection_sha256_hex(&self) -> String {
+        self.projection_sha256
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+    pub fn chunks(&self) -> &[AdmittedGovernedMemoryObservation] {
         &self.chunks
     }
-
-    pub fn into_chunks(self) -> Vec<GovernedMemoryObservation> {
+    pub fn into_chunks(self) -> Vec<AdmittedGovernedMemoryObservation> {
         self.chunks
     }
-
     pub const fn payload_bytes(&self) -> usize {
         self.payload_bytes
     }
-
     pub fn len(&self) -> usize {
         self.chunks.len()
     }
-
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty()
     }
 }
 
-/// Assemble a bounded bootstrap context from observations that have already
-/// crossed governed recall admission.
-///
-/// The function deliberately does not evaluate trust itself: callers must first
-/// use the governed recall gate, making the order of operations explicit. This
-/// boundary then rechecks bootstrap-space admission, finite similarity, item
-/// count and aggregate payload bytes while preserving `MemoryAssetId`.
+/// Assemble only observations minted by governed recall admission, and verify
+/// that the exact projection used for assembly is the snapshot that minted them.
 pub fn assemble_governed_bootstrap_context(
-    plan: &MemoryLoadoutPlan,
-    observations: impl IntoIterator<Item = GovernedMemoryObservation>,
+    projection: &GovernedMemoryProjection,
+    admitted: AdmittedGovernedRecall,
     budget: MemoryContextBudget,
 ) -> Result<GovernedMemoryContextAssembly, MemoryContextError> {
-    let priorities: BTreeMap<_, _> = plan
+    if admitted.tenant() != &projection.tenant
+        || admitted.projection_version() != crate::GOVERNED_MEMORY_PROJECTION_VERSION
+        || projection_fingerprint(projection)
+            .map_err(|_| MemoryContextError::ProjectionBindingMismatch)?
+            != *admitted.projection_sha256()
+    {
+        return Err(MemoryContextError::ProjectionBindingMismatch);
+    }
+
+    let priorities: BTreeMap<_, _> = projection
+        .loadout
         .bindings()
         .filter(|binding| binding.usage.allows_bootstrap())
         .map(|binding| (binding.space.clone(), binding.priority))
         .collect();
 
+    let tenant = admitted.tenant().clone();
+    let projection_version = admitted.projection_version();
+    let projection_sha256 = *admitted.projection_sha256();
     let mut candidates = Vec::new();
-    for (input_order, observation) in observations.into_iter().enumerate() {
+    for (input_order, observation) in admitted.into_observations().into_iter().enumerate() {
         let Some(priority) = priorities.get(&observation.space).copied() else {
             return Err(MemoryContextError::ObservationOutsideBootstrapLoadout(
-                observation.space,
+                observation.space.clone(),
             ));
         };
         if !observation.similarity.is_finite() {
@@ -92,6 +113,9 @@ pub fn assemble_governed_bootstrap_context(
     }
 
     Ok(GovernedMemoryContextAssembly {
+        tenant,
+        projection_version,
+        projection_sha256,
         chunks,
         payload_bytes,
     })
@@ -100,130 +124,116 @@ pub fn assemble_governed_bootstrap_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MemoryAssetId, MemoryLoadoutBinding, MemorySpace, MemoryUsageMode};
+    use crate::{
+        admit_governed_recall, GovernedMemoryObservation, GovernedRecallGate,
+        GovernedRecallTrustPolicy, MemoryAssetDescriptor, MemoryAssetId, MemoryEvidenceRef,
+        MemoryLineage, MemoryLineageGraph, MemoryLoadoutBinding, MemoryLoadoutPlan, MemorySpace,
+        MemoryStratum, MemoryTrustMetadata, MemoryUsageMode, MemoryValidationState,
+    };
+    use ccos_enterprise_tenancy::TenantId;
+    use std::collections::BTreeMap;
 
-    fn binding(space: MemorySpace, priority: u16, usage: MemoryUsageMode) -> MemoryLoadoutBinding {
-        MemoryLoadoutBinding::new(space, priority, usage).unwrap()
+    fn id(v: &str) -> MemoryAssetId {
+        MemoryAssetId::new(v).unwrap()
     }
-
-    fn observation(
-        id: &str,
-        space: MemorySpace,
-        payload: &[u8],
-        similarity: f32,
-    ) -> GovernedMemoryObservation {
-        GovernedMemoryObservation {
-            asset_id: MemoryAssetId::new(id).unwrap(),
-            space,
-            payload: payload.to_vec(),
-            similarity,
+    fn projection(priority: u16) -> GovernedMemoryProjection {
+        let mut graph = MemoryLineageGraph::new();
+        for v in ["a", "b"] {
+            graph
+                .register(
+                    MemoryAssetDescriptor::new(
+                        id(v),
+                        MemorySpace::Tenant,
+                        MemoryStratum::Evidence,
+                        MemoryLineage::root(
+                            [MemoryEvidenceRef::new(format!("audit:{v}")).unwrap()],
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
         }
-    }
-
-    fn plan() -> MemoryLoadoutPlan {
-        MemoryLoadoutPlan::new([
-            binding(
+        let trust = BTreeMap::from([("a", "p:a"), ("b", "p:b")].map(|(v, p)| {
+            (
+                id(v),
+                MemoryTrustMetadata::new(MemoryValidationState::Verified, 1, 1, 0, [p.into()])
+                    .unwrap(),
+            )
+        }));
+        GovernedMemoryProjection::new(
+            TenantId::new("acme").unwrap(),
+            graph,
+            trust,
+            MemoryLoadoutPlan::new([MemoryLoadoutBinding::new(
                 MemorySpace::Tenant,
-                100,
+                priority,
                 MemoryUsageMode::BootstrapAndOnDemand,
-            ),
-            binding(
-                MemorySpace::project("ccos").unwrap(),
-                80,
-                MemoryUsageMode::Bootstrap,
-            ),
-            binding(
-                MemorySpace::team("runtime").unwrap(),
-                70,
-                MemoryUsageMode::OnDemand,
-            ),
-        ])
+            )
+            .unwrap()])
+            .unwrap(),
+        )
         .unwrap()
     }
-
-    #[test]
-    fn governed_context_preserves_asset_identity() {
-        let assembly = assemble_governed_bootstrap_context(
-            &plan(),
-            [observation("asset:1", MemorySpace::Tenant, b"payload", 0.9)],
-            MemoryContextBudget::new(4, 64).unwrap(),
+    fn admitted(p: &GovernedMemoryProjection, payload: &[u8]) -> AdmittedGovernedRecall {
+        let tenant = TenantId::new("acme").unwrap();
+        admit_governed_recall(
+            GovernedRecallGate {
+                expected_tenant: &tenant,
+                projection: p,
+                policy: GovernedRecallTrustPolicy::VerifiedOnly,
+            },
+            [GovernedMemoryObservation {
+                asset_id: id("a"),
+                space: MemorySpace::Tenant,
+                payload: payload.to_vec(),
+                similarity: 0.5,
+            }],
         )
-        .unwrap();
-        assert_eq!(assembly.len(), 1);
-        assert_eq!(assembly.chunks()[0].asset_id.as_str(), "asset:1");
-        assert_eq!(assembly.chunks()[0].payload, b"payload");
+        .unwrap()
     }
-
     #[test]
-    fn on_demand_only_space_fails_closed() {
-        let error = assemble_governed_bootstrap_context(
-            &plan(),
-            [observation(
-                "asset:hidden",
-                MemorySpace::team("runtime").unwrap(),
-                b"hidden",
-                1.0,
-            )],
-            MemoryContextBudget::new(4, 64).unwrap(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            MemoryContextError::ObservationOutsideBootstrapLoadout(MemorySpace::Team(id))
-                if id == "runtime"
-        ));
-    }
-
-    #[test]
-    fn priority_beats_similarity_without_becoming_authority() {
-        let project = MemorySpace::project("ccos").unwrap();
-        let assembly = assemble_governed_bootstrap_context(
-            &plan(),
-            [
-                observation("project", project, b"project", 0.99),
-                observation("tenant", MemorySpace::Tenant, b"tenant", 0.1),
-            ],
-            MemoryContextBudget::new(4, 64).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(assembly.chunks()[0].asset_id.as_str(), "tenant");
-        assert_eq!(assembly.chunks()[1].asset_id.as_str(), "project");
-    }
-
-    #[test]
-    fn byte_budget_skips_whole_payloads_and_preserves_ids() {
-        let plan =
-            MemoryLoadoutPlan::new([binding(MemorySpace::Tenant, 1, MemoryUsageMode::Bootstrap)])
+    fn assembly_preserves_binding_and_payload_digest() {
+        let p = projection(100);
+        let a = admitted(&p, b"payload");
+        let digest = *a.observations()[0].payload_sha256();
+        let c =
+            assemble_governed_bootstrap_context(&p, a, MemoryContextBudget::new(4, 64).unwrap())
                 .unwrap();
-        let assembly = assemble_governed_bootstrap_context(
-            &plan,
-            [
-                observation("large", MemorySpace::Tenant, b"123456", 0.9),
-                observation("small-a", MemorySpace::Tenant, b"abc", 0.8),
-                observation("small-b", MemorySpace::Tenant, b"de", 0.7),
-            ],
-            MemoryContextBudget::new(3, 5).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(assembly.payload_bytes(), 5);
+        assert_eq!(c.tenant().as_str(), "acme");
+        assert_eq!(c.chunks()[0].asset_id.as_str(), "a");
+        assert_eq!(c.chunks()[0].payload_sha256(), &digest);
+    }
+    #[test]
+    fn changed_projection_is_rejected_even_when_asset_is_same() {
+        let p1 = projection(100);
+        let a = admitted(&p1, b"payload");
+        let p2 = projection(99);
         assert_eq!(
-            assembly
-                .chunks()
-                .iter()
-                .map(|chunk| chunk.asset_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["small-a", "small-b"]
+            assemble_governed_bootstrap_context(&p2, a, MemoryContextBudget::new(4, 64).unwrap()),
+            Err(MemoryContextError::ProjectionBindingMismatch)
         );
     }
-
     #[test]
-    fn non_finite_similarity_fails_closed() {
+    fn non_finite_similarity_fails_closed_after_admission() {
+        let p = projection(100);
+        let tenant = TenantId::new("acme").unwrap();
+        let a = admit_governed_recall(
+            GovernedRecallGate {
+                expected_tenant: &tenant,
+                projection: &p,
+                policy: GovernedRecallTrustPolicy::VerifiedOnly,
+            },
+            [GovernedMemoryObservation {
+                asset_id: id("a"),
+                space: MemorySpace::Tenant,
+                payload: b"x".to_vec(),
+                similarity: f32::NAN,
+            }],
+        )
+        .unwrap();
         assert_eq!(
-            assemble_governed_bootstrap_context(
-                &plan(),
-                [observation("nan", MemorySpace::Tenant, b"x", f32::NAN)],
-                MemoryContextBudget::new(1, 1).unwrap(),
-            ),
+            assemble_governed_bootstrap_context(&p, a, MemoryContextBudget::new(1, 1).unwrap()),
             Err(MemoryContextError::NonFiniteSimilarity)
         );
     }

@@ -81,6 +81,7 @@ pub enum MemoryContextError {
     },
     ObservationOutsideBootstrapLoadout(MemorySpace),
     NonFiniteSimilarity,
+    ProjectionBindingMismatch,
 }
 
 impl fmt::Display for MemoryContextError {
@@ -95,6 +96,12 @@ impl fmt::Display for MemoryContextError {
             ),
             Self::NonFiniteSimilarity => {
                 write!(f, "memory context observation has non-finite similarity")
+            }
+            Self::ProjectionBindingMismatch => {
+                write!(
+                    f,
+                    "memory context admission is bound to a different governance projection"
+                )
             }
         }
     }

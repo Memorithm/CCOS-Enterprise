@@ -1038,8 +1038,7 @@ fn read_revocation_journal(
         return Ok(None);
     };
     let mut records = Vec::with_capacity(lines.len());
-    let mut expected = 0u64;
-    for (index, line) in lines.into_iter().enumerate() {
+    for (expected, (index, line)) in (0_u64..).zip(lines.into_iter().enumerate()) {
         let record: RevocationJournalRecord =
             serde_json::from_slice(&line).map_err(|error| StoreError::RevocationCorrupt {
                 path: path.to_path_buf(),
@@ -1053,7 +1052,6 @@ fn read_revocation_journal(
                 found: record.sequence,
             });
         }
-        expected += 1;
         records.push(record);
     }
     Ok(Some((records, torn_tail)))

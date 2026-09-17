@@ -423,13 +423,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_tenant_is_rejected_before_creating_files() {
+    fn invalid_tenant_cannot_reach_store_construction() {
         let dir = Directory::new();
         let root = dir.0.join("invalid");
-        let mut initial = fixture();
-        initial.tenant = TenantId("../other".into());
-        assert!(GovernedMemoryStore::initialize(&root, initial).is_err());
-        assert!(GovernedMemoryStore::open(&root, TenantId("../other".into())).is_err());
+        assert!(TenantId::new("../other").is_none());
+        assert!(serde_json::from_str::<TenantId>(r#""../other""#).is_err());
         assert!(!root.exists());
     }
 

@@ -11,7 +11,7 @@ use ccos_enterprise_conformance::{
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 
 fn scope(tenant: &str, key: &str) -> TenantScope<String> {
-    TenantScope::new(TenantId(tenant.to_string()), key.to_string())
+    TenantScope::new(TenantId::new(tenant).unwrap(), key.to_string())
 }
 
 /// The same inner key under two tenants names two different cells. This is
@@ -72,8 +72,8 @@ fn crossing_tenants_is_explicit_and_visible() {
     let acme_root = scope("acme", "memory-root");
     d.put(&acme_root, "acme data");
 
-    let crossed = acme_root.clone().rescope(TenantId("globex".into()));
-    assert_eq!(crossed.tenant, TenantId("globex".into()));
+    let crossed = acme_root.clone().rescope(TenantId::new("globex").unwrap());
+    assert_eq!(crossed.tenant, TenantId::new("globex").unwrap());
     assert_eq!(crossed.inner, acme_root.inner, "same cell name…");
     assert_eq!(d.get(&crossed), None, "…but a different, empty cell");
 }

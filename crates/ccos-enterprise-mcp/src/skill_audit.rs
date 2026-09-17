@@ -65,7 +65,8 @@ pub fn skill_audit_result(
     arguments: &Value,
 ) -> Result<Value, String> {
     let limit = skill_audit_limit(arguments)?;
-    let tenant_id = TenantId(tenant.to_string());
+    let tenant_id =
+        TenantId::new(tenant).ok_or_else(|| "tenant id is not canonical".to_string())?;
     let scope = TenantScope::new(tenant_id, ());
     let skills = skill_store
         .load_registry(SkillConfig::default())

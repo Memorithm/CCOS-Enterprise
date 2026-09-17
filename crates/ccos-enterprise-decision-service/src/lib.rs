@@ -230,7 +230,7 @@ impl DecisionService {
         arguments: &Value,
     ) -> Result<Value, ServiceError> {
         let input: RecordInput = parse(arguments)?;
-        let tenant = TenantId(tenant.to_string());
+        let tenant = tenant_id(tenant)?;
         let knowledge = self.knowledge.state();
         let draft = DecisionDraft {
             id: input.id.clone(),
@@ -254,7 +254,7 @@ impl DecisionService {
 
     fn record_outcome(&mut self, tenant: &str, arguments: &Value) -> Result<Value, ServiceError> {
         let input: RecordOutcomeInput = parse(arguments)?;
-        let tenant = TenantId(tenant.to_string());
+        let tenant = tenant_id(tenant)?;
         let knowledge = self.knowledge.state();
         let entry = DecisionJournalEntry::new(
             self.decisions.next_sequence(),
@@ -278,7 +278,7 @@ impl DecisionService {
         serialize(
             self.decisions
                 .state()
-                .decision(&TenantId(tenant.to_string()), &input.decision)?,
+                .decision(&tenant_id(tenant)?, &input.decision)?,
         )
     }
 
@@ -289,7 +289,7 @@ impl DecisionService {
             .decisions
             .state()
             .similar_decisions(&SimilarDecisionQuery {
-                tenant: TenantId(tenant.to_string()),
+                tenant: tenant_id(tenant)?,
                 question: input.question,
                 facts: input.facts,
                 relations: input.relations,
@@ -319,7 +319,7 @@ impl DecisionService {
     fn ancestry(&self, tenant: &str, arguments: &Value) -> Result<Value, ServiceError> {
         let (decision, limits) = traversal(arguments)?;
         serialize(&self.decisions.state().causal_ancestry(
-            &TenantId(tenant.to_string()),
+            &tenant_id(tenant)?,
             &decision,
             limits,
         )?)
@@ -328,7 +328,7 @@ impl DecisionService {
     fn dependents(&self, tenant: &str, arguments: &Value) -> Result<Value, ServiceError> {
         let (decision, limits) = traversal(arguments)?;
         serialize(&self.decisions.state().causal_dependents(
-            &TenantId(tenant.to_string()),
+            &tenant_id(tenant)?,
             &decision,
             limits,
         )?)
@@ -336,11 +336,10 @@ impl DecisionService {
 
     fn impact(&self, tenant: &str, arguments: &Value) -> Result<Value, ServiceError> {
         let (decision, limits) = traversal(arguments)?;
-        let report = self.decisions.state().impact_analysis(
-            &TenantId(tenant.to_string()),
-            &decision,
-            limits,
-        )?;
+        let report =
+            self.decisions
+                .state()
+                .impact_analysis(&tenant_id(tenant)?, &decision, limits)?;
         Ok(json!({
             "decision": report.decision,
             "dependent_decisions": report.dependent_decisions,
@@ -354,11 +353,16 @@ impl DecisionService {
     fn regulatory_trail(&self, tenant: &str, arguments: &Value) -> Result<Value, ServiceError> {
         let (decision, limits) = traversal(arguments)?;
         serialize(&self.decisions.state().regulatory_trail(
-            &TenantId(tenant.to_string()),
+            &tenant_id(tenant)?,
             &decision,
             limits,
         )?)
     }
+}
+
+fn tenant_id(value: &str) -> Result<TenantId, ServiceError> {
+    TenantId::new(value)
+        .ok_or_else(|| ServiceError::InvalidArguments("tenant is not canonical".into()))
 }
 
 fn parse<T: DeserializeOwned>(arguments: &Value) -> Result<T, ServiceError> {
@@ -516,7 +520,7 @@ mod tests {
     }
 
     fn seed(service: &mut DecisionService, tenant_name: &str) {
-        let tenant = TenantId(tenant_name.to_string());
+        let tenant = tenant_id(tenant_name).unwrap();
         service
             .append_knowledge(&[
                 JournalEntry::new(

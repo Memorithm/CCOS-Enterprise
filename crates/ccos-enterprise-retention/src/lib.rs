@@ -575,7 +575,7 @@ impl RetentionEngine {
         batch_limit: usize,
     ) -> Result<(RunOutcome, Vec<EnforcementRecord>), RetentionError> {
         policy.validate()?;
-        if policy.tenant != tenant.0 {
+        if policy.tenant != tenant.as_str() {
             return Err(RetentionError::UnknownTenant {
                 tenant: policy.tenant.clone(),
             });
@@ -594,7 +594,7 @@ impl RetentionEngine {
         }
         for item in items {
             item.validate()?;
-            if item.tenant != tenant.0 {
+            if item.tenant != tenant.as_str() {
                 return Err(RetentionError::UnknownTenant {
                     tenant: item.tenant.clone(),
                 });
@@ -636,7 +636,7 @@ impl RetentionEngine {
                 EnforcementAction::Invalidate
             };
             records.push(EnforcementRecord {
-                tenant: tenant.0.clone(),
+                tenant: tenant.as_str().to_string(),
                 item_id: item.item_id.clone(),
                 class: item.class,
                 item_created_at: item.created_at,
@@ -653,7 +653,7 @@ mod tests {
     use super::*;
 
     fn tenant(name: &str) -> TenantId {
-        TenantId(name.into())
+        TenantId::new(name).unwrap()
     }
 
     fn policy_for(

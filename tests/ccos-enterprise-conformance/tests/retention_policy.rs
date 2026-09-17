@@ -46,7 +46,7 @@ fn item(id: impl Into<String>, class: RetentionClass, created_at: u64) -> Retain
 
 #[test]
 fn enforcement_is_deterministic_replayable_and_audited() {
-    let tenant = TenantId("acme".into());
+    let tenant = TenantId::new("acme").unwrap();
     let policy = policy_for("acme", RetentionClass::EpisodicJournal, Some(30), true);
     let items = vec![
         item("episode-0", RetentionClass::EpisodicJournal, 0),
@@ -70,7 +70,7 @@ fn enforcement_is_deterministic_replayable_and_audited() {
 
 #[test]
 fn sealed_history_is_reported_and_left_in_place() {
-    let tenant = TenantId("acme".into());
+    let tenant = TenantId::new("acme").unwrap();
     let policy = policy_for("acme", RetentionClass::SealedSnapshots, Some(30), true);
     let mut sealed = item("snapshot-1", RetentionClass::SealedSnapshots, 0);
     sealed.sealed = true;
@@ -84,7 +84,7 @@ fn sealed_history_is_reported_and_left_in_place() {
 
 #[test]
 fn never_expiring_class_is_never_enforced() {
-    let tenant = TenantId("acme".into());
+    let tenant = TenantId::new("acme").unwrap();
     let policy = policy_for("acme", RetentionClass::ComplianceArchives, None, true);
     let (outcome, records) = RetentionEngine::run_once(
         &tenant,
@@ -100,7 +100,7 @@ fn never_expiring_class_is_never_enforced() {
 
 #[test]
 fn policy_and_items_are_both_bound_to_the_tenant() {
-    let acme = TenantId("acme".into());
+    let acme = TenantId::new("acme").unwrap();
     let globex_policy = policy_for("globex", RetentionClass::EphemeralContext, Some(10), true);
     assert!(matches!(
         RetentionEngine::run_once(
@@ -124,7 +124,7 @@ fn policy_and_items_are_both_bound_to_the_tenant() {
 
 #[test]
 fn stable_item_identity_prevents_same_timestamp_collapse() {
-    let tenant = TenantId("acme".into());
+    let tenant = TenantId::new("acme").unwrap();
     let policy = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
     let items = [
         item("ctx-a", RetentionClass::EphemeralContext, 0),
@@ -137,7 +137,7 @@ fn stable_item_identity_prevents_same_timestamp_collapse() {
 
 #[test]
 fn bounded_processing_enforces_action_and_input_caps() {
-    let tenant = TenantId("acme".into());
+    let tenant = TenantId::new("acme").unwrap();
     let policy = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
     let items: Vec<RetainedItem> = (0..50)
         .map(|i| item(format!("ctx-{i}"), RetentionClass::EphemeralContext, i))
@@ -214,7 +214,7 @@ fn approved_policy_write_binds_runtime_ledger_to_exact_artifact() {
     deployment
         .record_approval(
             ApprovalRequest::new(
-                TenantId("acme".into()),
+                TenantId::new("acme").unwrap(),
                 RETENTION_POLICY_TOOL,
                 &artifact_hash,
                 "operator@example.test",
@@ -282,7 +282,7 @@ fn ledger_rejects_cross_tenant_records_against_stored_policy() {
 
 #[test]
 fn crash_continuation_replays_without_duplicate_audit_facts() {
-    let tenant = TenantId("acme".into());
+    let tenant = TenantId::new("acme").unwrap();
     let policy = policy_for("acme", RetentionClass::EphemeralContext, Some(10), true);
     let items: Vec<RetainedItem> = (0..4)
         .map(|i| item(format!("ctx-{i}"), RetentionClass::EphemeralContext, i))

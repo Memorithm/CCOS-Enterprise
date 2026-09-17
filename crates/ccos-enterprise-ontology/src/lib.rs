@@ -130,7 +130,7 @@ impl Ontology {
     where
         I: IntoIterator<Item = EntitySchema>,
     {
-        if tenant.0.trim().is_empty() {
+        if tenant.as_str().trim().is_empty() {
             return Err(OntologyError::InvalidTenant);
         }
         let version = version.into();
@@ -181,8 +181,8 @@ impl Ontology {
         // avoids using validation errors as an oracle for another tenant's schema.
         if proposal.tenant != self.tenant {
             violations.push(Violation::TenantMismatch {
-                expected: self.tenant.0.clone(),
-                actual: proposal.tenant.0.clone(),
+                expected: self.tenant.as_str().to_string(),
+                actual: proposal.tenant.as_str().to_string(),
             });
             return ValidationReport::new(self, violations);
         }
@@ -350,7 +350,7 @@ fn ontology_fingerprint(
 ) -> String {
     let mut hasher = Sha256::new();
     hash_part(&mut hasher, &ONTOLOGY_CONTRACT_VERSION.to_le_bytes());
-    hash_part(&mut hasher, tenant.0.as_bytes());
+    hash_part(&mut hasher, tenant.as_str().as_bytes());
     hash_part(&mut hasher, version.as_bytes());
     for (entity_type, schema) in entities {
         hash_part(&mut hasher, entity_type.as_bytes());
@@ -395,7 +395,7 @@ mod tests {
             properties.reverse();
         }
         Ontology::new(
-            TenantId("tenant-a".into()),
+            TenantId::new("tenant-a").unwrap(),
             "v1",
             [EntitySchema::new("company", properties, false).unwrap()],
         )
@@ -407,7 +407,7 @@ mod tests {
         let evidence = EvidenceId::from("evidence:1");
         EntityProposal {
             id: EntityId::new("entity:1"),
-            tenant: TenantId("tenant-a".into()),
+            tenant: TenantId::new("tenant-a").unwrap(),
             entity_type: "company".into(),
             candidates: BTreeSet::from([candidate.clone()]),
             evidence: BTreeSet::from([evidence.clone()]),
@@ -445,7 +445,7 @@ mod tests {
     fn wrong_tenant_stops_before_schema_details() {
         let ontology = schema(false);
         let mut proposal = proposal();
-        proposal.tenant = TenantId("tenant-b".into());
+        proposal.tenant = TenantId::new("tenant-b").unwrap();
         let report = ontology.validate_proposal(&proposal);
         assert_eq!(report.violations.len(), 1);
         assert!(matches!(

@@ -472,7 +472,7 @@ fn decode_governed_payload(encoded: &[u8]) -> Option<(MemoryAssetId, &[u8])> {
 }
 
 fn validate_tenant(tenant: &TenantId) -> Result<(), EnterpriseMemoryError> {
-    if tenant.0.trim().is_empty() {
+    if tenant.as_str().trim().is_empty() {
         Err(EnterpriseMemoryError::InvalidTenant)
     } else {
         Ok(())
@@ -542,22 +542,25 @@ mod tests {
 
         memory
             .insert(TenantScope::new(
-                TenantId("acme".into()),
+                TenantId::new("acme").unwrap(),
                 write(&v, b"acme-secret"),
             ))
             .unwrap();
         memory
             .insert(TenantScope::new(
-                TenantId("globex".into()),
+                TenantId::new("globex").unwrap(),
                 write(&v, b"globex-secret"),
             ))
             .unwrap();
 
         let acme = memory
-            .recall(TenantScope::new(TenantId("acme".into()), query(&v)))
+            .recall(TenantScope::new(TenantId::new("acme").unwrap(), query(&v)))
             .unwrap();
         let globex = memory
-            .recall(TenantScope::new(TenantId("globex".into()), query(&v)))
+            .recall(TenantScope::new(
+                TenantId::new("globex").unwrap(),
+                query(&v),
+            ))
             .unwrap();
 
         assert_eq!(acme[0].payload, b"acme-secret");
@@ -568,7 +571,7 @@ mod tests {
     #[test]
     fn loadout_never_crosses_space_boundary() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 8, 42).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let agent_a = MemorySpace::agent("agent-a").unwrap();
         let agent_b = MemorySpace::agent("agent-b").unwrap();
         let v = [1.0, 0.0, 0.0, 0.0];
@@ -599,7 +602,7 @@ mod tests {
     #[test]
     fn loadout_combines_only_explicit_shared_spaces() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 8, 7).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let project = MemorySpace::project("ccos").unwrap();
         let team = MemorySpace::team("runtime").unwrap();
         let excluded = MemorySpace::team("finance").unwrap();
@@ -639,7 +642,7 @@ mod tests {
     #[test]
     fn legacy_api_only_sees_tenant_space() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 8, 7).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let agent = MemorySpace::agent("agent-a").unwrap();
         let v = [1.0, 0.0, 0.0, 0.0];
 
@@ -666,7 +669,7 @@ mod tests {
     #[test]
     fn quota_is_shared_across_all_spaces() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 1, 7).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let agent = MemorySpace::agent("agent-a").unwrap();
         let team = MemorySpace::team("runtime").unwrap();
         let a = [1.0, 0.0, 0.0, 0.0];
@@ -693,7 +696,7 @@ mod tests {
     #[test]
     fn malformed_embedding_is_rejected_before_tenant_creation() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 8, 9).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         assert_eq!(
             memory.insert(TenantScope::new(tenant.clone(), write(&[1.0, 2.0], b"bad"),)),
             Err(EnterpriseMemoryError::DimensionMismatch {
@@ -729,7 +732,7 @@ mod tests {
         let v = [1.0, 0.0, 0.0, 0.0];
         assert_eq!(
             memory.insert_scoped(TenantScope::new(
-                TenantId("acme".into()),
+                TenantId::new("acme").unwrap(),
                 scoped_write(&invalid, &v, b"bad"),
             )),
             Err(EnterpriseMemoryError::InvalidMemorySpace { kind: "team" })
@@ -740,7 +743,7 @@ mod tests {
     #[test]
     fn provider_trait_preserves_explicit_loadout_scope() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 8, 17).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let agent = MemorySpace::agent("agent-a").unwrap();
         let excluded = MemorySpace::agent("agent-b").unwrap();
         let v = [1.0, 0.0, 0.0, 0.0];
@@ -769,15 +772,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_unknown_tenant_fails_closed() {
+    fn empty_tenant_cannot_be_constructed_and_unknown_tenant_is_empty() {
         let memory = EnterpriseOctaSoma::new(4, 64, 8, 11).unwrap();
         let v = [1.0, 0.0, 0.0, 0.0];
-        assert_eq!(
-            memory.recall(TenantScope::new(TenantId(String::new()), query(&v))),
-            Err(EnterpriseMemoryError::InvalidTenant)
-        );
+        assert!(TenantId::new("").is_none());
         assert!(memory
-            .recall(TenantScope::new(TenantId("missing".into()), query(&v)))
+            .recall(TenantScope::new(
+                TenantId::new("missing").unwrap(),
+                query(&v)
+            ))
             .unwrap()
             .is_empty());
     }
@@ -804,7 +807,7 @@ mod governed_provider_tests {
     #[test]
     fn governed_recall_preserves_identity_and_space() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 8, 42).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let space = MemorySpace::team("runtime").unwrap();
         let id = MemoryAssetId::new("memory:runtime:1").unwrap();
         let vector = [1.0, 0.0, 0.0, 0.0];
@@ -839,7 +842,7 @@ mod governed_provider_tests {
     #[test]
     fn governed_recall_does_not_treat_legacy_payloads_as_identity_envelopes() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 8, 42).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let vector = [1.0, 0.0, 0.0, 0.0];
         memory
             .insert(TenantScope::new(
@@ -869,7 +872,7 @@ mod governed_provider_tests {
     #[test]
     fn governed_asset_ids_are_unique_per_tenant() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 8, 42).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let first_space = MemorySpace::team("runtime").unwrap();
         let second_space = MemorySpace::project("ccos").unwrap();
         let id = MemoryAssetId::new("memory:unique").unwrap();
@@ -899,19 +902,19 @@ mod governed_provider_tests {
         for tenant in ["acme", "globex"] {
             memory
                 .insert_governed(TenantScope::new(
-                    TenantId(tenant.into()),
+                    TenantId::new(tenant).unwrap(),
                     governed_write(&id, &space, &vector, tenant.as_bytes()),
                 ))
                 .unwrap();
         }
-        assert_eq!(memory.tenant_len(&TenantId("acme".into())), 1);
-        assert_eq!(memory.tenant_len(&TenantId("globex".into())), 1);
+        assert_eq!(memory.tenant_len(&TenantId::new("acme").unwrap()), 1);
+        assert_eq!(memory.tenant_len(&TenantId::new("globex").unwrap()), 1);
     }
 
     #[test]
     fn governed_forget_hides_asset_and_reveals_next_visible_candidate() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 8, 42).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let space = MemorySpace::Tenant;
         let top_id = MemoryAssetId::new("memory:top").unwrap();
         let next_id = MemoryAssetId::new("memory:next").unwrap();
@@ -955,8 +958,8 @@ mod governed_provider_tests {
     #[test]
     fn governed_forget_is_tenant_local_idempotent_and_does_not_reclaim_capacity() {
         let mut memory = EnterpriseOctaSoma::new(4, 64, 1, 42).unwrap();
-        let acme = TenantId("acme".into());
-        let globex = TenantId("globex".into());
+        let acme = TenantId::new("acme").unwrap();
+        let globex = TenantId::new("globex").unwrap();
         let space = MemorySpace::Tenant;
         let id = MemoryAssetId::new("memory:shared-id").unwrap();
         let replacement = MemoryAssetId::new("memory:replacement").unwrap();

@@ -343,7 +343,7 @@ mod tests {
             skills.observe(&episode(turn, evidence)).unwrap();
         }
         let trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        let scope = TenantScope::new(TenantId("acme".into()), ());
+        let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
         let known = BTreeMap::from([(scope.tenant.clone(), ())]);
         let roles = operator_roles();
         let export = seal_export(
@@ -373,10 +373,10 @@ mod tests {
     fn tenant_mismatch_is_refused_before_export_projection() {
         let skills = SkillRegistry::new(SkillConfig::default()).unwrap();
         let trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        let scope = TenantScope::new(TenantId("globex".into()), ());
+        let scope = TenantScope::new(TenantId::new("globex").unwrap(), ());
         let known = BTreeMap::from([
-            (TenantId("acme".into()), ()),
-            (TenantId("globex".into()), ()),
+            (TenantId::new("acme").unwrap(), ()),
+            (TenantId::new("globex").unwrap(), ()),
         ]);
         let roles = operator_roles();
         let result = seal_export(
@@ -400,7 +400,7 @@ mod tests {
     fn tampering_wrong_trust_anchor_and_unauthorized_export_are_refused() {
         let skills = SkillRegistry::new(SkillConfig::default()).unwrap();
         let trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        let scope = TenantScope::new(TenantId("acme".into()), ());
+        let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
         let known = BTreeMap::from([(scope.tenant.clone(), ())]);
         let roles = operator_roles();
         let mut export = seal_export(

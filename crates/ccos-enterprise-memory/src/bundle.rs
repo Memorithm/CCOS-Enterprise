@@ -137,7 +137,7 @@ impl MemoryBundleManifest {
         tenant: TenantId,
         entries: impl IntoIterator<Item = MemoryBundleEntry>,
     ) -> Result<Self, MemoryBundleError> {
-        if tenant.0.trim().is_empty() {
+        if tenant.as_str().trim().is_empty() {
             return Err(MemoryBundleError::InvalidTenant);
         }
 
@@ -193,7 +193,7 @@ impl MemoryBundleManifest {
 
     /// Validate that an import request targets the tenant bound into the bundle.
     pub fn validate_import_target(&self, tenant: &TenantId) -> Result<(), MemoryBundleError> {
-        if tenant.0.trim().is_empty() {
+        if tenant.as_str().trim().is_empty() {
             return Err(MemoryBundleError::InvalidTenant);
         }
         if tenant != &self.tenant {
@@ -308,7 +308,7 @@ mod tests {
     fn manifest_is_deterministic_and_preserves_lineage() {
         let space = MemorySpace::project("ccos").unwrap();
         let manifest = MemoryBundleManifest::v1(
-            TenantId("tenant-a".into()),
+            TenantId::new("tenant-a").unwrap(),
             [
                 entry(
                     derived(
@@ -348,7 +348,7 @@ mod tests {
     fn duplicate_asset_ids_fail_closed() {
         assert_eq!(
             MemoryBundleManifest::v1(
-                TenantId("tenant-a".into()),
+                TenantId::new("tenant-a").unwrap(),
                 [
                     entry(root("mem:a", MemorySpace::Tenant), "item:1"),
                     entry(root("mem:a", MemorySpace::Tenant), "item:2"),
@@ -362,7 +362,7 @@ mod tests {
     fn derived_asset_cannot_silently_drop_parent_from_bundle() {
         assert_eq!(
             MemoryBundleManifest::v1(
-                TenantId("tenant-a".into()),
+                TenantId::new("tenant-a").unwrap(),
                 [entry(
                     derived(
                         "mem:episode",
@@ -390,7 +390,7 @@ mod tests {
             [id("mem:root")],
         );
         let error = MemoryBundleManifest::v1(
-            TenantId("tenant-a".into()),
+            TenantId::new("tenant-a").unwrap(),
             [entry(parent, "item:1"), entry(child, "item:2")],
         )
         .unwrap_err();
@@ -404,16 +404,16 @@ mod tests {
     #[test]
     fn import_target_is_tenant_bound() {
         let manifest = MemoryBundleManifest::v1(
-            TenantId("tenant-a".into()),
+            TenantId::new("tenant-a").unwrap(),
             [entry(root("mem:a", MemorySpace::Tenant), "item:1")],
         )
         .unwrap();
         assert_eq!(
-            manifest.validate_import_target(&TenantId("tenant-b".into())),
+            manifest.validate_import_target(&TenantId::new("tenant-b").unwrap()),
             Err(MemoryBundleError::TenantMismatch)
         );
         assert_eq!(
-            manifest.validate_import_target(&TenantId("tenant-a".into())),
+            manifest.validate_import_target(&TenantId::new("tenant-a").unwrap()),
             Ok(())
         );
     }

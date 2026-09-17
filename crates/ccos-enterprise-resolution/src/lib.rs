@@ -296,7 +296,7 @@ fn entity_id(
     schema: &ResolutionSchema,
 ) -> Result<EntityId, ResolutionError> {
     let mut hasher = Sha256::new();
-    hash_part(&mut hasher, tenant.0.as_bytes());
+    hash_part(&mut hasher, tenant.as_str().as_bytes());
     hash_part(&mut hasher, schema.entity_type.as_bytes());
     for field in &schema.identity_fields {
         let value = candidate.attributes.get(field).ok_or_else(|| {
@@ -387,7 +387,7 @@ mod tests {
     fn raw(source: &str, bytes: &[u8]) -> RawArtifact {
         let digest = Sha256::digest(bytes);
         RawArtifact {
-            tenant: TenantId("acme".into()),
+            tenant: TenantId::new("acme").unwrap(),
             source_id: SourceId::from(source),
             virtual_uri: format!("fs://dataset/{source}.json"),
             media_type: "application/json".into(),

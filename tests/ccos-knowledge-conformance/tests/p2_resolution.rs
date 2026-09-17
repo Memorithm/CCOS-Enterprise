@@ -49,7 +49,7 @@ fn two_sources_resolve_to_one_observation_only_after_explicit_journal_write() {
 
     let ingest = |root: &PathBuf, namespace: &str| {
         LocalTreeSource::new(
-            TenantId("tenant-a".into()),
+            TenantId::new("tenant-a").unwrap(),
             namespace,
             root,
             IngestLimits::default(),
@@ -96,7 +96,10 @@ fn two_sources_resolve_to_one_observation_only_after_explicit_journal_write() {
         ])
         .unwrap();
 
-    let partition = store.state().tenant(&TenantId("tenant-a".into())).unwrap();
+    let partition = store
+        .state()
+        .tenant(&TenantId::new("tenant-a").unwrap())
+        .unwrap();
     assert_eq!(partition.entities.len(), 1);
     assert_eq!(partition.entities[&entity.id].evidence.len(), 2);
     assert_eq!(

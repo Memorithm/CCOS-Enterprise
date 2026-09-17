@@ -9,7 +9,7 @@ use ccos_enterprise_resolution::{EntityProposal, FactProposal};
 
 fn v1() -> Ontology {
     Ontology::new(
-        TenantId("tenant-a".into()),
+        TenantId::new("tenant-a").unwrap(),
         "company-v1",
         [EntitySchema::new(
             "company",
@@ -26,7 +26,7 @@ fn v1() -> Ontology {
 
 fn v2() -> Ontology {
     Ontology::new(
-        TenantId("tenant-a".into()),
+        TenantId::new("tenant-a").unwrap(),
         "organization-v2",
         [EntitySchema::new(
             "organization",
@@ -46,7 +46,7 @@ fn proposal() -> EntityProposal {
     let evidence = EvidenceId::from("evidence:crm:7");
     EntityProposal {
         id: EntityId::new("entity:company:7"),
-        tenant: TenantId("tenant-a".into()),
+        tenant: TenantId::new("tenant-a").unwrap(),
         entity_type: "company".into(),
         candidates: BTreeSet::from([candidate.clone()]),
         evidence: BTreeSet::from([evidence.clone()]),

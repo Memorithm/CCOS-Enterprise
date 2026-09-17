@@ -832,7 +832,7 @@ impl Deployment {
         if !is_canonical_identifier(org) || !is_canonical_identifier(tenant) {
             return false;
         }
-        let id = TenantId(tenant.to_string());
+        let id = TenantId::new(tenant).expect("tenant was validated above");
         if self.tenants.contains_key(&id) {
             return false;
         }
@@ -872,7 +872,7 @@ impl Deployment {
         by: Option<&str>,
         why: Option<&str>,
     ) -> Option<TenantRules<'a>> {
-        let id = TenantId(tenant.to_string());
+        let id = TenantId::new(tenant)?;
         let state = self.tenants.get(&id)?;
         let before_models = state.models.0.clone();
         let before_variants: BTreeSet<AdvancedQPageVariant> =
@@ -1153,7 +1153,7 @@ impl Deployment {
         let mut hasher = Sha256::new();
         for field in [
             b"ccos-enterprise-qpage-activation-v1".as_slice(),
-            tenant.0.as_bytes(),
+            tenant.as_str().as_bytes(),
             format!("{variant:?}").as_bytes(),
         ] {
             hasher.update((field.len() as u64).to_be_bytes());
@@ -1179,7 +1179,7 @@ impl Deployment {
         let decision = self
             .tenants
             .get(tenant)
-            .ok_or_else(|| format!("unknown tenant {:?}", tenant.0))?
+            .ok_or_else(|| format!("unknown tenant {:?}", tenant.as_str()))?
             .variant_policy
             .evaluate(variant);
         let validated_approval = match decision {
@@ -1211,8 +1211,8 @@ impl Deployment {
             }
         };
         let rules = self
-            .tenant_mut(&tenant.0)
-            .ok_or_else(|| format!("unknown tenant {:?}", tenant.0))?;
+            .tenant_mut(tenant.as_str())
+            .ok_or_else(|| format!("unknown tenant {:?}", tenant.as_str()))?;
         let state = rules
             .deployment
             .tenants
@@ -1236,8 +1236,8 @@ impl Deployment {
         variant: AdvancedQPageVariant,
     ) -> Result<(), String> {
         let rules = self
-            .tenant_mut(&tenant.0)
-            .ok_or_else(|| format!("unknown tenant {:?}", tenant.0))?;
+            .tenant_mut(tenant.as_str())
+            .ok_or_else(|| format!("unknown tenant {:?}", tenant.as_str()))?;
         rules
             .deployment
             .tenants
@@ -1287,7 +1287,8 @@ impl Deployment {
         if !self.approval_required.contains(&call.request.tool) {
             return Ok(());
         }
-        let tenant = TenantId(call.request.tenant.clone());
+        let tenant = TenantId::new(&call.request.tenant)
+            .ok_or_else(|| Refusal::MalformedRequest("tenant".to_string()))?;
         let query = ccos_enterprise_approval::ApprovalQuery {
             tenant: &tenant,
             action: &call.request.tool,
@@ -1395,7 +1396,7 @@ impl Deployment {
     #[cfg(any(test, feature = "test-fixtures"))]
     pub fn get(&self, scope: &TenantScope<String>) -> Option<&str> {
         self.store
-            .get(scope.tenant.0.as_str())?
+            .get(scope.tenant.as_str())?
             .get(scope.inner.as_str())
             .map(String::as_str)
     }
@@ -1514,7 +1515,7 @@ impl Deployment {
     /// returned 7% of the bytes and there was no way to get the rest.
     #[cfg(any(test, feature = "test-fixtures"))]
     pub fn remove(&mut self, scope: &TenantScope<String>) -> bool {
-        self.delete_cell(scope.tenant.0.as_str(), &scope.inner)
+        self.delete_cell(scope.tenant.as_str(), &scope.inner)
     }
 
     /// Delete every cell a tenant holds. Returns how many were removed.
@@ -1563,7 +1564,7 @@ impl Deployment {
             }
             found = d
                 .store
-                .get(tenant.0.as_str())
+                .get(tenant.as_str())
                 .and_then(|cells| cells.get(key))
                 .cloned();
             Ok(found.clone())
@@ -1588,7 +1589,7 @@ impl Deployment {
     /// Delete a cell through every gate.
     pub fn remove_cell(&mut self, call: Call<'_>, key: &str) -> Outcome {
         self.cell_call(call, move |d, tenant| {
-            d.delete_cell(tenant.0.as_str(), key);
+            d.delete_cell(tenant.as_str(), key);
             Ok(None)
         })
     }
@@ -1602,7 +1603,10 @@ impl Deployment {
     where
         F: FnOnce(&mut Self, TenantId) -> Result<Option<String>, Refusal>,
     {
-        let tenant = TenantId(call.request.tenant.clone());
+        let tenant = match TenantId::new(&call.request.tenant) {
+            Some(tenant) => tenant,
+            None => return Outcome::Refused(Refusal::MalformedRequest("tenant".to_string())),
+        };
         let cost = call.cost_tokens;
         let outcome = self.admit(call);
         if !outcome.is_forwarded() {
@@ -1725,7 +1729,10 @@ impl Deployment {
         if call.request.actor != call.actor.actor().0 {
             return refuse(Refusal::ActorMismatch);
         }
-        let tenant_id = TenantId(call.request.tenant.clone());
+        let tenant_id = match TenantId::new(&call.request.tenant) {
+            Some(tenant) => tenant,
+            None => return refuse(Refusal::MalformedRequest("tenant".to_string())),
+        };
         match self.tenant_owner.get(&tenant_id) {
             None => return refuse(Refusal::UnknownTenant),
             Some(owner) if *owner != *call.actor.org() => {
@@ -1884,30 +1891,24 @@ impl Deployment {
 
     /// The tenant's token budget ceiling.
     pub fn tenant_limit(&self, tenant: &str) -> Option<u64> {
-        self.tenants
-            .get(&TenantId(tenant.to_string()))
-            .map(TenantState::limit)
+        self.tenants.get(tenant).map(TenantState::limit)
     }
 
     /// The tenant's model allowlist, in name order.
     pub fn tenant_models(&self, tenant: &str) -> Option<BTreeSet<String>> {
-        self.tenants
-            .get(&TenantId(tenant.to_string()))
-            .map(|state| state.models.0.clone())
+        self.tenants.get(tenant).map(|state| state.models.0.clone())
     }
 
     /// The tenant's active Q-Page variants, in name order.
     pub fn tenant_variants(&self, tenant: &str) -> Option<Vec<String>> {
-        self.tenants
-            .get(&TenantId(tenant.to_string()))
-            .map(|state| {
-                state
-                    .qpages
-                    .active()
-                    .into_iter()
-                    .map(|v| format!("{v:?}"))
-                    .collect()
-            })
+        self.tenants.get(tenant).map(|state| {
+            state
+                .qpages
+                .active()
+                .into_iter()
+                .map(|v| format!("{v:?}"))
+                .collect()
+        })
     }
 
     /// The tenant's active model: the single model the deployment governs
@@ -1939,7 +1940,7 @@ impl Deployment {
         let state = self
             .tenants
             .get_mut(tenant)
-            .ok_or_else(|| format!("unknown tenant {:?}", tenant.0))?;
+            .ok_or_else(|| format!("unknown tenant {:?}", tenant.as_str()))?;
         state.models.0.insert(new_model.to_string());
         state.active_model = Some(new_model.to_string());
         Ok(())
@@ -1988,9 +1989,7 @@ impl Deployment {
     /// not have — distinguishable from a tenant that has spent nothing, which
     /// the predecessor's bare `0` was not.
     pub fn spent(&self, tenant: &str) -> Option<u64> {
-        self.tenants
-            .get(&TenantId(tenant.to_string()))
-            .map(TenantState::spent)
+        self.tenants.get(tenant).map(TenantState::spent)
     }
 
     pub fn audit(&self) -> impl Iterator<Item = &AuditRecord> {
@@ -2218,7 +2217,7 @@ impl Drop for TenantRules<'_> {
         {
             self.deployment.record(
                 GovernanceChange::TenantRulesChanged {
-                    tenant: self.tenant.0.clone(),
+                    tenant: self.tenant.as_str().to_string(),
                     models_allowed,
                     models_revoked,
                     variants_activated,
@@ -2231,7 +2230,7 @@ impl Drop for TenantRules<'_> {
         if after_variant_policy != self.before_variant_policy {
             self.deployment.record(
                 GovernanceChange::QPagePolicyChanged {
-                    tenant: self.tenant.0.clone(),
+                    tenant: self.tenant.as_str().to_string(),
                     permitted: after_variant_policy
                         .permitted
                         .iter()
@@ -2613,7 +2612,7 @@ impl Deployment {
                 .iter()
                 .map(|(id, state)| {
                     (
-                        id.0.clone(),
+                        id.as_str().to_string(),
                         TenantSnapshot {
                             owner: self
                                 .tenant_owner
@@ -2642,7 +2641,7 @@ impl Deployment {
                 .flat_map(|(t, cells)| {
                     cells
                         .iter()
-                        .map(move |(k, v)| (t.0.clone(), k.clone(), v.clone()))
+                        .map(move |(k, v)| (t.as_str().to_string(), k.clone(), v.clone()))
                 })
                 .collect(),
         }
@@ -2716,7 +2715,7 @@ impl Deployment {
                     })
                 }
             };
-            let id = TenantId(name);
+            let id = TenantId::new(&name).expect("snapshot tenant was validated above");
             d.tenant_owner.insert(id.clone(), OrgId(t.owner));
             // A pre-policy v1 snapshot had no `variant_policy` field at all.
             // Preserve its already-active ordinary variants by migrating them
@@ -2727,7 +2726,7 @@ impl Deployment {
                 let active = t.qpages.active();
                 if active.contains(&AdvancedQPageVariant::ExperimentalBridge) {
                     return Err(RestoreError::VariantPolicyCorrupt {
-                        tenant: id.0.clone(),
+                        tenant: id.as_str().to_string(),
                         detail: "legacy snapshot has active ExperimentalBridge without durable activation approval evidence"
                             .into(),
                     });
@@ -2748,7 +2747,7 @@ impl Deployment {
                 // treated as legacy and therefore remain fail-closed.
                 t.variant_policy.validate().map_err(|detail| {
                     RestoreError::VariantPolicyCorrupt {
-                        tenant: id.0.clone(),
+                        tenant: id.as_str().to_string(),
                         detail,
                     }
                 })?;
@@ -2758,7 +2757,7 @@ impl Deployment {
                 match t.variant_policy.evaluate(variant) {
                     ccos_enterprise_qpages::policy::ActivationDecision::Denied => {
                         return Err(RestoreError::VariantPolicyCorrupt {
-                            tenant: id.0.clone(),
+                            tenant: id.as_str().to_string(),
                             detail: format!(
                                 "active variant {variant:?} is denied by restored policy"
                             ),
@@ -2768,7 +2767,7 @@ impl Deployment {
                     ccos_enterprise_qpages::policy::ActivationDecision::RequiresApproval => {
                         let Some(approval_id) = t.variant_approvals.get(&variant) else {
                             return Err(RestoreError::VariantPolicyCorrupt {
-                                tenant: id.0.clone(),
+                                tenant: id.as_str().to_string(),
                                 detail: format!(
                                     "active variant {variant:?} has no persisted approval identity"
                                 ),
@@ -2778,19 +2777,19 @@ impl Deployment {
                             d.approvals.registry().snapshot().approvals.get(approval_id)
                         else {
                             return Err(RestoreError::VariantPolicyCorrupt {
-                                tenant: id.0.clone(),
+                                tenant: id.as_str().to_string(),
                                 detail: format!("unknown activation approval {approval_id:?}"),
                             });
                         };
                         let artifact = Self::qpage_activation_artifact_hash(&id, variant);
-                        if record.tenant != id.0
+                        if record.tenant != id.as_str()
                             || record.action != "qpage.activate"
                             || record.artifact_hash != artifact
                             || record.decision
                                 != ccos_enterprise_approval::ApprovalDecision::Approved
                         {
                             return Err(RestoreError::VariantPolicyCorrupt {
-                                tenant: id.0.clone(),
+                                tenant: id.as_str().to_string(),
                                 detail: format!(
                                     "activation approval {approval_id:?} is not bound to {variant:?}"
                                 ),
@@ -2818,7 +2817,11 @@ impl Deployment {
             // an unknown tenant, an oversized key, or a tenant over its cell
             // allowance. A snapshot is a file an operator or a bad merge can
             // edit; it is not a back door.
-            let tenant = TenantId(tenant);
+            let tenant =
+                TenantId::new(&tenant).ok_or_else(|| RestoreError::MalformedIdentifier {
+                    what: "tenant".to_string(),
+                    value: clamp(&tenant),
+                })?;
             if d.write_cell(&tenant, &key, &value).is_err() {
                 return Err(RestoreError::MalformedIdentifier {
                     what: "cell".to_string(),
@@ -2855,7 +2858,11 @@ impl Deployment {
             }
             next = record.sequence + 1;
 
-            let tenant = TenantId(record.tenant.clone());
+            let tenant =
+                TenantId::new(&record.tenant).ok_or_else(|| RestoreError::MalformedIdentifier {
+                    what: "tenant".to_string(),
+                    value: clamp(&record.tenant),
+                })?;
             if record.cost > 0 && record.sequence >= snapshot.sequence_watermark {
                 let Some(state) = d.tenants.get_mut(&tenant) else {
                     return Err(RestoreError::JournalTenantUnknown {
@@ -3041,7 +3048,7 @@ mod tests {
         assert!(d.add_tenant("org", "tenant", tenant));
 
         let scope = ccos_enterprise_tenancy::TenantScope::new(
-            ccos_enterprise_tenancy::TenantId("tenant".into()),
+            ccos_enterprise_tenancy::TenantId::new("tenant").unwrap(),
             "key".to_string(),
         );
         assert!(d.put(&scope, "value"));
@@ -3062,11 +3069,11 @@ mod tests {
         assert!(d.add_tenant("org", "tenant", tenant));
 
         let first = ccos_enterprise_tenancy::TenantScope::new(
-            ccos_enterprise_tenancy::TenantId("tenant".into()),
+            ccos_enterprise_tenancy::TenantId::new("tenant").unwrap(),
             "first".to_string(),
         );
         let second = ccos_enterprise_tenancy::TenantScope::new(
-            ccos_enterprise_tenancy::TenantId("tenant".into()),
+            ccos_enterprise_tenancy::TenantId::new("tenant").unwrap(),
             "second".to_string(),
         );
         assert!(d.put(&first, "longer-value"));
@@ -3461,7 +3468,7 @@ mod tests {
         let recorded = d
             .record_approval(
                 ccos_enterprise_approval::ApprovalRequest::new(
-                    ccos_enterprise_tenancy::TenantId("acme".into()),
+                    ccos_enterprise_tenancy::TenantId::new("acme").unwrap(),
                     "policy.set",
                     &artifact,
                     "ZEKRITI Tarek",
@@ -3513,7 +3520,7 @@ mod tests {
         let artifact = "e".repeat(64);
         d.record_approval(
             ccos_enterprise_approval::ApprovalRequest::new(
-                ccos_enterprise_tenancy::TenantId("acme".into()),
+                ccos_enterprise_tenancy::TenantId::new("acme").unwrap(),
                 "policy.set",
                 &artifact,
                 "ZEKRITI Tarek",
@@ -3764,7 +3771,7 @@ mod tests {
     #[test]
     fn live_raw_activation_is_not_public_and_governed_activation_obeys_policy() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         assert!(d
             .activate_variant_governed(&tenant, AdvancedQPageVariant::CausalChain, None, 100)
             .is_err());
@@ -3784,7 +3791,7 @@ mod tests {
     #[test]
     fn experimental_bridge_rejects_fabricated_and_wrong_artifact_approval() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         d.tenant_mut("acme").unwrap().opt_in_experimental_bridge();
         assert!(d
             .activate_variant_governed(
@@ -3819,7 +3826,7 @@ mod tests {
     #[test]
     fn exact_bridge_approval_is_persisted_and_revalidated_on_admission() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         d.tenant_mut("acme").unwrap().opt_in_experimental_bridge();
         let artifact = Deployment::qpage_activation_artifact_hash(
             &tenant,
@@ -3868,7 +3875,7 @@ mod tests {
     #[test]
     fn legacy_snapshot_without_variant_policy_migrates_active_ordinary_variants() {
         let d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
 
         // Serialize first, then remove the fields exactly as a pre-policy v1
         // snapshot would look on disk. Directly assigning Default here would
@@ -3918,7 +3925,7 @@ mod tests {
     #[test]
     fn legacy_snapshot_with_active_experimental_bridge_remains_fail_closed() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         d.tenants
             .get_mut(&tenant)
             .unwrap()
@@ -3944,7 +3951,7 @@ mod tests {
     #[test]
     fn supplied_approval_id_must_itself_be_live() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let variant = AdvancedQPageVariant::ExperimentalBridge;
         d.tenant_mut("acme").unwrap().opt_in_experimental_bridge();
 
@@ -4042,7 +4049,7 @@ mod tests {
     #[test]
     fn restored_active_variant_denied_by_default_policy_is_refused() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         d.tenants
             .get_mut(&tenant)
             .unwrap()

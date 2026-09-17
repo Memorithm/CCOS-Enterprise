@@ -100,8 +100,8 @@ impl OntologyMigration {
         }
         if from.tenant() != to.tenant() {
             return Err(MigrationError::TenantMismatch {
-                expected: from.tenant().0.clone(),
-                actual: to.tenant().0.clone(),
+                expected: from.tenant().as_str().to_string(),
+                actual: to.tenant().as_str().to_string(),
             });
         }
         if from.fingerprint() == to.fingerprint() {
@@ -167,8 +167,8 @@ impl OntologyMigration {
         self.verify_endpoints(from, to)?;
         if &proposal.tenant != from.tenant() {
             return Err(MigrationError::TenantMismatch {
-                expected: from.tenant().0.clone(),
-                actual: proposal.tenant.0.clone(),
+                expected: from.tenant().as_str().to_string(),
+                actual: proposal.tenant.as_str().to_string(),
             });
         }
 
@@ -251,7 +251,7 @@ pub struct MigrationRegistry {
 
 impl MigrationRegistry {
     pub fn new(tenant: TenantId) -> Result<Self, MigrationError> {
-        if tenant.0.trim().is_empty() {
+        if tenant.as_str().trim().is_empty() {
             return Err(MigrationError::InvalidTenant);
         }
         Ok(Self {
@@ -263,8 +263,8 @@ impl MigrationRegistry {
     pub fn register(&mut self, migration: OntologyMigration) -> Result<(), MigrationError> {
         if migration.tenant != self.tenant {
             return Err(MigrationError::TenantMismatch {
-                expected: self.tenant.0.clone(),
-                actual: migration.tenant.0.clone(),
+                expected: self.tenant.as_str().to_string(),
+                actual: migration.tenant.as_str().to_string(),
             });
         }
         let key = (
@@ -422,7 +422,7 @@ fn migration_hash(
         &ONTOLOGY_MIGRATION_CONTRACT_VERSION.to_le_bytes(),
     );
     hash_part(&mut hasher, migration_id.as_bytes());
-    hash_part(&mut hasher, tenant.0.as_bytes());
+    hash_part(&mut hasher, tenant.as_str().as_bytes());
     hash_part(&mut hasher, from_version.as_bytes());
     hash_part(&mut hasher, from_fingerprint.as_bytes());
     hash_part(&mut hasher, to_version.as_bytes());
@@ -451,7 +451,7 @@ fn migration_hash(
 
 fn proposal_hash(proposal: &EntityProposal) -> String {
     let mut hasher = Sha256::new();
-    hash_part(&mut hasher, proposal.tenant.0.as_bytes());
+    hash_part(&mut hasher, proposal.tenant.as_str().as_bytes());
     hash_part(&mut hasher, proposal.id.as_str().as_bytes());
     hash_part(&mut hasher, proposal.entity_type.as_bytes());
     for candidate in &proposal.candidates {
@@ -516,7 +516,7 @@ mod tests {
 
     fn v1(allow_extra: bool) -> Ontology {
         Ontology::new(
-            TenantId("tenant-a".into()),
+            TenantId::new("tenant-a").unwrap(),
             "v1",
             [EntitySchema::new(
                 "company",
@@ -533,7 +533,7 @@ mod tests {
 
     fn v2() -> Ontology {
         Ontology::new(
-            TenantId("tenant-a".into()),
+            TenantId::new("tenant-a").unwrap(),
             "v2",
             [EntitySchema::new(
                 "organization",
@@ -575,7 +575,7 @@ mod tests {
         }
         EntityProposal {
             id: EntityId::new("entity:company:7"),
-            tenant: TenantId("tenant-a".into()),
+            tenant: TenantId::new("tenant-a").unwrap(),
             entity_type: "company".into(),
             candidates: BTreeSet::from([candidate]),
             evidence: BTreeSet::from([evidence]),
@@ -652,7 +652,7 @@ mod tests {
         let from = v1(false);
         let to = v2();
         let migration = migration(&from, &to);
-        let mut registry = MigrationRegistry::new(TenantId("tenant-a".into())).unwrap();
+        let mut registry = MigrationRegistry::new(TenantId::new("tenant-a").unwrap()).unwrap();
         registry.register(migration.clone()).unwrap();
         assert!(matches!(
             registry.register(migration),

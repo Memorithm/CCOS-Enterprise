@@ -194,7 +194,10 @@ mod tests {
         MemoryRecallBudget::new(2, 4, 5).unwrap()
     }
     fn tenant_scope<T>(value: T) -> TenantScope<T> {
-        TenantScope::new(ccos_enterprise_tenancy::TenantId("acme".into()), value)
+        TenantScope::new(
+            ccos_enterprise_tenancy::TenantId::new("acme").unwrap(),
+            value,
+        )
     }
 
     #[test]

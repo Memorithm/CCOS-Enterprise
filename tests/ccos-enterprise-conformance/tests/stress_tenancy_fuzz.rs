@@ -393,7 +393,7 @@ fn hostile_string(rng: &mut Lcg, parts: usize) -> String {
 const HOME_ORG: &str = "memorithm";
 
 fn scope(tenant: &str, key: &str) -> TenantScope<String> {
-    TenantScope::new(TenantId(tenant.to_string()), key.to_string())
+    TenantScope::new(TenantId::new(tenant).unwrap(), key.to_string())
 }
 
 /// The store's shape, standing on its own.
@@ -425,7 +425,7 @@ impl CellStore {
 
     fn get(&self, scope: &TenantScope<String>) -> Option<&str> {
         self.0
-            .get(scope.tenant.0.as_str())?
+            .get(scope.tenant.as_str())?
             .get(scope.inner.as_str())
             .map(String::as_str)
     }
@@ -441,7 +441,7 @@ impl CellStore {
 }
 
 fn scope_owned(tenant: String, key: String) -> TenantScope<String> {
-    TenantScope::new(TenantId(tenant), key)
+    TenantScope::new(TenantId::new(&tenant).unwrap(), key)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -936,16 +936,16 @@ fn rescope_can_never_silently_read_the_source_tenants_data() {
 
     for key in &written {
         let source = scope("acme", key);
-        let crossed = source.clone().rescope(TenantId("globex".into()));
+        let crossed = source.clone().rescope(TenantId::new("globex").unwrap());
         assert_eq!(crossed.inner, source.inner, "the cell name is unchanged");
-        assert_eq!(crossed.tenant, TenantId("globex".into()));
+        assert_eq!(crossed.tenant, TenantId::new("globex").unwrap());
         assert_eq!(
             d.get(&crossed),
             None,
             "rescoping to globex must not reach acme's {key:?}"
         );
         // …and the reverse crossing is equally blind.
-        let back = crossed.rescope(TenantId("third".into()));
+        let back = crossed.rescope(TenantId::new("third").unwrap());
         assert_eq!(d.get(&back), None, "third tenant sees nothing either");
     }
     assert!(d.cells_of("globex").is_empty());
@@ -1200,7 +1200,7 @@ fn rescope_carries_no_provenance_and_only_the_direct_path_crosses_silently() {
     let acme_scope = scope("acme", "memory-root");
     assert_eq!(d.get(&acme_scope), Some("ACME CONFIDENTIAL"));
 
-    let crossed = acme_scope.rescope(TenantId("globex".into()));
+    let crossed = acme_scope.rescope(TenantId::new("globex").unwrap());
 
     // Indistinguishable from a scope that was never anyone else's: `TenantScope`
     // derives `PartialEq` over exactly two fields, so there is nowhere for the

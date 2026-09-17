@@ -12,7 +12,7 @@ use ccos_enterprise_knowledge_model::{
 };
 
 fn tenant(name: &str) -> TenantId {
-    TenantId(name.to_owned())
+    TenantId::new(name).unwrap()
 }
 
 fn evidence() -> BTreeSet<EvidenceId> {

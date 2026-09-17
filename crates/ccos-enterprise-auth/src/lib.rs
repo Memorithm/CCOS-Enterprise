@@ -75,10 +75,10 @@
 //! * **RS256 for OIDC**, which most providers sign with. [`oidc`] explains why
 //!   the gap is deliberate and refuses such tokens rather than accepting them
 //!   unverified.
-//! * **Revocation is per-process.** [`Revocations`] lives in the verifier that
-//!   holds it, so a deployment running several processes revokes in each of
-//!   them or not at all. Distributing it needs the store, and that is a
-//!   different change from this one.
+//! * **Revocation distribution needs a shared durable store.** The auth crate
+//!   owns bounded state and replay semantics; `ccos-enterprise-store` persists
+//!   snapshots plus ordered mutation records. Replicas that do not refresh
+//!   from that shared authority are deliberately not claimed to be coherent.
 //! * **Certificate chain verification**, deliberately: see [`mtls`].
 
 #[cfg(feature = "token-auth")]
@@ -87,7 +87,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub mod revocation;
-pub use revocation::{ReplayGuard, Revocations};
+pub use revocation::{
+    ReplayGuard, RevocationEvent, RevocationSnapshot, RevocationStateError, Revocations,
+};
 
 #[cfg(feature = "mtls-auth")]
 pub mod mtls;

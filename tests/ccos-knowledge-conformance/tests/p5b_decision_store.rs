@@ -38,7 +38,7 @@ impl Drop for TestDir {
 }
 
 fn tenant() -> TenantId {
-    TenantId("acme".into())
+    TenantId::new("acme").unwrap()
 }
 
 fn evidence() -> BTreeSet<EvidenceId> {

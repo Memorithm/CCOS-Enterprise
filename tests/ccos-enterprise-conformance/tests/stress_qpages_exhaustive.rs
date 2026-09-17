@@ -211,7 +211,7 @@ fn expected_json(mask: u32) -> String {
 /// policy. `ExperimentalBridge` is explicitly opted in and receives an exact
 /// approval-v2 record bound to this tenant + variant before activation.
 fn governed_activate(d: &mut Deployment, tenant: &str, variant: AdvancedQPageVariant, now: u64) {
-    let tenant_id = TenantId(tenant.to_string());
+    let tenant_id = TenantId::new(tenant).unwrap();
 
     if variant == AdvancedQPageVariant::ExperimentalBridge {
         d.tenant_mut(tenant)
@@ -1106,7 +1106,7 @@ fn a_replayed_request_id_is_never_billed_twice() {
 #[test]
 fn activation_is_policy_gated_and_audited_but_policy_mutation_has_no_actor() {
     let mut d = deployment_activating(0);
-    let tenant = TenantId("acme".to_string());
+    let tenant = TenantId::new("acme").unwrap();
 
     // Fail closed before the tenant permits the ordinary variant.
     assert!(
@@ -1520,7 +1520,7 @@ fn no_credential_reaches_a_variant_it_does_not_own() {
 #[test]
 fn multi_tenant_federated_federates_nothing_and_leaks_nothing() {
     let scope =
-        |tenant: &str, key: &str| TenantScope::new(TenantId(tenant.to_string()), key.to_string());
+        |tenant: &str, key: &str| TenantScope::new(TenantId::new(tenant).unwrap(), key.to_string());
 
     let mut d = Deployment::new();
     d.add_role("writer", &["memory.read", "memory.write"])
@@ -1615,7 +1615,7 @@ fn activation_and_revocation_take_effect_on_the_very_next_call() {
     for (i, v) in ALL.iter().enumerate() {
         // Everything active EXCEPT v, so only v's transitions are under test.
         let mut d = deployment_activating((SUBSETS - 1) & !(1u32 << i));
-        let tenant = TenantId("acme".to_string());
+        let tenant = TenantId::new("acme").unwrap();
 
         assert_eq!(
             recall(&mut d, "alice", "before", Some(*v), 1).refusal(),

@@ -353,7 +353,7 @@ fn fleet_deployment(names: &[String]) -> Deployment {
                 .expect("tenant was just provisioned")
                 .permit_variant(AdvancedQPageVariant::Hierarchical);
             d.activate_variant_governed(
-                &ccos_enterprise_tenancy::TenantId(name.clone()),
+                &ccos_enterprise_tenancy::TenantId::new(&name).unwrap(),
                 AdvancedQPageVariant::Hierarchical,
                 None,
                 0,

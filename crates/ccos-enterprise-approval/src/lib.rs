@@ -235,10 +235,10 @@ impl ApprovalRequest {
         expires_at: Option<u64>,
         justification: &str,
     ) -> Result<Self, ApprovalError> {
-        if tenant.0.is_empty()
-            || tenant.0.len() > 128
+        if tenant.as_str().is_empty()
+            || tenant.as_str().len() > 128
             || !tenant
-                .0
+                .as_str()
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
         {
@@ -288,7 +288,7 @@ impl ApprovalRequest {
     pub fn id(&self) -> String {
         let mut hasher = Sha256::new();
         framed(&mut hasher, b"ccos-enterprise-approval-v2");
-        framed(&mut hasher, self.tenant.0.as_bytes());
+        framed(&mut hasher, self.tenant.as_str().as_bytes());
         framed(&mut hasher, self.action.as_bytes());
         framed(&mut hasher, self.artifact_hash.as_bytes());
         framed(&mut hasher, self.approver.as_bytes());
@@ -313,7 +313,7 @@ impl ApprovalRequest {
         let mut hasher = Sha256::new();
         for part in [
             b"ccos-enterprise-approval-v1".as_slice(),
-            self.tenant.0.as_bytes(),
+            self.tenant.as_str().as_bytes(),
             self.action.as_bytes(),
             self.artifact_hash.as_bytes(),
             self.approver.as_bytes(),
@@ -326,7 +326,9 @@ impl ApprovalRequest {
 
 fn request_from_record(record: &ApprovalRecord) -> Result<ApprovalRequest, ApprovalError> {
     ApprovalRequest::new(
-        TenantId(record.tenant.clone()),
+        TenantId::new(&record.tenant).ok_or_else(|| ApprovalError::Invalid {
+            detail: "approval record tenant is not canonical".into(),
+        })?,
         &record.action,
         &record.artifact_hash,
         &record.approver,
@@ -467,7 +469,7 @@ impl ApprovalRegistry {
         }
         let record = ApprovalRecord {
             id: id.clone(),
-            tenant: request.tenant.0,
+            tenant: request.tenant.as_str().to_string(),
             approver: request.approver,
             action: request.action,
             artifact_hash: request.artifact_hash,
@@ -488,7 +490,7 @@ impl ApprovalRegistry {
         }
         let mut saw_other_artifact = None;
         for record in self.snapshot.approvals.values().rev() {
-            if record.tenant != query.tenant.0 || record.action != query.action {
+            if record.tenant != query.tenant.as_str() || record.action != query.action {
                 continue;
             }
             if record.artifact_hash != query.artifact_hash {
@@ -532,7 +534,7 @@ impl ApprovalRegistry {
             return GateOutcome::Denied;
         };
 
-        if record.tenant != query.tenant.0 || record.action != query.action {
+        if record.tenant != query.tenant.as_str() || record.action != query.action {
             return GateOutcome::Denied;
         }
         if record.artifact_hash != query.artifact_hash {
@@ -807,7 +809,7 @@ mod tests {
 
     fn request(at: u64, expires: Option<u64>) -> ApprovalRequest {
         ApprovalRequest::new(
-            TenantId("acme".into()),
+            TenantId::new("acme").unwrap(),
             "tenant.delete",
             &artifact(1),
             "operator",
@@ -846,7 +848,7 @@ mod tests {
     fn gate_is_exact_tenant_artifact_expiry_and_revocation() {
         let mut registry = ApprovalRegistry::new();
         let id = registry.record(request(100, Some(200))).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let artifact_hash = artifact(1);
         let query = |now| ApprovalQuery {
             tenant: &tenant,
@@ -861,7 +863,7 @@ mod tests {
             .unwrap();
         assert_eq!(registry.evaluate(&query(160)), GateOutcome::Revoked);
 
-        let globex = TenantId("globex".into());
+        let globex = TenantId::new("globex").unwrap();
         assert_eq!(
             registry.evaluate(&ApprovalQuery {
                 tenant: &globex,
@@ -891,7 +893,7 @@ mod tests {
             .revoke(&stale_id, "operator", 150, "superseded")
             .unwrap();
 
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let artifact_hash = artifact(1);
         let query = ApprovalQuery {
             tenant: &tenant,
@@ -927,7 +929,7 @@ mod tests {
         registry.revoke(&id, "operator", 150, "withdrawn").unwrap();
         let restored = ApprovalRegistry::from_snapshot(registry.snapshot().clone()).unwrap();
         assert!(restored.is_revoked(&id));
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         assert_eq!(
             restored.evaluate(&ApprovalQuery {
                 tenant: &tenant,
@@ -944,7 +946,7 @@ mod tests {
         let old = request(100, None);
         let record = ApprovalRecord {
             id: old.legacy_id(),
-            tenant: old.tenant.0.clone(),
+            tenant: old.tenant.as_str().to_string(),
             approver: old.approver.clone(),
             action: old.action.clone(),
             artifact_hash: old.artifact_hash.clone(),
@@ -957,7 +959,7 @@ mod tests {
         let mut snapshot = ApprovalSnapshot::default();
         snapshot.approvals.insert(record.id.clone(), record);
         let registry = ApprovalRegistry::from_snapshot(snapshot).unwrap();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         assert_eq!(
             registry.evaluate(&ApprovalQuery {
                 tenant: &tenant,

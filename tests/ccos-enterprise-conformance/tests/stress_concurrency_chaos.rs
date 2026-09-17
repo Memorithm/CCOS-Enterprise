@@ -426,7 +426,7 @@ fn storm_deployment(cfg: &StormConfig) -> Deployment {
             .expect("tenant was just provisioned")
             .permit_variant(AdvancedQPageVariant::Hierarchical);
         d.activate_variant_governed(
-            &ccos_enterprise_tenancy::TenantId(name.to_string()),
+            &ccos_enterprise_tenancy::TenantId::new(name).unwrap(),
             AdvancedQPageVariant::Hierarchical,
             None,
             0,
@@ -790,7 +790,7 @@ fn guard(m: &Mutex<Deployment>) -> MutexGuard<'_, Deployment> {
 }
 
 fn scope(tenant: &str, key: &str) -> TenantScope<String> {
-    TenantScope::new(TenantId(tenant.to_string()), key.to_string())
+    TenantScope::new(TenantId::new(tenant).unwrap(), key.to_string())
 }
 
 /// `spent` for a tenant this deployment is *known* to have. `None` now means
@@ -898,7 +898,7 @@ fn run_thread(deployment: &Mutex<Deployment>, ops: &[Op], start: &Barrier) -> Th
                     .expect("tenant existence checked above")
                     .permit_variant(*variant);
                 d.activate_variant_governed(
-                    &ccos_enterprise_tenancy::TenantId(tenant.to_string()),
+                    &ccos_enterprise_tenancy::TenantId::new(tenant).unwrap(),
                     *variant,
                     None,
                     0,

@@ -11,7 +11,7 @@ use ccos_enterprise_semantic::{
 
 fn ontology() -> Ontology {
     Ontology::new(
-        TenantId("tenant-a".into()),
+        TenantId::new("tenant-a").unwrap(),
         "company-v1",
         [EntitySchema::new(
             "company",
@@ -55,7 +55,7 @@ fn proposal(reverse: bool) -> EntityProposal {
     }
     EntityProposal {
         id: EntityId::new("company/7"),
-        tenant: TenantId("tenant-a".into()),
+        tenant: TenantId::new("tenant-a").unwrap(),
         entity_type: "company".into(),
         candidates: BTreeSet::from([candidate]),
         evidence: BTreeSet::from([evidence]),
@@ -105,7 +105,7 @@ fn invalid_tenant_cannot_be_exported_as_semantic_data() {
     let ontology = ontology();
     let namespace = SemanticNamespace::new("https://example.test/ccos/").unwrap();
     let mut foreign = proposal(false);
-    foreign.tenant = TenantId("tenant-b".into());
+    foreign.tenant = TenantId::new("tenant-b").unwrap();
 
     assert!(matches!(
         proposal_rdf(&ontology, &foreign, &namespace),

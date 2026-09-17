@@ -838,7 +838,7 @@ fn the_ledger_is_private_and_a_live_tenant_is_never_reprovisioned() {
         assert_eq!(t.limit(), 1_000, "…nor widen it");
     }
     d.activate_variant_governed(
-        &ccos_enterprise_tenancy::TenantId("acme".to_string()),
+        &ccos_enterprise_tenancy::TenantId::new("acme").unwrap(),
         AdvancedQPageVariant::CausalChain,
         None,
         0,
@@ -1016,7 +1016,7 @@ fn the_composed_ledger_equals_the_sum_of_forwarded_costs() {
         .expect("acme was just provisioned")
         .permit_variant(AdvancedQPageVariant::Hierarchical);
     d.activate_variant_governed(
-        &ccos_enterprise_tenancy::TenantId("acme".to_string()),
+        &ccos_enterprise_tenancy::TenantId::new("acme").unwrap(),
         AdvancedQPageVariant::Hierarchical,
         None,
         0,
@@ -1941,7 +1941,7 @@ fn the_allowlist_accepts_non_canonical_entries() {
     // other allowlisted spellings cannot execute until a governed switch
     // selects them.
     assert_eq!(
-        d.tenant_active_model(&ccos_enterprise_tenancy::TenantId("acme".into()))
+        d.tenant_active_model(&ccos_enterprise_tenancy::TenantId::new("acme").unwrap())
             .as_deref(),
         Some("")
     );

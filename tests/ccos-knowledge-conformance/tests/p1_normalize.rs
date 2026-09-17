@@ -37,7 +37,7 @@ fn normalization_derives_from_but_never_replaces_raw_evidence_hash() {
 
     let build = |root: &PathBuf| {
         LocalTreeSource::new(
-            TenantId("acme".into()),
+            TenantId::new("acme").unwrap(),
             "dataset",
             root,
             IngestLimits::default(),

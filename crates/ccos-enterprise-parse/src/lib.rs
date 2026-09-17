@@ -353,7 +353,7 @@ mod tests {
     fn raw(media_type: &str, bytes: &[u8]) -> RawArtifact {
         let digest = Sha256::digest(bytes);
         RawArtifact {
-            tenant: TenantId("acme".into()),
+            tenant: TenantId::new("acme").unwrap(),
             source_id: SourceId::from("source:test"),
             virtual_uri: "fs://dataset/test".into(),
             media_type: media_type.into(),

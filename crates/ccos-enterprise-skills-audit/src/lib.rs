@@ -308,8 +308,11 @@ impl<'a> AuditSources<'a> {
             });
         }
 
+        let tenant = TenantId::new(&source).ok_or_else(|| AuditError::CorruptLedger {
+            detail: "validated audit source contains a non-canonical tenant".into(),
+        })?;
         Ok(Self {
-            tenant: TenantId(source),
+            tenant,
             skills,
             trials,
         })
@@ -367,8 +370,8 @@ pub fn audit_provenance(
     }
     if query.sources.tenant != query.scope.tenant {
         return Err(AuditError::SourceTenantMismatch {
-            requested: query.scope.tenant.0.clone(),
-            source: query.sources.tenant.0.clone(),
+            requested: query.scope.tenant.as_str().to_string(),
+            source: query.sources.tenant.as_str().to_string(),
         });
     }
 
@@ -438,7 +441,7 @@ pub fn audit_provenance(
     // not a fabrication: the report says `empty: true` and carries no rows.
     Ok(ProvenanceReport {
         schema: SKILL_AUDIT_SCHEMA.to_string(),
-        tenant: query.scope.tenant.0.clone(),
+        tenant: query.scope.tenant.as_str().to_string(),
         total_skills,
         truncated: skills.len() < total_skills,
         skills,
@@ -539,7 +542,7 @@ mod tests {
     fn empty_registry_is_an_explicit_empty_report_not_a_fabrication() {
         let skills = SkillRegistry::new(SkillConfig::default()).unwrap();
         let trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        let scope = TenantScope::new(TenantId("acme".into()), ());
+        let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
         let roles = operator_roles();
         let report = audit_provenance(
             AuditQuery {
@@ -547,7 +550,7 @@ mod tests {
                 caller: "operator",
                 scope: &scope,
                 limits: AuditLimits::default(),
-                sources: bound_sources(&scope.tenant.0, &skills, &trials),
+                sources: bound_sources(scope.tenant.as_str(), &skills, &trials),
                 roles: &roles,
             },
             &tenants(&scope),
@@ -562,8 +565,8 @@ mod tests {
     fn cross_tenant_query_is_refused() {
         let skills = SkillRegistry::new(SkillConfig::default()).unwrap();
         let trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        let scope = TenantScope::new(TenantId("acme".into()), ());
-        let foreign = TenantScope::new(TenantId("globex".into()), ());
+        let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
+        let foreign = TenantScope::new(TenantId::new("globex").unwrap(), ());
         let roles = operator_roles();
         assert_eq!(
             audit_provenance(
@@ -572,7 +575,7 @@ mod tests {
                     caller: "operator",
                     scope: &foreign,
                     limits: AuditLimits::default(),
-                    sources: bound_sources(&scope.tenant.0, &skills, &trials),
+                    sources: bound_sources(scope.tenant.as_str(), &skills, &trials),
                     roles: &roles,
                 },
                 &tenants(&scope),
@@ -585,7 +588,7 @@ mod tests {
     fn same_actor_name_in_another_organization_is_denied() {
         let skills = SkillRegistry::new(SkillConfig::default()).unwrap();
         let trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        let scope = TenantScope::new(TenantId("acme".into()), ());
+        let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
         let roles = operator_roles();
         assert_eq!(
             audit_provenance(
@@ -594,7 +597,7 @@ mod tests {
                     caller: "operator",
                     scope: &scope,
                     limits: AuditLimits::default(),
-                    sources: bound_sources(&scope.tenant.0, &skills, &trials),
+                    sources: bound_sources(scope.tenant.as_str(), &skills, &trials),
                     roles: &roles,
                 },
                 &tenants(&scope),
@@ -607,7 +610,7 @@ mod tests {
     fn permission_is_denied_by_default_for_an_unauthorized_caller() {
         let skills = SkillRegistry::new(SkillConfig::default()).unwrap();
         let trials = SkillTrialRegistry::new(SkillTrialConfig::default()).unwrap();
-        let scope = TenantScope::new(TenantId("acme".into()), ());
+        let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
         let roles = locked_out_roles();
         assert_eq!(
             audit_provenance(
@@ -616,7 +619,7 @@ mod tests {
                     caller: "operator",
                     scope: &scope,
                     limits: AuditLimits::default(),
-                    sources: bound_sources(&scope.tenant.0, &skills, &trials),
+                    sources: bound_sources(scope.tenant.as_str(), &skills, &trials),
                     roles: &roles,
                 },
                 &tenants(&scope),
@@ -632,7 +635,7 @@ mod tests {
                     caller: "intruder",
                     scope: &scope,
                     limits: AuditLimits::default(),
-                    sources: bound_sources(&scope.tenant.0, &skills, &trials),
+                    sources: bound_sources(scope.tenant.as_str(), &skills, &trials),
                     roles: &empty,
                 },
                 &tenants(&scope),
@@ -657,7 +660,7 @@ mod tests {
             .resolve_episode(&episode(RAW_SESSION, 12, 'b'), &skills)
             .unwrap();
 
-        let scope = TenantScope::new(TenantId("acme".into()), ());
+        let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
         let roles = operator_roles();
         let report = audit_provenance(
             AuditQuery {
@@ -665,7 +668,7 @@ mod tests {
                 caller: "operator",
                 scope: &scope,
                 limits: AuditLimits::default(),
-                sources: bound_sources(&scope.tenant.0, &skills, &trials),
+                sources: bound_sources(scope.tenant.as_str(), &skills, &trials),
                 roles: &roles,
             },
             &tenants(&scope),
@@ -709,7 +712,7 @@ mod tests {
                 .resolve_episode(&episode("s", turn, 'c'), &skills)
                 .unwrap();
         }
-        let scope = TenantScope::new(TenantId("acme".into()), ());
+        let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
         let roles = operator_roles();
         let limits = AuditLimits {
             max_trials_per_skill: 3,
@@ -722,7 +725,7 @@ mod tests {
                 caller: "operator",
                 scope: &scope,
                 limits,
-                sources: bound_sources(&scope.tenant.0, &skills, &trials),
+                sources: bound_sources(scope.tenant.as_str(), &skills, &trials),
                 roles: &roles,
             },
             &tenants(&scope),
@@ -765,7 +768,7 @@ mod tests {
             .resolve_episode(&episode("RAW-SESSION-MUST-NOT-LEAK", 77, 'e'), &skills)
             .unwrap();
 
-        let scope = TenantScope::new(TenantId("acme".into()), ());
+        let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
         let roles = operator_roles();
         let report = audit_provenance(
             AuditQuery {
@@ -773,7 +776,7 @@ mod tests {
                 caller: "operator",
                 scope: &scope,
                 limits: AuditLimits::default(),
-                sources: bound_sources(&scope.tenant.0, &skills, &trials),
+                sources: bound_sources(scope.tenant.as_str(), &skills, &trials),
                 roles: &roles,
             },
             &tenants(&scope),

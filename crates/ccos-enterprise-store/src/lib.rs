@@ -21,6 +21,8 @@
 //! | `deployment.json` | the governed state: tenants, owners, ledgers, roles, tool governance, allowlists, activations, cells | [`Store::save_snapshot`], atomically |
 //! | `audit.jsonl` | one decision per line, in decision order | [`Store::append`], append-only |
 //! | `governance.jsonl` | one rule change per line, in the order made | [`Store::append_governance`], append-only |
+//! | `revocations.json` | checkpoint of token/actor revocations | [`Store::save_revocation_snapshot`], atomically |
+//! | `revocations.jsonl` | ordered revoke/restore mutations | [`Store::revoke_token`], [`Store::revoke_actor`], [`Store::restore_actor`] |
 //!
 //! The snapshot is a checkpoint, not the truth: the **journals are the
 //! authority** for ordering and for everything that happened since the last
@@ -89,7 +91,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use ccos_enterprise_auth::{
+    ActorId, OrgId, RevocationEvent, RevocationSnapshot, RevocationStateError, Revocations,
+    SharedRevocations,
+};
 use ccos_enterprise_runtime::{AuditRecord, DeploymentSnapshot, GovernanceRecord};
+use serde::{Deserialize, Serialize};
 
 /// Snapshot file name under the store root.
 pub const SNAPSHOT_FILE: &str = "deployment.json";
@@ -109,6 +116,10 @@ const SEGMENT_SUFFIX: &str = ".jsonl";
 /// both to carry a stream that has its own ordering anyway
 /// (`GovernanceRecord::at_sequence`/`ordinal`).
 pub const GOVERNANCE_FILE: &str = "governance.jsonl";
+/// Durable checkpoint of the authentication deny-list.
+pub const REVOCATION_SNAPSHOT_FILE: &str = "revocations.json";
+/// Ordered authentication revocation mutations.
+pub const REVOCATION_JOURNAL_FILE: &str = "revocations.jsonl";
 /// Single-writer lock file under the store root. Never read or written — only
 /// the kernel lock held on it means anything. See [`Store::open`].
 pub const LOCK_FILE: &str = "store.lock";
@@ -142,6 +153,8 @@ pub enum StoreError {
     /// ledger the journal must be replayed onto is missing, so replaying it
     /// would invent one.
     SnapshotMissing { path: PathBuf },
+    /// Durable revocation state is malformed, unsupported or internally inconsistent.
+    RevocationCorrupt { path: PathBuf, detail: String },
     /// Another live `Store` already holds this root. The store is
     /// single-writer: two handles cache independent sequence counters and
     /// their appends collide, so the second opener is refused rather than
@@ -183,6 +196,11 @@ impl std::fmt::Display for StoreError {
             Self::SnapshotMissing { path } => write!(
                 f,
                 "{}: a journal with no snapshot — there is no ledger to replay onto",
+                path.display()
+            ),
+            Self::RevocationCorrupt { path, detail } => write!(
+                f,
+                "{}: revocation state is unreadable: {detail}",
                 path.display()
             ),
             Self::AlreadyOpen { path } => write!(
@@ -245,6 +263,20 @@ pub struct Loaded {
     pub rotated_segments: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableRevocationSnapshot {
+    sequence_watermark: u64,
+    state: RevocationSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevocationJournalRecord {
+    sequence: u64,
+    event: RevocationEvent,
+}
+
 /// A durable Enterprise deployment on disk.
 ///
 /// Holds the journal file open for append, so a decision costs one `write` and
@@ -254,6 +286,9 @@ pub struct Store {
     root: PathBuf,
     journal: BufWriter<File>,
     governance: BufWriter<File>,
+    revocations: BufWriter<File>,
+    /// The next durable revocation mutation sequence.
+    next_revocation_sequence: u64,
     /// The next governance ordinal this store expects, so a rule change cannot
     /// be journaled out of order or reuse an ordinal.
     next_ordinal: u64,
@@ -356,7 +391,30 @@ impl Store {
             .open(&governance_path)
             .map_err(io(&governance_path))?;
 
-        if !journal_existed || !governance_existed {
+        let revocation_path = root.join(REVOCATION_JOURNAL_FILE);
+        let revocation_records = read_revocation_journal(&revocation_path)?;
+        let next_revocation_sequence = revocation_records
+            .as_ref()
+            .and_then(|(records, _)| records.last())
+            .map(|record| record.sequence + 1)
+            .unwrap_or(0);
+        if revocation_records
+            .as_ref()
+            .is_some_and(|(_, torn)| *torn != 0)
+        {
+            return Err(StoreError::RevocationCorrupt {
+                path: revocation_path,
+                detail: "revocation journal has a torn tail; refusing to guess whether a revoke committed".into(),
+            });
+        }
+        let revocation_existed = revocation_path.exists();
+        let revocation_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&revocation_path)
+            .map_err(io(&revocation_path))?;
+
+        if !journal_existed || !governance_existed || !revocation_existed {
             sync_directory(&root)?;
         }
 
@@ -364,6 +422,8 @@ impl Store {
             root,
             journal: BufWriter::new(file),
             governance: BufWriter::new(governance_file),
+            revocations: BufWriter::new(revocation_file),
+            next_revocation_sequence,
             next_ordinal,
             next_sequence,
             poisoned: None,
@@ -391,6 +451,18 @@ impl Store {
 
     fn governance_path(&self) -> PathBuf {
         self.root.join(GOVERNANCE_FILE)
+    }
+
+    fn revocation_snapshot_path(&self) -> PathBuf {
+        self.root.join(REVOCATION_SNAPSHOT_FILE)
+    }
+
+    fn revocation_journal_path(&self) -> PathBuf {
+        self.root.join(REVOCATION_JOURNAL_FILE)
+    }
+
+    pub const fn next_revocation_sequence(&self) -> u64 {
+        self.next_revocation_sequence
     }
 
     /// The ordinal the next appended rule change must carry.
@@ -693,6 +765,159 @@ impl Store {
         Ok(())
     }
 
+    /// Reconstruct authentication revocations from the durable checkpoint plus
+    /// every journal mutation after its watermark. A malformed or torn journal
+    /// is a refusal, never an empty deny-list.
+    pub fn load_revocations(&self, now: u64) -> Result<Revocations, StoreError> {
+        load_revocations_from_root(&self.root, now)
+    }
+
+    /// Atomically checkpoint the current deny-list. The journal remains the
+    /// ordering authority; its sequence watermark prevents double application.
+    pub fn save_revocation_snapshot(&self, revocations: &Revocations) -> Result<(), StoreError> {
+        let path = self.revocation_snapshot_path();
+        let snapshot = DurableRevocationSnapshot {
+            sequence_watermark: self.next_revocation_sequence,
+            state: revocations.snapshot(),
+        };
+        let bytes = serde_json::to_vec_pretty(&snapshot).map_err(|error| {
+            StoreError::RevocationCorrupt {
+                path: path.clone(),
+                detail: format!("cannot serialize revocation snapshot: {error}"),
+            }
+        })?;
+        ccos_core::util::write_durable(&path, &bytes).map_err(io(&path))
+    }
+
+    fn append_revocation_event(&mut self, event: RevocationEvent) -> Result<(), StoreError> {
+        let path = self.revocation_journal_path();
+        if let Some(reason) = &self.poisoned {
+            return Err(StoreError::Poisoned {
+                path,
+                detail: reason.clone(),
+            });
+        }
+        let record = RevocationJournalRecord {
+            sequence: self.next_revocation_sequence,
+            event,
+        };
+        let mut line =
+            serde_json::to_vec(&record).map_err(|error| StoreError::RevocationCorrupt {
+                path: path.clone(),
+                detail: format!("cannot serialize revocation mutation: {error}"),
+            })?;
+        if line.contains(&b'\n') {
+            return Err(StoreError::RevocationCorrupt {
+                path,
+                detail: "serialized revocation mutation contains a raw newline".into(),
+            });
+        }
+        line.push(b'\n');
+        let durable_length = self
+            .revocations
+            .get_ref()
+            .metadata()
+            .map_err(io(&path))?
+            .len();
+        let outcome = self
+            .revocations
+            .write_all(&line)
+            .and_then(|()| self.revocations.flush())
+            .and_then(|()| self.revocations.get_ref().sync_data());
+        if let Err(source) = outcome {
+            let file = self.revocations.get_ref();
+            let _ = file.set_len(durable_length);
+            let _ = file.sync_data();
+            self.poisoned = Some(format!(
+                "revocation append failed after {durable_length} durable bytes"
+            ));
+            return Err(StoreError::Io { path, source });
+        }
+        self.next_revocation_sequence += 1;
+        Ok(())
+    }
+
+    /// Durably revoke one token before making the new deny-list visible in the
+    /// shared verifier state.
+    pub fn revoke_token(
+        &mut self,
+        shared: &SharedRevocations,
+        jti: &str,
+        expires_at: u64,
+        now: u64,
+    ) -> Result<bool, StoreError> {
+        let event = RevocationEvent::RevokeToken {
+            jti: jti.to_string(),
+            expires_at,
+            observed_at: now,
+        };
+        self.apply_revocation_event(shared, event, now)
+    }
+
+    /// Durably revoke an actor through an issuance watermark.
+    pub fn revoke_actor(
+        &mut self,
+        shared: &SharedRevocations,
+        org: &OrgId,
+        actor: &ActorId,
+        issued_through: u64,
+        now: u64,
+    ) -> Result<bool, StoreError> {
+        let event = RevocationEvent::RevokeActor {
+            org: org.0.clone(),
+            actor: actor.0.clone(),
+            issued_through,
+        };
+        self.apply_revocation_event(shared, event, now)
+    }
+
+    /// Durably restore an actor. A no-op restore writes nothing.
+    pub fn restore_actor(
+        &mut self,
+        shared: &SharedRevocations,
+        org: &OrgId,
+        actor: &ActorId,
+        now: u64,
+    ) -> Result<bool, StoreError> {
+        let event = RevocationEvent::RestoreActor {
+            org: org.0.clone(),
+            actor: actor.0.clone(),
+        };
+        self.apply_revocation_event(shared, event, now)
+    }
+
+    fn apply_revocation_event(
+        &mut self,
+        shared: &SharedRevocations,
+        event: RevocationEvent,
+        now: u64,
+    ) -> Result<bool, StoreError> {
+        let mut guard = shared.lock().unwrap_or_else(|error| error.into_inner());
+        let mut candidate = guard.clone();
+        let changed = candidate
+            .apply_event(&event, now)
+            .map_err(|error| revocation_state_error(&self.revocation_journal_path(), error))?;
+        if !changed {
+            return Ok(false);
+        }
+        self.append_revocation_event(event)?;
+        *guard = candidate;
+        Ok(true)
+    }
+
+    /// Refresh a replica's process-local verifier state from a shared durable
+    /// root. Replacement happens only after the whole snapshot+journal pair
+    /// validates; on any error the caller retains its previous deny-list.
+    pub fn refresh_shared_revocations(
+        root: impl AsRef<Path>,
+        shared: &SharedRevocations,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        let loaded = load_revocations_from_root(root.as_ref(), now)?;
+        *shared.lock().unwrap_or_else(|error| error.into_inner()) = loaded;
+        Ok(())
+    }
+
     /// Read the durable state back.
     ///
     /// `Ok(None)` means "no store here yet" and is the *only* empty answer:
@@ -739,6 +964,97 @@ impl Store {
             }
         }
     }
+}
+
+fn revocation_state_error(path: &Path, error: RevocationStateError) -> StoreError {
+    StoreError::RevocationCorrupt {
+        path: path.to_path_buf(),
+        detail: error.to_string(),
+    }
+}
+
+fn load_revocations_from_root(root: &Path, now: u64) -> Result<Revocations, StoreError> {
+    let snapshot_path = root.join(REVOCATION_SNAPSHOT_FILE);
+    let (mut state, watermark) = match std::fs::read(&snapshot_path) {
+        Ok(bytes) => {
+            let snapshot: DurableRevocationSnapshot =
+                serde_json::from_slice(&bytes).map_err(|error| StoreError::RevocationCorrupt {
+                    path: snapshot_path.clone(),
+                    detail: error.to_string(),
+                })?;
+            let state = Revocations::from_snapshot(snapshot.state, now)
+                .map_err(|error| revocation_state_error(&snapshot_path, error))?;
+            (state, snapshot.sequence_watermark)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Revocations::new(), 0),
+        Err(error) => return Err(io(&snapshot_path)(error)),
+    };
+
+    let journal_path = root.join(REVOCATION_JOURNAL_FILE);
+    if let Some((records, torn)) = read_revocation_journal(&journal_path)? {
+        if torn != 0 {
+            return Err(StoreError::RevocationCorrupt {
+                path: journal_path,
+                detail: format!("revocation journal has {torn} torn tail bytes"),
+            });
+        }
+        if watermark > records.len() as u64 {
+            return Err(StoreError::RevocationCorrupt {
+                path: snapshot_path,
+                detail: "revocation snapshot watermark is ahead of its journal".into(),
+            });
+        }
+        for record in records
+            .into_iter()
+            .filter(|record| record.sequence >= watermark)
+        {
+            let applied = state
+                .apply_event(&record.event, now)
+                .map_err(|error| revocation_state_error(&journal_path, error))?;
+            if !applied {
+                return Err(StoreError::RevocationCorrupt {
+                    path: journal_path,
+                    detail: format!(
+                        "revocation mutation {} exceeds configured deny-list capacity",
+                        record.sequence
+                    ),
+                });
+            }
+        }
+    } else if watermark != 0 {
+        return Err(StoreError::RevocationCorrupt {
+            path: snapshot_path,
+            detail: "revocation snapshot names a journal watermark but no journal exists".into(),
+        });
+    }
+    state.prune(now);
+    Ok(state)
+}
+
+fn read_revocation_journal(
+    path: &Path,
+) -> Result<Option<(Vec<RevocationJournalRecord>, usize)>, StoreError> {
+    let Some((lines, torn_tail)) = read_lines(path)? else {
+        return Ok(None);
+    };
+    let mut records = Vec::with_capacity(lines.len());
+    for (expected, (index, line)) in (0_u64..).zip(lines.into_iter().enumerate()) {
+        let record: RevocationJournalRecord =
+            serde_json::from_slice(&line).map_err(|error| StoreError::RevocationCorrupt {
+                path: path.to_path_buf(),
+                detail: format!("line {}: {error}", index + 1),
+            })?;
+        if record.sequence != expected {
+            return Err(StoreError::JournalDiscontinuity {
+                path: path.to_path_buf(),
+                line: index + 1,
+                expected,
+                found: record.sequence,
+            });
+        }
+        records.push(record);
+    }
+    Ok(Some((records, torn_tail)))
 }
 
 /// A journal file's committed lines, and how many bytes of torn tail were
@@ -1818,6 +2134,113 @@ mod tests {
             assert_eq!(Some(billed), restored.spent(tenant));
         }
         assert_eq!(restored.metrics(), d.metrics(), "counters replay too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durable_revocations_survive_restart_and_replica_refresh() {
+        let dir = scratch("revocations-restart");
+        let now = 1_900_000_000;
+        let shared = SharedRevocations::default();
+        {
+            let mut store = Store::open(&dir).expect("open");
+            assert!(store
+                .revoke_token(&shared, "token-1", now + 600, now)
+                .expect("durable token revoke"));
+            assert!(store
+                .revoke_actor(
+                    &shared,
+                    &OrgId("acme".into()),
+                    &ActorId("agent-7".into()),
+                    now,
+                    now,
+                )
+                .expect("durable actor revoke"));
+            let guard = shared.lock().unwrap_or_else(|error| error.into_inner());
+            store
+                .save_revocation_snapshot(&guard)
+                .expect("revocation snapshot");
+        }
+
+        let reopened = Store::open(&dir).expect("reopen");
+        let restored = reopened.load_revocations(now).expect("load revocations");
+        assert!(restored.is_revoked(
+            Some("token-1"),
+            &OrgId("other".into()),
+            &ActorId("other".into()),
+            now
+        ));
+        assert!(restored.is_revoked(None, &OrgId("acme".into()), &ActorId("agent-7".into()), now));
+
+        let replica = SharedRevocations::default();
+        Store::refresh_shared_revocations(&dir, &replica, now).expect("refresh replica");
+        assert!(replica
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_revoked(None, &OrgId("acme".into()), &ActorId("agent-7".into()), now));
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn actor_restore_and_expired_token_pruning_survive_reopen() {
+        let dir = scratch("revocations-restore");
+        let now = 1_900_000_000;
+        let shared = SharedRevocations::default();
+        {
+            let mut store = Store::open(&dir).expect("open");
+            let org = OrgId("acme".into());
+            let actor = ActorId("agent-7".into());
+            store
+                .revoke_actor(&shared, &org, &actor, now, now)
+                .expect("revoke actor");
+            assert!(store
+                .restore_actor(&shared, &org, &actor, now)
+                .expect("restore actor"));
+            store
+                .revoke_token(&shared, "short-lived", now + 2, now)
+                .expect("revoke token");
+        }
+        let reopened = Store::open(&dir).expect("reopen");
+        let restored = reopened
+            .load_revocations(now + 3)
+            .expect("load after expiry");
+        assert!(!restored.is_revoked(None, &OrgId("acme".into()), &ActorId("agent-7".into()), now));
+        assert!(!restored.is_revoked(
+            Some("short-lived"),
+            &OrgId("other".into()),
+            &ActorId("other".into()),
+            now
+        ));
+        assert_eq!(restored.revoked_token_count(), 0);
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_or_torn_revocation_state_never_becomes_an_empty_deny_list() {
+        let dir = scratch("revocations-corrupt");
+        {
+            let store = Store::open(&dir).expect("open");
+            drop(store);
+        }
+        std::fs::write(dir.join(REVOCATION_SNAPSHOT_FILE), b"{not-json").unwrap();
+        let store = Store::open(&dir).expect("journal remains structurally readable");
+        assert!(matches!(
+            store.load_revocations(1_900_000_000),
+            Err(StoreError::RevocationCorrupt { .. })
+        ));
+        drop(store);
+        std::fs::remove_file(dir.join(REVOCATION_SNAPSHOT_FILE)).unwrap();
+        std::fs::write(
+            dir.join(REVOCATION_JOURNAL_FILE),
+            br#"{"sequence":0,"event":{"kind":"revoke_token","jti":"token-1","expires_at":1900000600,"observed_at":1900000000}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            Store::open(&dir),
+            Err(StoreError::RevocationCorrupt { .. })
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

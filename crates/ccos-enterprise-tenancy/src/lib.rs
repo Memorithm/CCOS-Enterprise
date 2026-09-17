@@ -5,11 +5,22 @@
 //! slice: tenant-scoped namespacing that makes cross-tenant access a type
 //! error, not a convention.
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 /// A tenant boundary. Memory, quotas, policies and audit are scoped to it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct TenantId(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct TenantId(String);
+
+impl<'de> Deserialize<'de> for TenantId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::validated(&value).ok_or_else(|| de::Error::custom("invalid tenant identifier"))
+    }
+}
 
 impl TenantId {
     /// Construct a tenant id only if it is one this product will carry:
@@ -21,8 +32,9 @@ impl TenantId {
     /// reuse — the same discipline `ccos_enterprise_auth` applies to
     /// identities. A confusable or path-unsafe tenant id is at its most
     /// expensive at construction, before it can name a store, a path or an
-    /// audit row; the raw tuple constructor remains for state read back from
-    /// a validated snapshot, where the restore path has already checked it.
+    /// audit row. The inner representation is private: durable state is also
+    /// deserialized through this validator, so snapshots cannot bypass the
+    /// tenancy boundary.
     pub fn validated(id: &str) -> Option<Self> {
         let mut bytes = id.bytes();
         let first = bytes.next()?;
@@ -33,8 +45,7 @@ impl TenantId {
         ok.then(|| Self(id.to_string()))
     }
 
-    /// Validating constructor. Prefer this over the tuple constructor except
-    /// when reading back a snapshot that already passed restore checks.
+    /// Validating constructor. This is the only public construction path.
     pub fn new(id: impl AsRef<str>) -> Option<Self> {
         Self::validated(id.as_ref())
     }
@@ -87,10 +98,10 @@ mod tests {
 
     #[test]
     fn scopes_are_distinct() {
-        let a = TenantScope::new(TenantId("acme".into()), "memory-root");
-        let b = TenantScope::new(TenantId("globex".into()), "memory-root");
+        let a = TenantScope::new(TenantId::new("acme").unwrap(), "memory-root");
+        let b = TenantScope::new(TenantId::new("globex").unwrap(), "memory-root");
         assert_ne!(a.tenant, b.tenant, "same inner key, different tenants");
-        let c = a.clone().rescope(TenantId("globex".into()));
+        let c = a.clone().rescope(TenantId::new("globex").unwrap());
         assert_eq!(
             c.tenant, b.tenant,
             "explicit rescope is visible in the type"
@@ -117,6 +128,14 @@ mod tests {
                 TenantId::validated(bad).is_none(),
                 "{bad:?} must not become a tenant id"
             );
+        }
+    }
+    #[test]
+    fn serde_rejects_invalid_tenant_ids() {
+        let valid: TenantId = serde_json::from_str("\"acme\"").unwrap();
+        assert_eq!(valid.as_str(), "acme");
+        for bad in ["\"../acme\"", "\"Acme\"", "\"-flag\""] {
+            assert!(serde_json::from_str::<TenantId>(bad).is_err());
         }
     }
 }

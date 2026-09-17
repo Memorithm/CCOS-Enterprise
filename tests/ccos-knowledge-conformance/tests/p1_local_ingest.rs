@@ -39,7 +39,7 @@ fn local_artifact_reaches_canonical_journal_only_through_source_and_evidence() {
     std::fs::write(dataset.0.join("company.json"), br#"{"name":"Acme"}"#).unwrap();
 
     let ingest = LocalTreeSource::new(
-        TenantId("acme".into()),
+        TenantId::new("acme").unwrap(),
         "company-data",
         &dataset.0,
         IngestLimits::default(),
@@ -59,7 +59,7 @@ fn local_artifact_reaches_canonical_journal_only_through_source_and_evidence() {
                 2,
                 KnowledgeOp::AddEntity(EntityRecord {
                     id: EntityId::from("entity:acme"),
-                    tenant: TenantId("acme".into()),
+                    tenant: TenantId::new("acme").unwrap(),
                     namespace: None,
                     entity_type: "company".into(),
                     label: Some("Acme".into()),
@@ -70,7 +70,10 @@ fn local_artifact_reaches_canonical_journal_only_through_source_and_evidence() {
         ])
         .unwrap();
 
-    let partition = store.state().tenant(&TenantId("acme".into())).unwrap();
+    let partition = store
+        .state()
+        .tenant(&TenantId::new("acme").unwrap())
+        .unwrap();
     assert_eq!(partition.sources.len(), 1);
     assert_eq!(partition.evidence.len(), 1);
     assert_eq!(partition.entities.len(), 1);
@@ -94,14 +97,14 @@ fn same_dataset_mounted_elsewhere_produces_same_canonical_source_identity() {
     std::fs::write(right.0.join("nested/fact.txt"), b"same").unwrap();
 
     let left_source = LocalTreeSource::new(
-        TenantId("acme".into()),
+        TenantId::new("acme").unwrap(),
         "dataset",
         &left.0,
         IngestLimits::default(),
     )
     .unwrap();
     let right_source = LocalTreeSource::new(
-        TenantId("acme".into()),
+        TenantId::new("acme").unwrap(),
         "dataset",
         &right.0,
         IngestLimits::default(),

@@ -59,7 +59,7 @@ fn evidence() -> BTreeSet<EvidenceId> {
 }
 
 fn seed(service: &mut DecisionService) {
-    let tenant = TenantId("acme".into());
+    let tenant = TenantId::new("acme").unwrap();
     service
         .append_knowledge(&[
             JournalEntry::new(

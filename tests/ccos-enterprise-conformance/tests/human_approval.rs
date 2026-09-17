@@ -41,7 +41,7 @@ fn operator_identity() -> ccos_enterprise_auth::AuthenticatedActor {
 
 fn approval(tenant: &str, action: &str, artifact: &str, at: u64) -> ApprovalRequest {
     ApprovalRequest::new(
-        TenantId(tenant.into()),
+        TenantId::new(tenant).unwrap(),
         action,
         artifact,
         "ZEKRITI Tarek",

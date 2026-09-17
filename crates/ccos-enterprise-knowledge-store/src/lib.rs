@@ -341,7 +341,7 @@ mod tests {
             sequence,
             KnowledgeOp::RegisterSource(SourceRecord {
                 id: SourceId::from(id),
-                tenant: TenantId(tenant.to_owned()),
+                tenant: TenantId::new(tenant).unwrap(),
                 locator: format!("file:///{id}"),
                 content_hash: None,
                 trust: SourceTrust::Internal,

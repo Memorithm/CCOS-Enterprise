@@ -282,7 +282,8 @@ pub fn proposal_rdf(
     namespace: &SemanticNamespace,
 ) -> Result<RdfDocument, SemanticError> {
     validate(ontology, proposal)?;
-    let subject = RdfTerm::iri(namespace.entity_iri(&proposal.tenant.0, proposal.id.as_str()));
+    let subject =
+        RdfTerm::iri(namespace.entity_iri(proposal.tenant.as_str(), proposal.id.as_str()));
     let mut document = RdfDocument::default();
     document.insert(
         subject.clone(),
@@ -328,7 +329,7 @@ pub fn proposal_json_ld(
     );
     root.insert(
         "@id".to_owned(),
-        Value::String(namespace.entity_iri(&proposal.tenant.0, proposal.id.as_str())),
+        Value::String(namespace.entity_iri(proposal.tenant.as_str(), proposal.id.as_str())),
     );
     root.insert(
         "@type".to_owned(),
@@ -601,7 +602,7 @@ mod tests {
 
     fn ontology() -> Ontology {
         Ontology::new(
-            TenantId("tenant-a".into()),
+            TenantId::new("tenant-a").unwrap(),
             "v1",
             [EntitySchema::new(
                 "company",
@@ -645,7 +646,7 @@ mod tests {
         }
         EntityProposal {
             id: EntityId::new("company/7"),
-            tenant: TenantId("tenant-a".into()),
+            tenant: TenantId::new("tenant-a").unwrap(),
             entity_type: "company".into(),
             candidates: BTreeSet::from([candidate]),
             evidence: BTreeSet::from([evidence]),
@@ -692,7 +693,7 @@ mod tests {
     fn invalid_proposal_never_exports() {
         let namespace = SemanticNamespace::new("https://example.test/ccos/").unwrap();
         let mut proposal = proposal(false);
-        proposal.tenant = TenantId("tenant-b".into());
+        proposal.tenant = TenantId::new("tenant-b").unwrap();
         assert!(matches!(
             proposal_rdf(&ontology(), &proposal, &namespace),
             Err(SemanticError::SchemaViolations(_))

@@ -106,7 +106,7 @@ mod tests {
         loadout: &'a MemoryLoadout,
     ) -> TenantScope<BudgetedMemoryRecall<'a>> {
         TenantScope::new(
-            ccos_enterprise_tenancy::TenantId("acme".into()),
+            ccos_enterprise_tenancy::TenantId::new("acme").unwrap(),
             BudgetedMemoryRecall {
                 embedding,
                 loadout,

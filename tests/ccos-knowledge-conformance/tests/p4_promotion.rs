@@ -12,7 +12,7 @@ use ccos_enterprise_resolution::{EntityProposal, FactProposal};
 
 fn ontology() -> Ontology {
     Ontology::new(
-        TenantId("tenant-a".into()),
+        TenantId::new("tenant-a").unwrap(),
         "company-v1",
         [EntitySchema::new(
             "company",
@@ -35,7 +35,7 @@ fn proposal() -> EntityProposal {
     let evidence_right = EvidenceId::from("evidence:erp");
     EntityProposal {
         id: "entity:company:acme-7".into(),
-        tenant: TenantId("tenant-a".into()),
+        tenant: TenantId::new("tenant-a").unwrap(),
         entity_type: "company".into(),
         candidates: BTreeSet::from([left.clone(), right.clone()]),
         evidence: BTreeSet::from([evidence_left.clone(), evidence_right.clone()]),
@@ -84,7 +84,7 @@ fn schema_gated_plan_enters_canonical_state_only_through_journal() {
         .iter()
         .all(|fact| fact.kind == AssertionKind::Observation));
 
-    let tenant = TenantId("tenant-a".into());
+    let tenant = TenantId::new("tenant-a").unwrap();
     let source_crm = SourceId::from("source:crm");
     let source_erp = SourceId::from("source:erp");
     let evidence_crm = EvidenceId::from("evidence:crm");

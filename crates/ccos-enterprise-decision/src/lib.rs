@@ -751,7 +751,7 @@ fn validate_outcome(
 
 fn validate_structural_draft(draft: &DecisionDraft) -> Result<(), DecisionError> {
     require_text("decision id", draft.id.as_str())?;
-    require_text("tenant", &draft.tenant.0)?;
+    require_text("tenant", draft.tenant.as_str())?;
     if !is_canonical_identity(&draft.actor.0) {
         return Err(DecisionError::InvalidField("actor"));
     }
@@ -816,7 +816,7 @@ mod tests {
     };
 
     fn tenant() -> TenantId {
-        TenantId("acme".into())
+        TenantId::new("acme").unwrap()
     }
 
     fn knowledge() -> KnowledgeState {

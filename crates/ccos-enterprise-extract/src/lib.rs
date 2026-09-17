@@ -375,7 +375,7 @@ fn build_candidate(
     };
 
     let mut hasher = Sha256::new();
-    hasher.update(raw.tenant.0.as_bytes());
+    hasher.update(raw.tenant.as_str().as_bytes());
     hasher.update([0]);
     hasher.update(raw.source_id.as_str().as_bytes());
     hasher.update([0]);
@@ -403,7 +403,7 @@ fn build_candidate(
 
 fn evidence_id(raw: &RawArtifact, locator: &str) -> EvidenceId {
     let mut hasher = Sha256::new();
-    hasher.update(raw.tenant.0.as_bytes());
+    hasher.update(raw.tenant.as_str().as_bytes());
     hasher.update([0]);
     hasher.update(raw.source_id.as_str().as_bytes());
     hasher.update([0]);
@@ -468,7 +468,7 @@ mod tests {
     fn raw(media_type: &str, bytes: &[u8]) -> RawArtifact {
         let digest = Sha256::digest(bytes);
         RawArtifact {
-            tenant: TenantId("acme".into()),
+            tenant: TenantId::new("acme").unwrap(),
             source_id: SourceId::from("source:test"),
             virtual_uri: "fs://dataset/test".into(),
             media_type: media_type.into(),

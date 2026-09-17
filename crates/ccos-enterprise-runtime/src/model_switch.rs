@@ -76,21 +76,27 @@ impl InvariantState {
         tenant: &TenantId,
         excluded_models: &[&str],
     ) -> Option<Self> {
-        let mut models = deployment.tenant_models(&tenant.0)?;
+        let mut models = deployment.tenant_models(tenant.as_str())?;
         for excluded in excluded_models {
             models.remove(*excluded);
         }
-        let variants = deployment.tenant_variants(&tenant.0)?;
+        let variants = deployment.tenant_variants(tenant.as_str())?;
         let mut cells = deployment
-            .cells_of(&tenant.0)
+            .cells_of(tenant.as_str())
             .into_iter()
-            .map(|(key, value)| (tenant.0.clone(), key.to_string(), value.to_string()))
+            .map(|(key, value)| {
+                (
+                    tenant.as_str().to_string(),
+                    key.to_string(),
+                    value.to_string(),
+                )
+            })
             .collect::<Vec<_>>();
         cells.sort();
         Some(Self {
-            tenant: tenant.0.clone(),
-            spent: deployment.spent(&tenant.0)?,
-            limit: deployment.tenant_limit(&tenant.0)?,
+            tenant: tenant.as_str().to_string(),
+            spent: deployment.spent(tenant.as_str())?,
+            limit: deployment.tenant_limit(tenant.as_str())?,
             models,
             variants,
             cells,
@@ -128,7 +134,7 @@ pub fn allowlist_artifact_hash(tenant: &TenantId, new_model: &str) -> Result<Str
     validate_model_name(new_model)?;
     Ok(digest_framed(
         b"ccos-enterprise-model-allowlist-change-v1",
-        &[tenant.0.as_bytes(), new_model.as_bytes()],
+        &[tenant.as_str().as_bytes(), new_model.as_bytes()],
     ))
 }
 
@@ -176,18 +182,18 @@ pub fn switch_tenant_model(
         return Err("authorizing actor is empty or oversized".into());
     }
     if !deployment.tenant_exists(tenant) {
-        return Err(format!("unknown tenant {:?}", tenant.0));
+        return Err(format!("unknown tenant {:?}", tenant.as_str()));
     }
     let old_model = deployment
         .tenant_active_model(tenant)
-        .ok_or_else(|| format!("tenant {:?} has no active model", tenant.0))?;
+        .ok_or_else(|| format!("tenant {:?} has no active model", tenant.as_str()))?;
     if old_model == new_model {
         return Err("switching to the same active model is refused".into());
     }
 
     let models_before = deployment
-        .tenant_models(&tenant.0)
-        .ok_or_else(|| format!("unknown tenant {:?}", tenant.0))?;
+        .tenant_models(tenant.as_str())
+        .ok_or_else(|| format!("unknown tenant {:?}", tenant.as_str()))?;
     let target_was_allowlisted = models_before.contains(new_model);
     let validated_approval = if target_was_allowlisted {
         None
@@ -246,7 +252,7 @@ pub fn switch_tenant_model(
 
     let record = ModelSwitchRecord {
         schema: MODEL_SWITCH_SCHEMA.to_string(),
-        tenant: tenant.0.clone(),
+        tenant: tenant.as_str().to_string(),
         authorizing_actor: authorizing_actor.to_string(),
         approval_id: validated_approval,
         old_model,
@@ -281,7 +287,7 @@ fn validate_allowlist_approval(
         .ok_or_else(|| "supplied model-switch approval id is not recorded".to_string())?;
     if !record.id.starts_with("approval-v2-")
         || record.schema_version != APPROVAL_SCHEMA
-        || record.tenant != tenant.0
+        || record.tenant != tenant.as_str()
         || record.action != MODEL_ALLOWLIST_ACTION
         || record.artifact_hash != artifact_hash
         || record.decision != ApprovalDecision::Approved
@@ -361,8 +367,8 @@ mod tests {
 
     #[test]
     fn allowlist_artifact_is_tenant_and_model_bound() {
-        let acme = TenantId("acme".into());
-        let globex = TenantId("globex".into());
+        let acme = TenantId::new("acme").unwrap();
+        let globex = TenantId::new("globex").unwrap();
         let a = allowlist_artifact_hash(&acme, "gpt-5").unwrap();
         assert_ne!(a, allowlist_artifact_hash(&acme, "gpt-6").unwrap());
         assert_ne!(a, allowlist_artifact_hash(&globex, "gpt-5").unwrap());
@@ -390,7 +396,7 @@ mod tests {
     #[test]
     fn active_model_is_distinct_from_allowlist_and_enforced_by_admission() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         d.tenant_mut("acme").unwrap().allow_model("gpt-5");
         assert_eq!(
             d.tenant_active_model(&tenant).as_deref(),
@@ -456,7 +462,7 @@ mod tests {
     #[test]
     fn failed_transition_restores_full_target_tenant_checkpoint() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         d.tenant_mut("acme").unwrap().allow_model("gpt-5");
         let scope = TenantScope::new(tenant.clone(), "checkpoint-cell".to_string());
         assert!(d.put(&scope, "before"));
@@ -503,7 +509,7 @@ mod tests {
     #[test]
     fn supplied_approval_id_must_itself_be_live() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         let artifact = allowlist_artifact_hash(&tenant, "gpt-5").unwrap();
 
         let expired_id = d
@@ -558,7 +564,7 @@ mod tests {
     #[test]
     fn model_switch_is_journaled_before_first_request_and_links_record_digest() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         d.tenant_mut("acme").unwrap().allow_model("gpt-5");
         assert!(!d.is_serving());
 
@@ -587,7 +593,7 @@ mod tests {
     #[test]
     fn snapshot_roundtrip_preserves_active_model_and_ambiguous_legacy_state_fails_closed() {
         let mut d = two_tenant_deployment();
-        let tenant = TenantId("acme".into());
+        let tenant = TenantId::new("acme").unwrap();
         d.tenant_mut("acme").unwrap().allow_model("gpt-5");
         let mut transition = noop_transition;
         switch_tenant_model(

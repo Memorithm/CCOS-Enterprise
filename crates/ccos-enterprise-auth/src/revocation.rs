@@ -21,7 +21,9 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use crate::{ActorId, AuthError, OrgId};
+use serde::{Deserialize, Serialize};
+
+use crate::{is_canonical_identity, ActorId, AuthError, OrgId};
 
 /// How many revoked token ids one deny-list holds.
 ///
@@ -36,6 +38,85 @@ pub const MAX_REVOKED_ACTORS: usize = 65_536;
 
 /// How many unexpired token ids one replay guard remembers.
 pub const MAX_REPLAY_ENTRIES: usize = 1_048_576;
+
+/// Wire version for durable revocation snapshots.
+pub const REVOCATION_SNAPSHOT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokedTokenSnapshot {
+    pub jti: String,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokedActorSnapshot {
+    pub org: String,
+    pub actor: String,
+    pub issued_through: u64,
+}
+
+/// Canonical, bounded durable form of [`Revocations`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevocationSnapshot {
+    pub version: u32,
+    pub tokens: Vec<RevokedTokenSnapshot>,
+    pub actors: Vec<RevokedActorSnapshot>,
+}
+
+impl Default for RevocationSnapshot {
+    fn default() -> Self {
+        Self {
+            version: REVOCATION_SNAPSHOT_VERSION,
+            tokens: Vec::new(),
+            actors: Vec::new(),
+        }
+    }
+}
+
+/// One durable mutation. Store layers journal these in order; auth owns the
+/// validation and state transition semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RevocationEvent {
+    RevokeToken {
+        jti: String,
+        expires_at: u64,
+        observed_at: u64,
+    },
+    RevokeActor {
+        org: String,
+        actor: String,
+        issued_through: u64,
+    },
+    RestoreActor {
+        org: String,
+        actor: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevocationStateError {
+    UnsupportedVersion(u32),
+    CapacityExceeded(&'static str),
+    InvalidIdentifier(&'static str),
+    DuplicateEntry(&'static str),
+}
+
+impl std::fmt::Display for RevocationStateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedVersion(v) => write!(f, "unsupported revocation snapshot version {v}"),
+            Self::CapacityExceeded(kind) => write!(f, "revocation {kind} capacity exceeded"),
+            Self::InvalidIdentifier(kind) => write!(f, "invalid revocation {kind} identifier"),
+            Self::DuplicateEntry(kind) => write!(f, "duplicate revocation {kind} entry"),
+        }
+    }
+}
+
+impl std::error::Error for RevocationStateError {}
 
 /// The deployment's answer to "this credential is no longer good", for
 /// credentials already in the wild.
@@ -52,7 +133,7 @@ pub const MAX_REPLAY_ENTRIES: usize = 1_048_576;
 ///   every token issued at or before an instant, whatever its identifier. This
 ///   is the one that answers "somebody left the company", and it works on
 ///   credentials nobody has a copy of.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Revocations {
     /// jti → the expiry of the token it names, so the entry can be pruned.
     tokens: BTreeMap<String, u64>,
@@ -165,6 +246,119 @@ impl Revocations {
         self.actors
             .get(&(org.0.clone(), actor.0.clone()))
             .is_some_and(|through| issued_at <= *through)
+    }
+
+    /// Export deterministic durable state. Callers may persist this atomically;
+    /// no process-local mutex state leaks into the format.
+    pub fn snapshot(&self) -> RevocationSnapshot {
+        RevocationSnapshot {
+            version: REVOCATION_SNAPSHOT_VERSION,
+            tokens: self
+                .tokens
+                .iter()
+                .map(|(jti, expires_at)| RevokedTokenSnapshot {
+                    jti: jti.clone(),
+                    expires_at: *expires_at,
+                })
+                .collect(),
+            actors: self
+                .actors
+                .iter()
+                .map(|((org, actor), issued_through)| RevokedActorSnapshot {
+                    org: org.clone(),
+                    actor: actor.clone(),
+                    issued_through: *issued_through,
+                })
+                .collect(),
+        }
+    }
+
+    /// Rebuild a deny-list from durable state. Expired token entries are
+    /// discarded at load; actor revocations never expire implicitly.
+    pub fn from_snapshot(
+        snapshot: RevocationSnapshot,
+        now: u64,
+    ) -> Result<Self, RevocationStateError> {
+        if snapshot.version != REVOCATION_SNAPSHOT_VERSION {
+            return Err(RevocationStateError::UnsupportedVersion(snapshot.version));
+        }
+        if snapshot.tokens.len() > MAX_REVOKED_TOKENS {
+            return Err(RevocationStateError::CapacityExceeded("token"));
+        }
+        if snapshot.actors.len() > MAX_REVOKED_ACTORS {
+            return Err(RevocationStateError::CapacityExceeded("actor"));
+        }
+        let mut out = Self::new();
+        for token in snapshot.tokens {
+            if !is_canonical_identity(&token.jti) {
+                return Err(RevocationStateError::InvalidIdentifier("token"));
+            }
+            if token.expires_at < now {
+                continue;
+            }
+            if out.tokens.insert(token.jti, token.expires_at).is_some() {
+                return Err(RevocationStateError::DuplicateEntry("token"));
+            }
+        }
+        for actor in snapshot.actors {
+            if !is_canonical_identity(&actor.org) || !is_canonical_identity(&actor.actor) {
+                return Err(RevocationStateError::InvalidIdentifier("actor"));
+            }
+            if out
+                .actors
+                .insert((actor.org, actor.actor), actor.issued_through)
+                .is_some()
+            {
+                return Err(RevocationStateError::DuplicateEntry("actor"));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Apply one validated durable mutation. This is intentionally idempotent
+    /// for revoke operations; journal replay may observe a snapshot that has
+    /// already folded in an older prefix.
+    pub fn apply_event(
+        &mut self,
+        event: &RevocationEvent,
+        now: u64,
+    ) -> Result<bool, RevocationStateError> {
+        match event {
+            RevocationEvent::RevokeToken {
+                jti,
+                expires_at,
+                observed_at: _,
+            } => {
+                if !is_canonical_identity(jti) {
+                    return Err(RevocationStateError::InvalidIdentifier("token"));
+                }
+                if *expires_at < now {
+                    self.prune(now);
+                    return Ok(true);
+                }
+                Ok(self.revoke_token(jti, *expires_at, now))
+            }
+            RevocationEvent::RevokeActor {
+                org,
+                actor,
+                issued_through,
+            } => {
+                if !is_canonical_identity(org) || !is_canonical_identity(actor) {
+                    return Err(RevocationStateError::InvalidIdentifier("actor"));
+                }
+                Ok(self.revoke_actor(
+                    &OrgId(org.clone()),
+                    &ActorId(actor.clone()),
+                    *issued_through,
+                ))
+            }
+            RevocationEvent::RestoreActor { org, actor } => {
+                if !is_canonical_identity(org) || !is_canonical_identity(actor) {
+                    return Err(RevocationStateError::InvalidIdentifier("actor"));
+                }
+                Ok(self.restore_actor(&OrgId(org.clone()), &ActorId(actor.clone())))
+            }
+        }
     }
 
     /// Drop token entries whose tokens have expired.

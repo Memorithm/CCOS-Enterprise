@@ -13,8 +13,8 @@ fn evidence() -> BTreeSet<EvidenceId> {
 
 #[test]
 fn graph_view_is_tenant_scoped_rebuildable_and_valid_time_aware() {
-    let acme = TenantId("acme".into());
-    let globex = TenantId("globex".into());
+    let acme = TenantId::new("acme").unwrap();
+    let globex = TenantId::new("globex").unwrap();
     let mut entries = Vec::new();
     let mut sequence = 0_u64;
 
@@ -24,7 +24,7 @@ fn graph_view_is_tenant_scoped_rebuildable_and_valid_time_aware() {
             KnowledgeOp::RegisterSource(SourceRecord {
                 id: SourceId::from("source:1"),
                 tenant: tenant.clone(),
-                locator: format!("memory://{}", tenant.0),
+                locator: format!("memory://{}", tenant.as_str()),
                 content_hash: Some("sha256:test".into()),
                 trust: SourceTrust::Internal,
             }),

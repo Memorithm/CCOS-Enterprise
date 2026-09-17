@@ -106,7 +106,7 @@ fn composed_fixture() -> (
         .expose("session-a", 11, &skills, std::slice::from_ref(&skill_id))
         .unwrap();
 
-    let scope = TenantScope::new(TenantId("acme".into()), ());
+    let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
     (d, skills, trials, operator_roles(), scope)
 }
 
@@ -114,8 +114,8 @@ fn composed_fixture() -> (
 fn operator_audit_is_tenant_scoped_and_newest_first() {
     let (_d, skills, trials, roles, scope) = composed_fixture();
     let known: BTreeMap<TenantId, ()> = BTreeMap::from([
-        (TenantId("acme".into()), ()),
-        (TenantId("globex".into()), ()),
+        (TenantId::new("acme").unwrap(), ()),
+        (TenantId::new("globex").unwrap(), ()),
     ]);
     let report = audit_provenance(
         AuditQuery {
@@ -147,10 +147,10 @@ fn operator_audit_is_tenant_scoped_and_newest_first() {
 fn cross_tenant_audit_is_refused() {
     let (_d, skills, trials, roles, _scope) = composed_fixture();
     let known: BTreeMap<TenantId, ()> = BTreeMap::from([
-        (TenantId("acme".into()), ()),
-        (TenantId("globex".into()), ()),
+        (TenantId::new("acme").unwrap(), ()),
+        (TenantId::new("globex").unwrap(), ()),
     ]);
-    let foreign = TenantScope::new(TenantId("globex".into()), ());
+    let foreign = TenantScope::new(TenantId::new("globex").unwrap(), ());
     let err = audit_provenance(
         AuditQuery {
             org: "memorithm",
@@ -172,7 +172,7 @@ fn cross_tenant_audit_is_refused() {
 #[test]
 fn audit_denied_without_the_permission() {
     let (_d, skills, trials, _roles, scope) = composed_fixture();
-    let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId("acme".into()), ())]);
+    let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId::new("acme").unwrap(), ())]);
     let locked = RoleBook::default();
     let err = audit_provenance(
         AuditQuery {
@@ -197,7 +197,7 @@ fn audit_refuses_a_forged_actor_without_the_role() {
     // Even a caller that knows the tenant name cannot read another tenant's
     // audit material; the role book is the only authority.
     let (_d, skills, trials, roles, scope) = composed_fixture();
-    let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId("acme".into()), ())]);
+    let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId::new("acme").unwrap(), ())]);
     let err = audit_provenance(
         AuditQuery {
             org: "memorithm",
@@ -238,8 +238,8 @@ fn bounded_audit_reports_truncation_without_hiding_counters() {
             .resolve_episode(&episode("s", turn, 'c'), &skills)
             .unwrap();
     }
-    let scope = TenantScope::new(TenantId("acme".into()), ());
-    let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId("acme".into()), ())]);
+    let scope = TenantScope::new(TenantId::new("acme").unwrap(), ());
+    let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId::new("acme").unwrap(), ())]);
     let report = audit_provenance(
         AuditQuery {
             org: "memorithm",
@@ -268,7 +268,7 @@ fn bounded_audit_reports_truncation_without_hiding_counters() {
 #[test]
 fn report_serializes_schema_versioned_without_raw_material() {
     let (_d, skills, trials, roles, scope) = composed_fixture();
-    let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId("acme".into()), ())]);
+    let known: BTreeMap<TenantId, ()> = BTreeMap::from([(TenantId::new("acme").unwrap(), ())]);
     let report = audit_provenance(
         AuditQuery {
             org: "memorithm",
@@ -302,7 +302,7 @@ fn report_level_skill_cap_is_explicit() {
         ep.tools[0].name = "memory.timeline".into();
         skills.observe(&ep).unwrap();
     }
-    let known = BTreeMap::from([(TenantId("acme".into()), ())]);
+    let known = BTreeMap::from([(TenantId::new("acme").unwrap(), ())]);
     let report = audit_provenance(
         AuditQuery {
             org: "memorithm",

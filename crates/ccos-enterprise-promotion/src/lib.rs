@@ -180,7 +180,7 @@ fn promoted_fact_id(
     ontology_fingerprint: &str,
 ) -> FactId {
     let mut hasher = Sha256::new();
-    hash_part(&mut hasher, tenant.0.as_bytes());
+    hash_part(&mut hasher, tenant.as_str().as_bytes());
     hash_part(&mut hasher, entity.as_str().as_bytes());
     hash_part(&mut hasher, predicate.as_bytes());
     hash_literal(&mut hasher, literal);
@@ -201,7 +201,7 @@ fn promotion_plan_hash(
 ) -> String {
     let mut hasher = Sha256::new();
     hash_part(&mut hasher, &PROMOTION_CONTRACT_VERSION.to_le_bytes());
-    hash_part(&mut hasher, tenant.0.as_bytes());
+    hash_part(&mut hasher, tenant.as_str().as_bytes());
     hash_part(&mut hasher, entity.as_str().as_bytes());
     hash_part(&mut hasher, ontology_fingerprint.as_bytes());
     for fact in facts {
@@ -267,7 +267,7 @@ mod tests {
 
     fn ontology() -> Ontology {
         Ontology::new(
-            TenantId("tenant-a".into()),
+            TenantId::new("tenant-a").unwrap(),
             "v1",
             [EntitySchema::new(
                 "company",
@@ -291,7 +291,7 @@ mod tests {
         let evidence_b = EvidenceId::from("evidence:b");
         EntityProposal {
             id: EntityId::new("entity:company:7"),
-            tenant: TenantId("tenant-a".into()),
+            tenant: TenantId::new("tenant-a").unwrap(),
             entity_type: "company".into(),
             candidates: BTreeSet::from([candidate_a.clone(), candidate_b.clone()]),
             evidence: BTreeSet::from([evidence_a.clone(), evidence_b.clone()]),

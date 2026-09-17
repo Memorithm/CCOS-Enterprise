@@ -271,7 +271,7 @@ impl KnowledgeState {
 
     fn register_source(&mut self, source: SourceRecord) -> Result<(), KnowledgeError> {
         require_id("source", source.id.as_str())?;
-        require_id("tenant", &source.tenant.0)?;
+        require_id("tenant", source.tenant.as_str())?;
         if source.locator.trim().is_empty() {
             return Err(KnowledgeError::InvalidIdentifier {
                 kind: "source locator",
@@ -592,7 +592,7 @@ fn validate_entity(partition: &TenantKnowledge, id: &EntityId) -> Result<(), Kno
 
 fn conflict_id(tenant: &TenantId, subject: &EntityId, predicate: &str) -> ConflictId {
     let mut hasher = Sha256::new();
-    hasher.update(tenant.0.as_bytes());
+    hasher.update(tenant.as_str().as_bytes());
     hasher.update([0]);
     hasher.update(subject.as_str().as_bytes());
     hasher.update([0]);
@@ -617,7 +617,7 @@ mod tests {
     use model::{AssertionKind, SourceTrust, ValidityInterval};
 
     fn tenant(value: &str) -> TenantId {
-        TenantId(value.to_owned())
+        TenantId::new(value).unwrap()
     }
 
     fn evidence_set(value: &str) -> BTreeSet<EvidenceId> {

@@ -778,23 +778,30 @@ impl Server {
     }
 
     fn new(config: Config) -> Result<Self, String> {
+        let current_time = now()?;
         let key = VerifyingKey::from_bytes(&config.issuer_public_key)
             .map_err(|_| "issuer public key is not valid Ed25519".to_string())?;
-        let mut authenticator = TokenAuthenticator::new(&config.audience, AuthStrength::Token);
-        if !authenticator.add_issuer(&config.issuer_kid, key) {
-            return Err("CCOS_ENTERPRISE_ISSUER_KID is not canonical".into());
-        }
-        let identity = authenticator
-            .authenticate(&config.identity_token, now()?)
-            .map_err(|error| format!("configured identity token was refused: {error}"))?;
-        let org = identity.org().0.clone();
-        let actor = identity.actor().0.clone();
 
         fs::create_dir_all(&config.state_dir)
             .map_err(|error| format!("cannot create Enterprise state directory: {error}"))?;
         let governance_root = config.state_dir.join(GOVERNANCE_DIR);
         let mut store = Store::open(&governance_root)
             .map_err(|error| format!("cannot open Enterprise governance store: {error}"))?;
+        let durable_revocations = store
+            .load_revocations(current_time)
+            .map_err(|error| format!("cannot load Enterprise revocations: {error}"))?;
+        let shared_revocations = std::sync::Arc::new(std::sync::Mutex::new(durable_revocations));
+        let mut authenticator = TokenAuthenticator::new(&config.audience, AuthStrength::Token)
+            .with_shared_revocations(std::sync::Arc::clone(&shared_revocations));
+        if !authenticator.add_issuer(&config.issuer_kid, key) {
+            return Err("CCOS_ENTERPRISE_ISSUER_KID is not canonical".into());
+        }
+        let identity = authenticator
+            .authenticate(&config.identity_token, current_time)
+            .map_err(|error| format!("configured identity token was refused: {error}"))?;
+        let org = identity.org().0.clone();
+        let actor = identity.actor().0.clone();
+
         let loaded = store
             .load()
             .map_err(|error| format!("cannot load Enterprise governance store: {error}"))?;
@@ -821,6 +828,14 @@ impl Server {
                 deployment
             }
         };
+        {
+            let revocations = shared_revocations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            store
+                .save_revocation_snapshot(&revocations)
+                .map_err(|error| format!("cannot checkpoint Enterprise revocations: {error}"))?;
+        }
         // Restored deployments created before this capability do not carry its
         // static tool mapping. Reapplying the same permission is idempotent.
         govern_skill_catalogue(&mut deployment);
@@ -2623,6 +2638,32 @@ mod tests {
             .err()
             .expect("unexplained unknown must fail closed");
         assert!(error.contains("unresolved outcome-unknown"), "{error}");
+        cleanup(&root);
+    }
+
+    #[test]
+    fn configured_identity_cannot_restart_after_durable_token_revocation() {
+        let config = test_config("durably-revoked");
+        let root = config.state_dir.clone();
+        cleanup(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let governance_root = root.join(GOVERNANCE_DIR);
+        let shared = ccos_enterprise_auth::SharedRevocations::default();
+        {
+            let mut store = Store::open(&governance_root).unwrap();
+            let current = now().unwrap();
+            assert!(store
+                .revoke_token(&shared, "dsh-durably-revoked", current + 600, current)
+                .unwrap());
+        }
+        let error = Server::new(config)
+            .err()
+            .expect("durably revoked configured token must fail closed");
+        assert!(
+            error.contains("configured identity token was refused"),
+            "{error}"
+        );
+        assert!(error.contains("revoked"), "{error}");
         cleanup(&root);
     }
 

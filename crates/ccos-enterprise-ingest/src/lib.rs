@@ -106,7 +106,7 @@ impl RawArtifact {
     /// create additional evidence records whose locators point into this same source.
     pub fn whole_artifact_evidence(&self) -> EvidenceRecord {
         let mut hasher = Sha256::new();
-        hasher.update(self.tenant.0.as_bytes());
+        hasher.update(self.tenant.as_str().as_bytes());
         hasher.update([0]);
         hasher.update(self.source_id.as_str().as_bytes());
         hasher.update([0]);
@@ -503,7 +503,7 @@ mod tests {
 
     fn source(root: &Path) -> LocalTreeSource {
         LocalTreeSource::new(
-            TenantId("acme".into()),
+            TenantId::new("acme").unwrap(),
             "docs",
             root,
             IngestLimits::default(),
@@ -566,7 +566,7 @@ mod tests {
         let dir = TestDir::new();
         fs::write(dir.0.join("grow.txt"), b"ok").unwrap();
         let source = LocalTreeSource::new(
-            TenantId("acme".into()),
+            TenantId::new("acme").unwrap(),
             "docs",
             &dir.0,
             IngestLimits {
@@ -606,7 +606,7 @@ mod tests {
         let artifact = source.fetch(&descriptor).unwrap();
         let record = artifact.source_record(SourceTrust::External);
         let evidence = artifact.whole_artifact_evidence();
-        assert_eq!(record.tenant, TenantId("acme".into()));
+        assert_eq!(record.tenant, TenantId::new("acme").unwrap());
         assert_eq!(record.locator, "fs://docs/fact.json");
         assert_eq!(
             record.content_hash.as_deref(),

@@ -44,7 +44,7 @@ fn structural_candidate_enters_canonical_state_only_after_explicit_observation_w
     .unwrap();
 
     let source = LocalTreeSource::new(
-        TenantId("tenant-a".into()),
+        TenantId::new("tenant-a").unwrap(),
         "companies",
         &dataset.0,
         IngestLimits::default(),
@@ -81,7 +81,7 @@ fn structural_candidate_enters_canonical_state_only_after_explicit_observation_w
                 2,
                 KnowledgeOp::AddEntity(EntityRecord {
                     id: EntityId::from("entity:pending-resolution:acme"),
-                    tenant: TenantId("tenant-a".into()),
+                    tenant: TenantId::new("tenant-a").unwrap(),
                     namespace: None,
                     entity_type: "record-candidate".into(),
                     label: Some("Acme".into()),
@@ -94,7 +94,7 @@ fn structural_candidate_enters_canonical_state_only_after_explicit_observation_w
 
     let entity = &store
         .state()
-        .tenant(&TenantId("tenant-a".into()))
+        .tenant(&TenantId::new("tenant-a").unwrap())
         .unwrap()
         .entities[&EntityId::from("entity:pending-resolution:acme")];
     assert_eq!(entity.kind, AssertionKind::Observation);

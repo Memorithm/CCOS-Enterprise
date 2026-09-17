@@ -8,7 +8,7 @@ use ccos_enterprise_conformance::two_tenant_deployment;
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 
 fn scope(tenant: &str, key: &str) -> TenantScope<String> {
-    TenantScope::new(TenantId(tenant.to_string()), key.to_string())
+    TenantScope::new(TenantId::new(tenant).unwrap(), key.to_string())
 }
 
 #[test]

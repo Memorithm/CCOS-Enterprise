@@ -37,7 +37,7 @@ fn parsed_unit_locator_resolves_to_original_raw_source_bytes() {
     )
     .unwrap();
     let source = LocalTreeSource::new(
-        TenantId("acme".into()),
+        TenantId::new("acme").unwrap(),
         "events",
         &dir.0,
         IngestLimits::default(),

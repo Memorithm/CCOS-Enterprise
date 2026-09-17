@@ -47,7 +47,7 @@ fn resolved_multi_source_observation_must_conform_before_future_fact_promotion()
 
     let ingest = |root: &PathBuf, namespace: &str| {
         LocalTreeSource::new(
-            TenantId("tenant-a".into()),
+            TenantId::new("tenant-a").unwrap(),
             namespace,
             root,
             IngestLimits::default(),
@@ -72,7 +72,7 @@ fn resolved_multi_source_observation_must_conform_before_future_fact_promotion()
     let proposal = resolved.proposals.values().next().unwrap();
 
     let ontology = Ontology::new(
-        TenantId("tenant-a".into()),
+        TenantId::new("tenant-a").unwrap(),
         "company-v1",
         [EntitySchema::new(
             "company",

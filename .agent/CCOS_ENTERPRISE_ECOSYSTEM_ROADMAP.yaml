@@ -283,8 +283,9 @@ active_memory_campaign_2026_09_19:
   A09: merged_pr_165_measured_18_cases_90000_queries
   A10: merged_pr_166_governed_physical_purge_and_process_death_recovery
   tenant_envelope_KMS: merged_pr_167_encrypted_generations_and_governed_rotation
-  evidence_source_hash_resolution: pr_168_strict_citations_under_CI
-  A06_measured_semantics: pr_169_bounded_relation_observations_and_synthetic_measurement
+  evidence_source_hash_resolution: pr_168_locally_validated_GitHub_execution_blocked
+  A06_measured_semantics: pr_169_locally_measured_GitHub_execution_blocked
+  comparative_RAG_campaign: pr_170_executable_contract_and_scorer_no_real_model_result
   compact_embedding_model:
     status: evaluated_for_controlled_comparative_prototype_not_trained
     SciRust_reviewed_commit: 9b34f52df617b71b233d00017fdc0728504b6342
@@ -361,3 +362,77 @@ reviewed_tenant_envelope_slices:
       - provider_root_only_source_stores_Core_workspaces_audit_journals_and_backups_are_separate
       - no_FIPS_forensic_erasure_full_root_rollback_or_physical_power_cut_claim
       - A09_plaintext_measurements_do_not_measure_KMS_overhead
+
+pending_memory_slices_2026_09_19:
+  GitHub_execution_blocker:
+    status: account_billing_or_spending_limit_prevents_job_start
+    confirmed_runs: [35440263234, 35440289246, 35440330172]
+    observed: zero_started_steps_with_account_payments_or_spending_limit_failure_annotation
+    merged_after_blocker: false
+    required_next_action: account_owner_restore_Actions_execution_then_rerun_all_applicable_exact_head_gates
+    forbidden_shortcut: local_green_tests_do_not_authorize_merge_while_GitHub_gates_are_red
+  slices:
+    - pr: 168
+      name: exact_evidence_source_hash_and_byte_citation_resolution
+      head: 37d4a36573af861a31b4f1f85538bc370ba2877b
+      base: main
+      status: open_no_conflicts_GitHub_execution_blocked
+      contract: docs/VERIFIED_MEMORY_CITATIONS.md
+      delivers:
+        - frozen_bounded_existing_KnowledgeStore_metadata_under_shared_lock
+        - exact_MemoryEvidenceRef_EvidenceRecord_SourceRecord_joins
+        - expected_tenant_and_current_projection_binding_before_source_IO
+        - whole_source_content_hash_verification_and_exact_raw_byte_citations
+        - inherited_lineage_and_shared_context_quote_budget_fail_closed
+        - unconfigured_resolution_explicitly_unresolved_not_verified_by_trust_labels
+      limits:
+        - source_integrity_not_source_URL_authentication_truth_or_semantic_entailment
+        - source_blobs_and_Knowledge_journal_outside_provider_purge_and_encryption
+    - pr: 169
+      name: measured_observational_semantic_relation_baseline
+      head: 183648eb7bfb410673e50274eb2c9a295decfd6b
+      base: feat/verified-memory-provenance-20260919
+      status: open_no_conflicts_GitHub_execution_blocked
+      contract: docs/MEASURED_SEMANTIC_EXTRACTION.md
+      measured_clean_code: 94d68ff9c582852268eda42affb49ca6d33f9617
+      measurement_branch: bench/semantic-relations-20260919
+      executable_sha256: cf1279a1d1b4b3dac21233e5bc17f8c8011d52bedd552bb24b4f572c600066e2
+      measurement: 48_authored_cases_20_TP_0_FP_8_FN_recall_0_714286_coverage_0_416667
+      delivers:
+        - bounded_English_French_relation_mentions_with_polarity_and_raw_source_spans
+        - explicit_abstention_and_Observation_only_candidates_without_canonical_mutation
+        - executable_hash_bound_regression_and_per_case_errors_timings
+      limits:
+        - narrow_rule_grammar_not_general_semantics_or_an_independent_holdout
+        - eight_unsupported_positive_paraphrases_remain_measured_misses
+    - pr: 170
+      name: reproducible_governed_memory_and_RAG_comparative_campaign
+      head: 838ae18292a09f98995cacc4b97c6b569b9e9857
+      base: feat/measured-semantic-candidates-20260919
+      status: open_no_conflicts_GitHub_execution_blocked
+      contract: docs/RAG_COMPARATIVE_CAMPAIGN.md
+      delivers:
+        - five_reference_families_with_common_generator_rights_budgets_hardware_and_encoder_pairing
+        - frozen_artifact_hashes_and_independently_supplied_answer_judgments
+        - ranking_citations_policy_abstention_failure_cost_and_paired_cluster_metrics
+        - runtime_errors_never_rewarded_as_correct_abstentions
+      local_python_tests: 12_passed
+      limits:
+        - supplied_runner_measurements_are_not_authenticated_by_the_scorer
+        - synthetic_smoke_outputs_and_timings_not_executed_system_results
+        - no_trained_proprietary_model_or_RAG_superiority_claim
+  integrated_local_validation:
+    scope: memory_KnowledgeStore_MCP_extraction_all_features
+    rust_1_89_tests: 220_passed
+    stable_tests: 220_passed
+    clippy_all_targets: passed
+    full_history_author_policy: passed_after_canonical_metadata_repair_only
+    source_code_changed_by_author_repair: false
+    Core_tree_changes: none
+    evidence_is_local_not_a_substitute_for_GitHub_CI: true
+  resume_order: [168, 169, 170]
+  resume_rules:
+    - reread_live_main_PR_heads_and_this_roadmap
+    - resolve_all_conflicts_and_red_gates_before_each_merge
+    - retarget_or_rebase_stacked_branches_after_predecessor_merge_then_verify_applicable_CI_again
+    - never_merge_this_roadmap_to_main_without_explicit_user_request

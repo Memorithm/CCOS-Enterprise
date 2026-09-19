@@ -281,8 +281,8 @@ active_memory_campaign_2026_09_19:
   baseline_main: 89a97f70804ff7ac39963b4cebb9c339865bdd48
   bound_context_pr_163_merge: 89a97f70804ff7ac39963b4cebb9c339865bdd48
   A09: merged_pr_165_measured_18_cases_90000_queries
-  A10: implemented_local_crash_and_stdio_tests_passed_PR_preparation
-  tenant_envelope_KMS: pending
+  A10: merged_pr_166_governed_physical_purge_and_process_death_recovery
+  tenant_envelope_KMS: implementation_and_adversarial_recovery_qualification_in_progress
   evidence_source_hash_resolution: pending
   A06_measured_semantics: pending
   compact_embedding_model:
@@ -317,3 +317,26 @@ reviewed_industrial_memory_slices:
       - synthetic_32_dimensions_64_byte_payloads_not_retrieval_quality_or_RAG_superiority
       - 64_MiB_projection_256_MiB_provider_image_input_bounds_not_peak_heap_guarantees
       - normal_restart_not_power_loss_no_MCP_transport_encoder_generator_or_durable_settlement_timing
+
+reviewed_physical_purge_slices:
+  - id: A10_GOVERNED_PURGE_2026_09_19
+    status: merged
+    pr: 166
+    reviewed_commit: 1fa9082afa6ce848ebf514433d126eea71dc4193
+    merge_commit: c04862d5479844e15534f4be7883ecaecc44df54
+    accepted_runs: [35436768833, 35436768861, 35436768817, 35436768876, 35436768855, 35436768935]
+    contract: docs/GOVERNED_PHYSICAL_PURGE.md
+    delivers:
+      - memory_purge_requires_explicit_permission_and_Deployment_admit
+      - root_and_descendant_payload_vector_removal_and_real_provider_reconstruction
+      - all_retired_generation_cleanup_including_orphans
+      - durable_roll_forward_intent_and_reserved_inactive_ID_floor
+      - process_kill_tests_at_intent_artifacts_selector_cleanup_and_floor_boundaries
+      - old_selector_plus_artifact_restore_refused_under_retained_floor
+      - real_stdio_permission_replay_restart_ID_reuse_and_receipt_settlement_tests
+    limits:
+      - managed_provider_root_only_metadata_remains
+      - no_external_backup_or_entire_root_rollback_protection
+      - no_forensic_secure_erase_or_power_cut_claim
+      - ambiguous_MCP_Started_effect_still_requires_reconciliation
+      - no_Core_changes_or_dependency_backflow

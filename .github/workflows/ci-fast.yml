@@ -35,7 +35,9 @@ jobs:
           cargo metadata --locked --format-version 1 > /dev/null
           git diff --exit-code HEAD -- Cargo.lock
       - name: CI guard regressions
-        run: python3 scripts/test-ci-guards.py
+        run: |
+          python3 scripts/test-ci-guards.py
+          python3 scripts/test-author-policy.py
       - name: Author policy (single human contributor)
         env:
           EVENT_KIND: ${{ github.event_name }}

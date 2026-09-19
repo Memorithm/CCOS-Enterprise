@@ -19,6 +19,6 @@ jobs:
       - name: full workspace tests
         run: cargo test --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --release
       - name: author policy over full history
-        run: scripts/check-author-policy.sh main
+        run: scripts/check-author-policy.sh HEAD
       - name: docs build
         run: cargo doc --workspace --exclude ccos-core --exclude ccos-memory-runtime --no-deps --all-features

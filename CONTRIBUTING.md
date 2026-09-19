@@ -110,14 +110,17 @@ These are enforced by CI greps and tests; don't regress them.
   every PR range and the whole history nightly;
   `scripts/install-git-hooks.sh` installs the local hooks that catch a
   violation before it leaves your machine.
-- **Merging a pull request:** use a **merge commit** (the "Create a merge
-  commit" button) or merge locally. Merge commits are exempt from the
-  identity rules — GitHub stamps them with the clicking account and
-  `GitHub <noreply@github.com>`, which nobody can set to the maintainer —
-  but their *message* is still scanned. **Squash merge from the web UI
-  fails the policy** by design: it produces an ordinary commit committed by
-  `GitHub`. Squash locally if you want a single commit. A pull-request body
-  containing an AI-attribution footer must never become a commit message.
+- **Merging a pull request:** both merge and web squash messages must satisfy
+  the author policy. A web squash is allowed only with the authorized human
+  author and the exact `GitHub <noreply@github.com>` committer stamp. This stamp
+  is a metadata convention, not cryptographic identity authentication.
+- **Historical normalization:** six immutable August 2026 squash commits contain
+  the same redundant `MEMOPERF` self-trailer. The policy pins their full object
+  IDs and exact trailer text in `legacy_self_trailer`; all other checks still
+  apply. New commits with that trailer fail, including replays of an old message.
+  No history range is excluded and no Git history is rewritten. Invalid, empty
+  and shallow history scans fail closed. Run `python3 scripts/test-author-policy.py`
+  to exercise both the actual full history and adversarial temporary repositories.
 
 ## Pull-request checklist
 

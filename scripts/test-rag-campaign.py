@@ -130,6 +130,16 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(adverse["citation_violations"], 1)
         self.assertEqual(adverse["task_success"], 0)
 
+    def test_failed_runtime_is_never_rewarded_as_correct_abstention(self):
+        spec = self.manifest["arms"][0]["results"]
+        rows = self.rows(spec)
+        rows[3]["status"] = "error"
+        self.replace(spec, rows)
+        row = self.evaluate()["arms"]["ccos"]["rows"]["q-deleted"]
+        self.assertEqual(row["runtime_failures"], 1)
+        self.assertEqual(row["task_success"], 0)
+        self.assertEqual(row["abstention_correct"], 0)
+
     def test_positive_qrels_cannot_reward_an_unauthorized_source(self):
         spec = self.manifest["qrels"]
         rows = self.rows(spec)

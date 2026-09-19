@@ -95,8 +95,10 @@ protocol mismatches, ineligible positive qrels and unmatched encoder comparisons
 exit nonzero without a partial report. Policy, stale-result, citation, answer
 and budget failures in structurally valid outputs remain in the report; they
 are never removed as inconvenient queries. A failed external runner must still
-produce a schema-valid failure/abstention record with its measured cost and
-appropriate negative adjudication. Do not silently omit failed requests.
+produce a schema-valid `status: error` abstention record with its measured cost
+and appropriate negative adjudication. Runtime failures never earn task or
+abstention success, including on unanswerable questions. Do not silently omit
+failed requests or label them `status: ok`.
 
 Reports include nDCG@k (gain `2^relevance - 1`), Recall@k, MRR@k, abstention,
 adjudicated support, task success, citation integrity, unauthorized/stale

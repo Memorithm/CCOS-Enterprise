@@ -39,7 +39,7 @@ def number(value, positive=False):
 
 
 def label(value):
-    require(isinstance(value, str) and 0 < len(value) <= 256
+    require(isinstance(value, str) and 0 < len(value) <= 256 and value.strip() == value
             and not any(ord(c) < 32 for c in value), "invalid label")
     return value
 
@@ -128,7 +128,8 @@ def citation_valid(citation, docs):
 
 
 def evaluate_row(row, query, docs, qrels, judgment, protocol, protocol_hash):
-    fields(row, "query_id protocol_sha256 ranking context_doc_ids answer latency_ms context_tokens answer_tokens embedding_tokens")
+    fields(row, "query_id status protocol_sha256 ranking context_doc_ids answer latency_ms context_tokens answer_tokens embedding_tokens")
+    require(row["status"] in ("ok", "error"), "invalid runtime outcome")
     require(row["protocol_sha256"] == protocol_hash, "runner protocol differs from frozen comparison")
     require(isinstance(row["ranking"], list) and len(row["ranking"]) <= 1000, "invalid ranking")
     require(all(isinstance(x, str) and x in docs for x in row["ranking"]), "ranking has unknown source")
@@ -143,6 +144,8 @@ def evaluate_row(row, query, docs, qrels, judgment, protocol, protocol_hash):
             and len(answer["citations"]) <= 1024, "invalid answer")
     require(not answer["abstained"] or (not answer["text"] and not answer["citations"]), "abstention contains answer/citations")
     require(answer["abstained"] or bool(answer["text"].strip()), "non-abstention has no answer")
+    require(row["status"] == "ok" or answer["abstained"], "failed runtime cannot claim a completed answer")
+    runtime_failures = int(row["status"] != "ok")
     context_tokens, answer_tokens = integer(row["context_tokens"]), integer(row["answer_tokens"])
     integer(row["embedding_tokens"])
     number(row["latency_ms"])
@@ -168,7 +171,7 @@ def evaluate_row(row, query, docs, qrels, judgment, protocol, protocol_hash):
     supported = judgment["supported_claims"]
     require(not answer["abstained"] or claims == 0, "abstention has judged claims")
     require(answer["abstained"] or claims > 0, "answer has no adjudicated claims")
-    success = bool(judgment["answer_correct"] and not (rights_violations or stale_returns or context_violations or budget_violations or citation_rights_violations))
+    success = bool(judgment["answer_correct"] and not (runtime_failures or rights_violations or stale_returns or context_violations or budget_violations or citation_rights_violations))
     if query["answerable"]:
         success &= not answer["abstained"] and supported == claims and total_citations > 0 and valid_citations == total_citations
     else:
@@ -177,7 +180,7 @@ def evaluate_row(row, query, docs, qrels, judgment, protocol, protocol_hash):
         "query_id": query["id"], "group": query["group"], "ndcg": dcg / ideal if ideal else None,
         "recall": len(set(top) & positives) / len(positives) if positives else None,
         "mrr": next((1 / (i + 1) for i, doc in enumerate(top) if doc in positives), 0.0) if positives else None,
-        "abstention_correct": int(answer["abstained"] == (not query["answerable"])),
+        "abstention_correct": int(not runtime_failures and answer["abstained"] == (not query["answerable"])),
         "task_success": int(success), "adjudicated_support": supported / claims if claims else None,
         "unsupported_claims": claims - supported, "rights_violations": rights_violations,
         "stale_returns": stale_returns, "context_violations": context_violations, "budget_violations": budget_violations,
@@ -185,6 +188,7 @@ def evaluate_row(row, query, docs, qrels, judgment, protocol, protocol_hash):
         "citation_violations": total_citations - valid_citations, "citation_rights_violations": citation_rights_violations,
         "latency_ms": row["latency_ms"], "context_tokens": context_tokens, "answer_tokens": answer_tokens,
         "embedding_tokens": row["embedding_tokens"],
+        "runtime_failures": runtime_failures,
     }
 
 
@@ -212,7 +216,7 @@ def evaluate(path):
     manifest_bytes = bounded_read(path, 2 * 1024 * 1024)
     manifest = decode(manifest_bytes)
     fields(manifest, "schema_version scope protocol corpus queries qrels judgments arms comparisons dataset_provenance")
-    require(manifest["schema_version"] == 1 and manifest["scope"] in ("synthetic_smoke", "held_out"), "unsupported campaign")
+    require(type(manifest["schema_version"]) is int and manifest["schema_version"] == 1 and manifest["scope"] in ("synthetic_smoke", "held_out"), "unsupported campaign")
     provenance = manifest["dataset_provenance"]
     fields(provenance, "origin license split_author training_overlap_audit_sha256")
     for key in ("origin", "license", "split_author"):
@@ -283,7 +287,7 @@ def evaluate(path):
     require(len(judgments) == len(arms) * len(queries), "missing answer judgments")
     results = {}
     metrics = ("ndcg", "recall", "mrr", "abstention_correct", "task_success", "adjudicated_support")
-    counts = ("unsupported_claims", "rights_violations", "stale_returns", "context_violations", "budget_violations", "citation_count", "valid_citations", "citation_violations", "citation_rights_violations", "context_tokens", "answer_tokens", "embedding_tokens")
+    counts = ("runtime_failures", "unsupported_claims", "rights_violations", "stale_returns", "context_violations", "budget_violations", "citation_count", "valid_citations", "citation_violations", "citation_rights_violations", "context_tokens", "answer_tokens", "embedding_tokens")
     for aid, arm in arms.items():
         fields(arm, "id family encoder runner measurement results")
         if arm["family"] == "lexical":
@@ -313,7 +317,7 @@ def evaluate(path):
         summary["citation_integrity"] = (summary["valid_citations"] / summary["citation_count"] if summary["citation_count"] else None)
         summary["latency_ms"] = {f"p{p}": quantile([r["latency_ms"] for r in evaluated.values()], p) for p in (50, 95, 99)}
         summary["throughput_queries_per_second"] = len(queries) / measure["wall_seconds"]
-        summary["protocol_clean"] = not any(summary[k] for k in ("rights_violations", "stale_returns", "context_violations", "budget_violations", "citation_violations", "citation_rights_violations"))
+        summary["protocol_clean"] = not any(summary[k] for k in ("runtime_failures", "rights_violations", "stale_returns", "context_violations", "budget_violations", "citation_violations", "citation_rights_violations"))
         results[aid] = {"family": arm["family"], "encoder": arm["encoder"], "runner": arm["runner"], "measurement": measure, "summary": summary, "rows": evaluated}
     comparisons = []
     pairs = set()

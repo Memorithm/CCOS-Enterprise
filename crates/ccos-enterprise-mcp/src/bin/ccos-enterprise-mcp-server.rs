@@ -207,6 +207,8 @@ struct EffectRecord {
     governed_asset_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     governed_image_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    governed_purged_assets: Option<usize>,
 }
 
 impl EffectRecord {
@@ -239,6 +241,7 @@ impl EffectRecord {
             governed_generation: None,
             governed_asset_id: None,
             governed_image_sha256: None,
+            governed_purged_assets: None,
         }
     }
 
@@ -702,6 +705,7 @@ impl Server {
         if config.governed_memory_root.is_some() {
             ccos_enterprise_mcp::govern_governed_context(&mut deployment);
             ccos_enterprise_mcp::govern_governed_evidence_write(&mut deployment);
+            ccos_enterprise_mcp::govern_governed_purge(&mut deployment);
         }
         let mut tenant = TenantState::new(config.token_budget);
         tenant.allow_model(&config.model);
@@ -843,6 +847,7 @@ impl Server {
         if config.governed_memory_root.is_some() {
             ccos_enterprise_mcp::govern_governed_context(&mut deployment);
             ccos_enterprise_mcp::govern_governed_evidence_write(&mut deployment);
+            ccos_enterprise_mcp::govern_governed_purge(&mut deployment);
         }
 
         let skills_root = config.state_dir.join(SKILLS_DIR).join(&config.tenant);
@@ -1595,10 +1600,14 @@ impl Server {
             tool: tool.to_string(),
             request_id: meta.request_id.clone(),
         };
-        if request.tool == ccos_enterprise_mcp::GOVERNED_EVIDENCE_WRITE_TOOL
+        if [
+            ccos_enterprise_mcp::GOVERNED_EVIDENCE_WRITE_TOOL,
+            ccos_enterprise_mcp::GOVERNED_PURGE_TOOL,
+        ]
+        .contains(&request.tool.as_str())
             && self.governed_memory.is_some()
         {
-            return self.call_governed_evidence_write(&identity, &request, &meta, &arguments);
+            return self.call_governed_mutation(&identity, &request, &meta, &arguments);
         }
         if request.tool == ccos_enterprise_mcp::GOVERNED_CONTEXT_TOOL
             && self.governed_memory.is_some()
@@ -1861,6 +1870,16 @@ fn enterprise_specs(include_governed_context: bool) -> Result<Vec<Value>, (i64, 
             ));
         }
         governed.push(ccos_enterprise_mcp::governed_evidence_write_tool_spec());
+        if governed.iter().any(|tool| {
+            tool.get("name").and_then(Value::as_str)
+                == Some(ccos_enterprise_mcp::GOVERNED_PURGE_TOOL)
+        }) {
+            return Err((
+                -32000,
+                "Enterprise purge capability collides with catalogue".into(),
+            ));
+        }
+        governed.push(ccos_enterprise_mcp::governed_purge_tool_spec());
     }
     governed.sort_by(|left, right| {
         left.get("name")
@@ -2285,6 +2304,7 @@ mod tests {
                 governed_generation: None,
                 governed_asset_id: None,
                 governed_image_sha256: None,
+                governed_purged_assets: None,
             };
             write_effect(&effect_path(&root), &effect).unwrap();
         }
@@ -2583,6 +2603,7 @@ mod tests {
                 governed_generation: None,
                 governed_asset_id: None,
                 governed_image_sha256: None,
+                governed_purged_assets: None,
             };
             write_effect(&effect_path(&root), &effect).unwrap();
         }

@@ -432,3 +432,129 @@ fn succeeded_receipt_is_verified_then_settled_without_reexecuting_generation() {
     );
     assert!(store.matches_evidence_receipt(&receipt));
 }
+
+fn grant_purge_for_test(state: &Path) {
+    use ccos_enterprise_runtime::Deployment;
+    use ccos_enterprise_store::Store;
+    let mut store = Store::open(state.join(".enterprise")).unwrap();
+    let loaded = store.load().unwrap().unwrap();
+    let mut deployment =
+        Deployment::restore(loaded.snapshot, &loaded.journal, &loaded.governance).unwrap();
+    deployment.add_role("test-purger", &["memory.purge"]);
+    assert!(deployment.assign("memorithm", "alice", "test-purger"));
+    let tail: Vec<_> = deployment
+        .governance()
+        .filter(|r| r.ordinal >= store.next_ordinal())
+        .cloned()
+        .collect();
+    store.append_governance(&tail).unwrap();
+    store.save_snapshot(&deployment.snapshot()).unwrap();
+}
+
+fn purge_call(id: u64, request_id: &str, attempt: &str) -> Value {
+    json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params": {
+        "name":"memory.purge", "arguments":{"asset_id":"verified-root"},
+        "_meta":{"ccos":meta(id, request_id, attempt)}
+    }})
+}
+
+#[test]
+fn real_stdio_purge_requires_explicit_permission_and_cannot_resurrect_after_restart() {
+    let root = Directory::new();
+    let provider = root.0.join("provider");
+    let state = root.0.join("server");
+    drop(
+        ProviderGenerationStore::initialize(&provider, authority(), config(), &records()).unwrap(),
+    );
+    let (token, public) = token();
+    let mut server = ServerProcess::spawn(&state, &provider, &token, &public);
+    let denied = server.request(purge_call(1, "purge-denied", "attempt-denied"));
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    server.stop();
+    assert_eq!(
+        ProviderGenerationStore::open(&provider, tenant())
+            .unwrap()
+            .generation(),
+        0
+    );
+    grant_purge_for_test(&state);
+
+    let mut server = ServerProcess::spawn(&state, &provider, &token, &public);
+    let purged = server.request(purge_call(2, "purge-live", "attempt-purge"));
+    assert_eq!(
+        purged["result"]["structuredContent"]["generation"], 1,
+        "{purged}"
+    );
+    assert_eq!(
+        purged["result"]["structuredContent"]["purged_assets_total"],
+        1
+    );
+    let replay = server.request(purge_call(3, "purge-live", "attempt-replay"));
+    assert_eq!(
+        replay["result"]["structuredContent"]["replayed"], true,
+        "{replay}"
+    );
+    server.stop();
+
+    let mut server = ServerProcess::spawn(&state, &provider, &token, &public);
+    let context = server.request(context_call(4, "post-purge", "attempt-context"));
+    assert_eq!(context["result"]["structuredContent"]["generation"], 1);
+    assert!(context["result"]["structuredContent"]["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let reused = server.request(write_call(5, "resurrect", "attempt-reuse", "verified-root"));
+    assert_eq!(reused["result"]["isError"], true, "{reused}");
+    server.stop();
+    let store = ProviderGenerationStore::open(&provider, tenant()).unwrap();
+    assert_eq!(store.generation(), 1);
+    assert!(store.matches_purge_receipt(
+        &ccos_enterprise_provider_adapter::generation::PurgeReceipt {
+            generation: 1,
+            asset_id: id("verified-root"),
+            image_digest: store.recovered().digest(),
+            purged_assets: 1
+        }
+    ));
+    for name in ["provider-generations", "governance-generations"] {
+        assert_eq!(std::fs::read_dir(provider.join(name)).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn succeeded_purge_receipt_revalidates_compaction_before_settlement() {
+    let root = Directory::new();
+    let provider = root.0.join("provider");
+    let state = root.0.join("server");
+    drop(
+        ProviderGenerationStore::initialize(&provider, authority(), config(), &records()).unwrap(),
+    );
+    let (token, public) = token();
+    bootstrap_state(&state, &provider, &token, &public);
+    grant_purge_for_test(&state);
+    let store = ProviderGenerationStore::open(&provider, tenant()).unwrap();
+    let prepared = store.prepare_purge(&tenant(), id("verified-root")).unwrap();
+    let (store, receipt) = store.commit_prepared_purge(prepared).unwrap();
+    drop(store);
+    let mut effect = json!({"request_id":"offline-purge", "tenant":"acme", "actor":"alice",
+        "tool":"memory.purge", "model":"deepseek-harness", "cost_tokens":1, "state":"succeeded",
+        "output_sha256":"test-output", "governed_generation":receipt.generation,
+        "governed_asset_id":receipt.asset_id.as_str(), "governed_image_sha256":digest_hex(receipt.image_digest),
+        "governed_purged_assets":999});
+    std::fs::write(effect_path(&state), serde_json::to_vec(&effect).unwrap()).unwrap();
+    assert!(!startup(&state, &provider, &token, &public).status.success());
+    effect["governed_purged_assets"] = json!(receipt.purged_assets);
+    std::fs::write(effect_path(&state), serde_json::to_vec(&effect).unwrap()).unwrap();
+    let output = startup(&state, &provider, &token, &public);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let settled: Value =
+        serde_json::from_slice(&std::fs::read(effect_path(&state)).unwrap()).unwrap();
+    assert_eq!(settled["state"], "settled");
+    assert!(ProviderGenerationStore::open(&provider, tenant())
+        .unwrap()
+        .matches_purge_receipt(&receipt));
+}

@@ -51,6 +51,7 @@ jobs:
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --lib recovery::tests --locked -- --list > /tmp/recovery-tests.txt
           grep -E '^recovery::tests::fresh_process_reconstructs_actual_provider_from_the_durable_image: test$' /tmp/recovery-tests.txt
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --lib recovery::tests --locked
+          cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --lib generation::purge::tests --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --test generation_selector --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --test generation_retry --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --test accepted_evidence_write --locked

@@ -52,6 +52,10 @@
 pub mod decision;
 pub mod governed_context_tool;
 pub mod governed_evidence_tool;
+pub mod governed_purge_tool;
+pub use governed_purge_tool::{
+    govern_governed_purge, governed_purge_tool_spec, GOVERNED_PURGE_PERMISSION, GOVERNED_PURGE_TOOL,
+};
 pub mod served_context;
 pub mod server;
 pub mod skill_audit;

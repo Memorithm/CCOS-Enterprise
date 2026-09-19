@@ -1,0 +1,215 @@
+{
+  "schema_version": 2,
+  "scope": "synthetic_smoke",
+  "protocol": {
+    "generator": {
+      "weights_sha256": "sha256:ed79da4779790c78dac3e5f5ff8d90dda84ead5cd6c07a6ff48454f854d04dae",
+      "tokenizer_sha256": "sha256:ec0f312ee3d6aac2f842484eeb8bc77a62ad6638a3b49aad81df19953a520655",
+      "prompt_sha256": "sha256:a22d46319bc8433360517a62306b26befdc30ac1a738e2f7ebd7c9148c93e6d7",
+      "temperature": 0,
+      "seed": 7
+    },
+    "hardware": {
+      "host_id": "synthetic-unexecuted",
+      "cpu": "synthetic",
+      "accelerator": "none",
+      "ram_bytes": 1024,
+      "concurrency": 1
+    },
+    "context_tokens": 128,
+    "answer_tokens": 64,
+    "k": 10,
+    "seed": 20260919,
+    "bootstrap_samples": 1000,
+    "rubric_sha256": "sha256:b58f208729def034a8a08c2480476ef4f952694789c2180917732bbbe767b65e"
+  },
+  "corpus": {
+    "path": "corpus.jsonl",
+    "sha256": "sha256:24adb4829e8354428fe35a1dff8cbe58e78c1449111531d4c4cdf966f60024ad"
+  },
+  "queries": {
+    "path": "queries.jsonl",
+    "sha256": "sha256:b120cc513b087bbf5f2e751bd0efa444879e8ea28548ceb0f073a8b7a7fdef8e"
+  },
+  "qrels": {
+    "path": "qrels.jsonl",
+    "sha256": "sha256:0856caeb23a25519a6e5801d5fa8ef13e66ff3b92febb160f76f4f8d6b8b1ed1"
+  },
+  "dataset_provenance": {
+    "origin": "authored synthetic protocol fixture; no system was run",
+    "license": "repository fixture licensing",
+    "split_author": "synthetic-fixture",
+    "training_overlap_audit_sha256": "sha256:c7dcdacced3be0ee35d39376f5832fdb14f3e44095328910e75870e715a387f8"
+  },
+  "arms": [
+    {
+      "id": "ccos",
+      "family": "governed_memory",
+      "encoder": {
+        "weights_sha256": "sha256:d3f973d9c116cab39f1e3841b4035029d7c5f2f7d9a801da40d5ff5331df68fa",
+        "tokenizer_sha256": "sha256:ec0f312ee3d6aac2f842484eeb8bc77a62ad6638a3b49aad81df19953a520655",
+        "pooling": "mean",
+        "normalization": "l2",
+        "dimension": 128,
+        "query_instruction_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "document_instruction_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "runner": {
+        "code_sha": "0000000000000000000000000000000000000000",
+        "command": [
+          "synthetic-fixture-no-runner"
+        ],
+        "index_config": {
+          "synthetic": true
+        }
+      },
+      "measurement": {
+        "wall_seconds": 0.06,
+        "restart_ms": 0,
+        "peak_rss_bytes": 1024
+      },
+      "results": {
+        "path": "ccos.jsonl",
+        "sha256": "sha256:d817b43ad20d59ef5fa960aedce23f56f8d3a884d2604e1d4e229a8eca25a9da"
+      }
+    },
+    {
+      "id": "lexical",
+      "family": "lexical",
+      "encoder": null,
+      "runner": {
+        "code_sha": "0000000000000000000000000000000000000000",
+        "command": [
+          "synthetic-fixture-no-runner"
+        ],
+        "index_config": {
+          "synthetic": true
+        }
+      },
+      "measurement": {
+        "wall_seconds": 0.06,
+        "restart_ms": 0,
+        "peak_rss_bytes": 1024
+      },
+      "results": {
+        "path": "lexical.jsonl",
+        "sha256": "sha256:9ff5ca87bb479b9bfc6bde5805099ff0dd129e941713e20b5e26f036f43420d2"
+      }
+    },
+    {
+      "id": "dense",
+      "family": "dense",
+      "encoder": {
+        "weights_sha256": "sha256:d3f973d9c116cab39f1e3841b4035029d7c5f2f7d9a801da40d5ff5331df68fa",
+        "tokenizer_sha256": "sha256:ec0f312ee3d6aac2f842484eeb8bc77a62ad6638a3b49aad81df19953a520655",
+        "pooling": "mean",
+        "normalization": "l2",
+        "dimension": 128,
+        "query_instruction_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "document_instruction_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "runner": {
+        "code_sha": "0000000000000000000000000000000000000000",
+        "command": [
+          "synthetic-fixture-no-runner"
+        ],
+        "index_config": {
+          "synthetic": true
+        }
+      },
+      "measurement": {
+        "wall_seconds": 0.06,
+        "restart_ms": 0,
+        "peak_rss_bytes": 1024
+      },
+      "results": {
+        "path": "dense.jsonl",
+        "sha256": "sha256:d817b43ad20d59ef5fa960aedce23f56f8d3a884d2604e1d4e229a8eca25a9da"
+      }
+    },
+    {
+      "id": "hybrid",
+      "family": "hybrid",
+      "encoder": {
+        "weights_sha256": "sha256:d3f973d9c116cab39f1e3841b4035029d7c5f2f7d9a801da40d5ff5331df68fa",
+        "tokenizer_sha256": "sha256:ec0f312ee3d6aac2f842484eeb8bc77a62ad6638a3b49aad81df19953a520655",
+        "pooling": "mean",
+        "normalization": "l2",
+        "dimension": 128,
+        "query_instruction_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "document_instruction_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "runner": {
+        "code_sha": "0000000000000000000000000000000000000000",
+        "command": [
+          "synthetic-fixture-no-runner"
+        ],
+        "index_config": {
+          "synthetic": true
+        }
+      },
+      "measurement": {
+        "wall_seconds": 0.06,
+        "restart_ms": 0,
+        "peak_rss_bytes": 1024
+      },
+      "results": {
+        "path": "hybrid.jsonl",
+        "sha256": "sha256:d817b43ad20d59ef5fa960aedce23f56f8d3a884d2604e1d4e229a8eca25a9da"
+      }
+    },
+    {
+      "id": "reranked",
+      "family": "reranked",
+      "encoder": {
+        "weights_sha256": "sha256:d3f973d9c116cab39f1e3841b4035029d7c5f2f7d9a801da40d5ff5331df68fa",
+        "tokenizer_sha256": "sha256:ec0f312ee3d6aac2f842484eeb8bc77a62ad6638a3b49aad81df19953a520655",
+        "pooling": "mean",
+        "normalization": "l2",
+        "dimension": 128,
+        "query_instruction_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "document_instruction_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "runner": {
+        "code_sha": "0000000000000000000000000000000000000000",
+        "command": [
+          "synthetic-fixture-no-runner"
+        ],
+        "index_config": {
+          "synthetic": true
+        }
+      },
+      "measurement": {
+        "wall_seconds": 0.06,
+        "restart_ms": 0,
+        "peak_rss_bytes": 1024
+      },
+      "results": {
+        "path": "reranked.jsonl",
+        "sha256": "sha256:d817b43ad20d59ef5fa960aedce23f56f8d3a884d2604e1d4e229a8eca25a9da"
+      }
+    }
+  ],
+  "judgments": {
+    "path": "judgments.jsonl",
+    "sha256": "sha256:4bfc3615466a3fac3ba7387614196c138c2b10bfadfa28133faead7e10a8376f"
+  },
+  "comparisons": [
+    {
+      "candidate": "ccos",
+      "baseline": "lexical"
+    },
+    {
+      "candidate": "ccos",
+      "baseline": "dense"
+    },
+    {
+      "candidate": "ccos",
+      "baseline": "hybrid"
+    },
+    {
+      "candidate": "ccos",
+      "baseline": "reranked"
+    }
+  ]
+}

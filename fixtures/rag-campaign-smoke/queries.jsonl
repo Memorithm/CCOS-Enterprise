@@ -1,0 +1,6 @@
+{"answerable":true,"group":"location-acme","id":"q-fr","principal":"alice","split":"test","tenant":"acme","text":"Où se situe Acme ?"}
+{"answerable":true,"group":"api-acme","id":"q-en","principal":"alice","split":"test","tenant":"acme","text":"What does API depend on?"}
+{"answerable":true,"group":"location-beta","id":"q-beta","principal":"bob","split":"test","tenant":"beta","text":"Où se situe Beta ?"}
+{"answerable":false,"group":"deletion","id":"q-deleted","principal":"alice","split":"test","tenant":"acme","text":"Quel était le secret retiré ?"}
+{"answerable":false,"group":"rights","id":"q-rights","principal":"alice","split":"test","tenant":"acme","text":"Quel est le document opérateur ?"}
+{"answerable":false,"group":"supersession","id":"q-stale","principal":"alice","split":"test","tenant":"acme","text":"Confirmer Acme à Lille ?"}

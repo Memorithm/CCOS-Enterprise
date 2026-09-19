@@ -280,8 +280,8 @@ reviewed_operational_slices:
 active_memory_campaign_2026_09_19:
   baseline_main: 89a97f70804ff7ac39963b4cebb9c339865bdd48
   bound_context_pr_163_merge: 89a97f70804ff7ac39963b4cebb9c339865bdd48
-  A09: implementation_and_measurement_in_progress
-  A10: governed_physical_purge_and_crash_recovery_pending
+  A09: merged_pr_165_measured_18_cases_90000_queries
+  A10: implemented_local_crash_and_stdio_tests_passed_PR_preparation
   tenant_envelope_KMS: pending
   evidence_source_hash_resolution: pending
   A06_measured_semantics: pending
@@ -296,3 +296,24 @@ active_memory_campaign_2026_09_19:
       - freeze_model_tokenizer_pooling_normalization_dimension_and_dataset_hashes
       - keep_similarity_and_model_outputs_non_authoritative
       - no_Core_duplication_or_Enterprise_dependency_backflow
+
+reviewed_industrial_memory_slices:
+  - id: A09_GOVERNED_PIPELINE_2026_09_19
+    status: merged
+    pr: 165
+    reviewed_commit: 9a0bb43c05729743ec57d0bb45c8e0a9dc3662f9
+    merge_commit: 3b089f301fc6a3de3f2a1d73be3f8d643536dec6
+    accepted_runs: [35436002576, 35436002634, 35436002575, 35436002596, 35436002572, 35436002597]
+    measured_code: b3af20fc952426eef06dd38115312350b14737f5
+    report: docs/benchmarks/governed-memory-20260919-aarch64.json
+    delivers:
+      - immutable_validated_generation_snapshot_without_bypassing_per_query_eligibility_or_payload_checks
+      - 1k_10k_100k_assets_per_tenant_with_1_and_4_concurrent_tenants
+      - 18_passed_cases_90000_raw_request_latencies_and_exact_restart_result_image_equality
+      - p50_p95_p99_throughput_RSS_high_water_disk_and_recovery_distributions
+      - permanent_Rust_1_89_and_stable_benchmark_smoke_artifacts
+      - reconciled_memory_vs_RAG_and_compact_embedding_decision_documents
+    limits:
+      - synthetic_32_dimensions_64_byte_payloads_not_retrieval_quality_or_RAG_superiority
+      - 64_MiB_projection_256_MiB_provider_image_input_bounds_not_peak_heap_guarantees
+      - normal_restart_not_power_loss_no_MCP_transport_encoder_generator_or_durable_settlement_timing

@@ -37,6 +37,10 @@ pub enum StoreError {
         detail: String,
     },
     Serialization(String),
+    JournalTooLarge {
+        path: PathBuf,
+        limit: usize,
+    },
     Knowledge(KnowledgeError),
     AlreadyOpen {
         path: PathBuf,
@@ -70,6 +74,11 @@ impl std::fmt::Display for StoreError {
             Self::Serialization(detail) => {
                 write!(f, "cannot serialize knowledge journal: {detail}")
             }
+            Self::JournalTooLarge { path, limit } => write!(
+                f,
+                "{}: knowledge journal exceeds {limit} bytes",
+                path.display()
+            ),
             Self::Knowledge(error) => write!(f, "knowledge mutation refused: {error}"),
             Self::AlreadyOpen { path } => write!(
                 f,
@@ -211,7 +220,16 @@ impl KnowledgeStore {
     /// # Ok(()) }
     /// ```
     pub fn load(root: impl AsRef<Path>) -> Result<Loaded, StoreError> {
-        let journal_path = root.as_ref().join(JOURNAL_FILE);
+        Self::load_with_limit(root.as_ref(), None)
+    }
+
+    /// Read-only replay with a hard input-byte ceiling, including any torn tail.
+    pub fn load_bounded(root: impl AsRef<Path>, max_bytes: usize) -> Result<Loaded, StoreError> {
+        Self::load_with_limit(root.as_ref(), Some(max_bytes))
+    }
+
+    fn load_with_limit(root: &Path, limit: Option<usize>) -> Result<Loaded, StoreError> {
+        let journal_path = root.join(JOURNAL_FILE);
         // Attempt the read itself: exists() would hide metadata/access
         // failures as absence and add a separate check/use window.
         let mut file = match File::open(&journal_path) {
@@ -226,7 +244,19 @@ impl KnowledgeStore {
             Err(error) => return Err(io(&journal_path)(error)),
         };
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(io(&journal_path))?;
+        if let Some(limit) = limit {
+            file.take((limit as u64).saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(io(&journal_path))?;
+            if bytes.len() > limit {
+                return Err(StoreError::JournalTooLarge {
+                    path: journal_path,
+                    limit,
+                });
+            }
+        } else {
+            file.read_to_end(&mut bytes).map_err(io(&journal_path))?;
+        }
         let (complete, torn_tail) = complete_prefix(&bytes);
 
         let mut entries = Vec::new();
@@ -363,6 +393,42 @@ mod tests {
         assert_eq!(loaded.entries.len(), 1);
         assert_eq!(loaded.torn_tail, 0);
         assert_eq!(loaded.state.canonical_hash().unwrap(), expected_hash);
+    }
+
+    #[test]
+    fn bounded_replay_counts_the_tail_and_never_repairs_it() {
+        let dir = TestDir::new();
+        {
+            let mut store = KnowledgeStore::open(&dir.0).unwrap();
+            store.append(&[source(0, "acme", "s")]).unwrap();
+        }
+        let path = dir.0.join(JOURNAL_FILE);
+        let original = std::fs::read(&path).unwrap();
+        assert_eq!(
+            KnowledgeStore::load_bounded(&dir.0, original.len())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        assert!(matches!(
+            KnowledgeStore::load_bounded(&dir.0, original.len() - 1),
+            Err(StoreError::JournalTooLarge { .. })
+        ));
+        let mut with_tail = original.clone();
+        with_tail.push(b'{');
+        std::fs::write(&path, &with_tail).unwrap();
+        assert!(matches!(
+            KnowledgeStore::load_bounded(&dir.0, original.len()),
+            Err(StoreError::JournalTooLarge { .. })
+        ));
+        assert_eq!(
+            KnowledgeStore::load_bounded(&dir.0, with_tail.len())
+                .unwrap()
+                .torn_tail,
+            1
+        );
+        assert_eq!(std::fs::read(path).unwrap(), with_tail);
     }
 
     #[test]

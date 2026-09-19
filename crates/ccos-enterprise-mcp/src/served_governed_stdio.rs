@@ -243,11 +243,38 @@ impl Server {
         if assembly.len() != attestations.len() {
             return Err("governed context attestation cardinality mismatch".into());
         }
+        let cited = self
+            .evidence
+            .as_ref()
+            .map(|evidence| {
+                evidence.cite(
+                    &assembly,
+                    authority,
+                    parsed
+                        .context_budget
+                        .max_payload_bytes()
+                        .saturating_sub(assembly.payload_bytes()),
+                )
+            })
+            .transpose()?;
+        let citation_bytes = cited.as_ref().map_or(0, |c| c.quote_bytes());
         let items: Vec<Value> = assembly
             .chunks()
             .iter()
             .zip(attestations.iter())
-            .map(|(chunk, attestation)| {
+            .enumerate()
+            .map(|(index, (chunk, attestation))| {
+                let citations: Vec<Value> = cited.as_ref().map(|context| context.items()[index].citations().iter().map(|c| json!({
+                    "memory_evidence_ref": c.reference().as_str(),
+                    "evidence_id": c.evidence_id().as_str(),
+                    "source_id": c.source_id().as_str(),
+                    "source_locator": c.source_locator(),
+                    "source_content_hash": c.content_hash(),
+                    "byte_start": c.span().start,
+                    "byte_end": c.span().end,
+                    "quote_bytes": c.quote_bytes(),
+                    "quote_sha256": c.quote_hash()
+                })).collect()).unwrap_or_default();
                 json!({
                     "asset_id": chunk.asset_id.as_str(),
                     "space": memory_space_label(&chunk.space),
@@ -260,7 +287,8 @@ impl Server {
                     "asset_state": "active",
                     "trust_state": validation_state_label(attestation.trust_state),
                     "parents": attestation.parents.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
-                    "evidence": attestation.evidence.iter().map(|evidence| evidence.as_str()).collect::<Vec<_>>()
+                    "evidence": attestation.evidence.iter().map(|evidence| evidence.as_str()).collect::<Vec<_>>(),
+                    "citations": citations
                 })
             })
             .collect();
@@ -268,7 +296,7 @@ impl Server {
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "CCOS Enterprise supplied {} verified governed context item(s)",
+                    "CCOS Enterprise supplied {} eligible governed context item(s)",
                     items.len()
                 )
             }],
@@ -277,6 +305,9 @@ impl Server {
                 "generation": store.generation(),
                 "trust_policy": "verified_only",
                 "payload_bytes": assembly.payload_bytes(),
+                "citation_bytes": citation_bytes,
+                "total_context_bytes": assembly.payload_bytes() + citation_bytes,
+                "citation_status": if cited.is_some() { "content_hash_and_byte_span_verified" } else { "unresolved" },
                 "tenant": assembly.tenant().as_str(),
                 "projection_version": assembly.projection_version(),
                 "projection_sha256": assembly.projection_sha256_hex(),

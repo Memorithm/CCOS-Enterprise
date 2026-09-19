@@ -36,7 +36,7 @@ Rust while the borrowed projection is used. Cloning a projection is still
 possible: it is not a sealed authority token and must not be cached as one.
 
 `replace(candidate)` validates tenant equality and reconstructs all domain objects
-through the same wire/constructor checks as restore, including the 16 MiB encoded
+through the same wire/constructor checks as restore, including the 64 MiB encoded
 limit. Validation errors preserve both the acknowledged in-memory state and the
 file. Once publication starts, the in-memory projection is removed until the
 synced write/rename/directory-sync succeeds. Any publication error poisons the

@@ -297,7 +297,7 @@ fn validate_candidate(
         .map_err(|error| projection_corrupt(&error.to_string()))?;
     if encoded.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
         return Err(projection_corrupt(
-            "projection exceeds the 16 MiB byte limit",
+            "projection exceeds the 64 MiB byte limit",
         ));
     }
     Ok(checked)

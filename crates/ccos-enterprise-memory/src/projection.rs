@@ -31,7 +31,7 @@ use crate::{
 pub const GOVERNED_MEMORY_PROJECTION_VERSION: u32 = 1;
 pub const GOVERNED_MEMORY_PROJECTION_FILE: &str = "governed-memory.json";
 /// Hard byte bound on one encoded governance projection, excluding embeddings.
-pub const MAX_GOVERNED_MEMORY_PROJECTION_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_GOVERNED_MEMORY_PROJECTION_BYTES: usize = 64 * 1024 * 1024;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -466,7 +466,7 @@ pub fn load_governed_memory_projection(
         .map_err(|error| projection_io(&path, error))?;
     if bytes.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
         return Err(projection_corrupt(
-            "projection exceeds the 16 MiB byte limit",
+            "projection exceeds the 64 MiB byte limit",
         ));
     }
     let doc: WireDocument =

@@ -58,3 +58,16 @@ jobs:
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-mcp --test governed_evidence_stdio --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --doc --locked
           git diff --exit-code -- Cargo.lock
+      - name: Governed pipeline benchmark smoke and fresh-process recovery
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          cargo +"$TOOLCHAIN" build --release --locked -p ccos-enterprise-mcp --example governed_memory_bench
+          python3 scripts/bench-governed-memory.py --sizes 32 --tenants 1,4 --samples 10 --repetitions 1 --output "$RUNNER_TEMP/a09-smoke.json"
+      - name: Preserve benchmark smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a09-smoke-${{ matrix.toolchain }}
+          path: ${{ runner.temp }}/a09-smoke.json
+          if-no-files-found: error

@@ -211,17 +211,17 @@ fn run() -> Result<()> {
                     if !deployment.lock().map_err(|_| "admission lock poisoned")?.admit(Call {
                         actor, request: &req, model: "synthetic", cost_tokens: 1, variant: None, justification: None,
                     }).is_forwarded() { return Err("admission refused benchmark query".into()); }
-                    let admitted = store.recovered().recall(store.governance(), TenantScope::new(
+                    let admitted = store.recovered().recall_current( TenantScope::new(
                         store.tenant().clone(), BudgetedMemoryRecall { embedding: &query, loadout: &loadout,
                             budget: MemoryRecallBudget::new(8, 64, 4096)? }),
                         GovernedRecallTrustPolicy::AnyNonQuarantined)?;
-                    let context = assemble_governed_bootstrap_context(store.governance(), admitted,
+                    let context = store.recovered().assemble_current(admitted,
                         MemoryContextBudget::new(8, 4096)?)?;
                     let attestations = attest_governed_context(&context);
                     durations.push(start.elapsed().as_nanos() as u64);
                     if context.is_empty() || attestations.len() != context.len() { return Err("empty/unattested context".into()); }
                     for chunk in context.chunks() {
-                        if !chunk.payload.starts_with(store.tenant().as_str().as_bytes()) {
+                        if !chunk.payload.starts_with(format!("{}:", store.tenant().as_str()).as_bytes()) {
                             return Err("cross-tenant payload".into());
                         }
                         digest.update(chunk.asset_id.as_str().as_bytes());

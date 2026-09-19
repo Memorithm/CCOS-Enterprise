@@ -284,11 +284,15 @@ fn recovery_preserves_filtering_and_can_build_an_attested_context() {
         vec!["a-live"]
     );
     assert_eq!(
-        recovered.authority.graph.state(&id("b-root")),
+        recovered.authority.projection().graph.state(&id("b-root")),
         Some(MemoryAssetState::Invalidated)
     );
     assert_eq!(
-        recovered.authority.graph.state(&id("c-derived")),
+        recovered
+            .authority
+            .projection()
+            .graph
+            .state(&id("c-derived")),
         Some(MemoryAssetState::Stale)
     );
     let context = assemble_governed_bootstrap_context(

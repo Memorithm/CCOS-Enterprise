@@ -56,11 +56,20 @@ pub fn assemble_governed_bootstrap_context(
     admitted: AdmittedGovernedRecall,
     budget: MemoryContextBudget,
 ) -> Result<GovernedMemoryContextAssembly, MemoryContextError> {
+    let fingerprint = projection_fingerprint(projection)
+        .map_err(|_| MemoryContextError::ProjectionBindingMismatch)?;
+    assemble_bound(projection, admitted, budget, fingerprint)
+}
+
+pub(crate) fn assemble_bound(
+    projection: &GovernedMemoryProjection,
+    admitted: AdmittedGovernedRecall,
+    budget: MemoryContextBudget,
+    fingerprint: [u8; 32],
+) -> Result<GovernedMemoryContextAssembly, MemoryContextError> {
     if admitted.tenant() != &projection.tenant
         || admitted.projection_version() != crate::GOVERNED_MEMORY_PROJECTION_VERSION
-        || projection_fingerprint(projection)
-            .map_err(|_| MemoryContextError::ProjectionBindingMismatch)?
-            != *admitted.projection_sha256()
+        || fingerprint != *admitted.projection_sha256()
     {
         return Err(MemoryContextError::ProjectionBindingMismatch);
     }

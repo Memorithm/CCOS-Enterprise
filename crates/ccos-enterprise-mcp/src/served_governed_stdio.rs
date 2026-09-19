@@ -7,9 +7,8 @@
 use super::*;
 use ccos_enterprise_mcp::GOVERNED_CONTEXT_TOOL;
 use ccos_enterprise_memory::{
-    assemble_governed_bootstrap_context, attest_governed_context, BudgetedMemoryRecall,
-    GovernedRecallTrustPolicy, MemoryContextBudget, MemoryRecallBudget, MemorySpace,
-    MemoryValidationState,
+    attest_governed_context, BudgetedMemoryRecall, GovernedRecallTrustPolicy, MemoryContextBudget,
+    MemoryRecallBudget, MemorySpace, MemoryValidationState,
 };
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 
@@ -224,8 +223,7 @@ impl Server {
             .ok_or_else(|| "admitted tenant is not canonical".to_string())?;
         let observations = store
             .recovered()
-            .recall(
-                authority,
+            .recall_current(
                 TenantScope::new(
                     tenant,
                     BudgetedMemoryRecall {
@@ -237,9 +235,10 @@ impl Server {
                 GovernedRecallTrustPolicy::VerifiedOnly,
             )
             .map_err(|error| error.to_string())?;
-        let assembly =
-            assemble_governed_bootstrap_context(authority, observations, parsed.context_budget)
-                .map_err(|error| error.to_string())?;
+        let assembly = store
+            .recovered()
+            .assemble_current(observations, parsed.context_budget)
+            .map_err(|error| error.to_string())?;
         let attestations = attest_governed_context(&assembly);
         if assembly.len() != attestations.len() {
             return Err("governed context attestation cardinality mismatch".into());

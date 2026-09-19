@@ -174,6 +174,21 @@ pub fn admit_governed_recall(
         });
     }
     let projection_sha256 = projection_fingerprint(gate.projection)?;
+    admit_bound(gate, observations, projection_sha256)
+}
+
+// Only the validating public path and the immutable snapshot may supply a digest.
+pub(crate) fn admit_bound(
+    gate: GovernedRecallGate<'_>,
+    observations: impl IntoIterator<Item = GovernedMemoryObservation>,
+    projection_sha256: [u8; 32],
+) -> Result<AdmittedGovernedRecall, GovernedRecallGateError> {
+    if gate.expected_tenant != &gate.projection.tenant {
+        return Err(GovernedRecallGateError::TenantMismatch {
+            expected: gate.expected_tenant.as_str().to_string(),
+            found: gate.projection.tenant.as_str().to_string(),
+        });
+    }
     let mut admitted = Vec::new();
     for observation in observations {
         let descriptor = gate

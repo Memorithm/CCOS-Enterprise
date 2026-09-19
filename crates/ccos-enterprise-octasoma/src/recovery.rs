@@ -10,10 +10,11 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use ccos_enterprise_memory::{
-    admit_governed_recall, encode_governed_memory_projection, AdmittedGovernedRecall,
-    BudgetedMemoryRecall, GovernedMemoryProjection, GovernedMemoryProjectionError,
-    GovernedRecallGate, GovernedRecallGateError, GovernedRecallTrustPolicy,
-    GovernedSemanticMemoryProviderExt, MemoryRecallBudgetError,
+    encode_governed_memory_projection, AdmittedGovernedRecall, BudgetedMemoryRecall,
+    GovernedMemoryContextAssembly, GovernedMemoryProjection, GovernedMemoryProjectionError,
+    GovernedMemorySnapshot, GovernedRecallGateError, GovernedRecallTrustPolicy,
+    GovernedSemanticMemoryProviderExt, MemoryContextBudget, MemoryContextError,
+    MemoryRecallBudgetError,
 };
 use ccos_enterprise_tenancy::TenantScope;
 use serde::{Deserialize, Serialize};
@@ -21,8 +22,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{EnterpriseMemoryError, EnterpriseOctaSoma, GovernedMemoryWrite, MemoryAssetId};
 
-pub const MAX_RECOVERY_IMAGE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_RECORDS: usize = 16_384;
+pub const MAX_RECOVERY_IMAGE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_RECORDS: usize = 131_072;
 const MAX_VECTOR_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROJECTOR_BYTES: usize = 32 * 1024 * 1024;
@@ -289,8 +290,7 @@ impl Write for LimitedOutput {
 /// than silently recalling under a newer invalidation/loadout/trust snapshot.
 pub struct RecoveredGovernedMemory {
     provider: EnterpriseOctaSoma,
-    authority: GovernedMemoryProjection,
-    canonical_governance: Vec<u8>,
+    authority: GovernedMemorySnapshot,
     digest: [u8; 32],
     records: Vec<RecoveryRecord>,
 }
@@ -303,7 +303,8 @@ impl RecoveredGovernedMemory {
 
     /// Count includes forgotten records, preserving append-only quota accounting.
     pub fn stored_records(&self) -> usize {
-        self.provider.tenant_len(&self.authority.tenant)
+        self.provider
+            .tenant_len(&self.authority.projection().tenant)
     }
 
     /// Exact validated source rows reconstructed from the immutable recovery image.
@@ -335,13 +336,31 @@ impl RecoveredGovernedMemory {
         request: TenantScope<BudgetedMemoryRecall<'_>>,
         policy: GovernedRecallTrustPolicy,
     ) -> Result<AdmittedGovernedRecall, RecoveryError> {
-        if request.tenant != self.authority.tenant || current.tenant != self.authority.tenant {
+        if request.tenant != self.authority.projection().tenant
+            || current.tenant != self.authority.projection().tenant
+        {
             return Err(RecoveryError::TenantMismatch);
         }
         let current_bytes =
             encode_governed_memory_projection(current).map_err(RecoveryError::Projection)?;
-        if current_bytes != self.canonical_governance {
+        if current_bytes != self.authority.canonical_bytes() {
             return Err(RecoveryError::GovernanceMismatch);
+        }
+        self.recall_current(request, policy)
+    }
+
+    /// Recall from this immutable selected generation, after request admission.
+    /// Authority cannot be changed through a borrowed owner. Reopening or advancing
+    /// constructs a new snapshot; a caller needing external-state comparison must
+    /// use `recall` instead. This method performs no authentication itself.
+    pub fn recall_current(
+        &self,
+        request: TenantScope<BudgetedMemoryRecall<'_>>,
+        policy: GovernedRecallTrustPolicy,
+    ) -> Result<AdmittedGovernedRecall, RecoveryError> {
+        let current = self.authority.projection();
+        if request.tenant != current.tenant {
+            return Err(RecoveryError::TenantMismatch);
         }
         for space in request.inner.loadout.spaces() {
             if !current
@@ -359,15 +378,18 @@ impl RecoveredGovernedMemory {
             .provider
             .recall_governed_bounded(request)
             .map_err(RecoveryError::Budget)?;
-        admit_governed_recall(
-            GovernedRecallGate {
-                expected_tenant: &request_tenant,
-                projection: current,
-                policy,
-            },
-            observations,
-        )
-        .map_err(RecoveryError::Admission)
+        self.authority
+            .admit(&request_tenant, policy, observations)
+            .map_err(RecoveryError::Admission)
+    }
+
+    /// Assemble an admitted batch against the same immutable recovery generation.
+    pub fn assemble_current(
+        &self,
+        admitted: AdmittedGovernedRecall,
+        budget: MemoryContextBudget,
+    ) -> Result<GovernedMemoryContextAssembly, MemoryContextError> {
+        self.authority.assemble(admitted, budget)
     }
 }
 
@@ -377,7 +399,7 @@ impl RecoveredGovernedMemory {
 /// not defaults extracted from the image. Complete input validation precedes
 /// provider construction; no partial provider is returned after a replay error.
 /// Read errors, missing bytes, unsupported versions and mismatched snapshots fail
-/// closed. At most 64 MiB + 1 byte is read; total reconstruction RAM is larger.
+/// closed. At most 256 MiB + 1 byte is read; total reconstruction RAM is larger.
 ///
 /// ```no_run
 /// # use ccos_enterprise_octasoma::recovery::{restore_governed_memory, RecoveryConfig};
@@ -469,8 +491,8 @@ pub fn restore_governed_memory(
     }
     Ok(RecoveredGovernedMemory {
         provider,
-        authority: authority.clone(),
-        canonical_governance,
+        authority: GovernedMemorySnapshot::new(authority.clone())
+            .map_err(RecoveryError::Projection)?,
         digest,
         records,
     })

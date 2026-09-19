@@ -10,7 +10,7 @@ use super::{
 ///
 /// This binds a recovery image to all lineage states, trust rows, loadout and
 /// tenant metadata, without treating a digest as authentication. Public fields
-/// are revalidated, and the existing 16 MiB wire limit is preserved. The byte
+/// are revalidated, and the existing 64 MiB wire limit is preserved. The byte
 /// limit is not a bound on all temporary validation allocations.
 ///
 /// ```no_run
@@ -29,7 +29,7 @@ pub fn encode_governed_memory_projection(
         .map_err(|error| projection_corrupt(&error.to_string()))?;
     if bytes.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
         return Err(projection_corrupt(
-            "projection exceeds the 16 MiB byte limit",
+            "projection exceeds the 64 MiB byte limit",
         ));
     }
     Ok(bytes)
@@ -40,14 +40,14 @@ pub fn encode_governed_memory_projection(
 ///
 /// This helper is intended for immutable generation artifacts. The expected
 /// tenant is independent caller input: bytes never select their own authority
-/// scope. The 16 MiB wire limit is checked before JSON decoding.
+/// scope. The 64 MiB wire limit is checked before JSON decoding.
 pub fn decode_governed_memory_projection(
     bytes: &[u8],
     expected_tenant: &TenantId,
 ) -> Result<GovernedMemoryProjection, GovernedMemoryProjectionError> {
     if bytes.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
         return Err(projection_corrupt(
-            "projection exceeds the 16 MiB byte limit",
+            "projection exceeds the 64 MiB byte limit",
         ));
     }
     let document: super::WireDocument =

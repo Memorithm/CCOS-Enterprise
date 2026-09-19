@@ -282,9 +282,9 @@ active_memory_campaign_2026_09_19:
   bound_context_pr_163_merge: 89a97f70804ff7ac39963b4cebb9c339865bdd48
   A09: merged_pr_165_measured_18_cases_90000_queries
   A10: merged_pr_166_governed_physical_purge_and_process_death_recovery
-  tenant_envelope_KMS: implementation_and_adversarial_recovery_qualification_in_progress
-  evidence_source_hash_resolution: pending
-  A06_measured_semantics: pending
+  tenant_envelope_KMS: merged_pr_167_encrypted_generations_and_governed_rotation
+  evidence_source_hash_resolution: pr_168_strict_citations_under_CI
+  A06_measured_semantics: pr_169_bounded_relation_observations_and_synthetic_measurement
   compact_embedding_model:
     status: evaluated_for_controlled_comparative_prototype_not_trained
     SciRust_reviewed_commit: 9b34f52df617b71b233d00017fdc0728504b6342
@@ -340,3 +340,24 @@ reviewed_physical_purge_slices:
       - no_forensic_secure_erase_or_power_cut_claim
       - ambiguous_MCP_Started_effect_still_requires_reconciliation
       - no_Core_changes_or_dependency_backflow
+
+reviewed_tenant_envelope_slices:
+  - id: TENANT_KMS_2026_09_19
+    status: merged
+    pr: 167
+    reviewed_commit: c28f4411bf1c283ef602c935db6a0da02ed0affa
+    merge_commit: 838199d59a2c044dcf9754262f15a928a0ce05fb
+    accepted_runs: [35438474186, 35438474179, 35438474204, 35438474160, 35438474172, 35438474167]
+    contract: docs/TENANT_ENVELOPE_KMS.md
+    delivers:
+      - tenant_and_artifact_bound_XChaCha20Poly1305_envelopes_with_random_per_artifact_DEKs
+      - Vault_Transit_HTTPS_adapter_with_explicit_tenant_key_versions_and_no_secret_defaults
+      - governed_memory_keys_rotate_with_independent_permission_and_Deployment_admit
+      - durable_rotation_intent_and_old_new_key_restart_recovery
+      - encrypted_purge_and_rotation_process_kill_tests_and_served_permission_recovery_tests
+      - Rustls_0_23_45_security_fix_and_exact_certificate_license_exception_with_notice
+    limits:
+      - Vault_protocol_fixture_not_a_production_Vault_or_hardware_KMS_qualification
+      - provider_root_only_source_stores_Core_workspaces_audit_journals_and_backups_are_separate
+      - no_FIPS_forensic_erasure_full_root_rollback_or_physical_power_cut_claim
+      - A09_plaintext_measurements_do_not_measure_KMS_overhead

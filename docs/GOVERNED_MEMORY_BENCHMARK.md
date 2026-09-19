@@ -63,3 +63,7 @@ The real MCP served context uses this same snapshot path after admission. The
 benchmark does not measure MCP framing, durable request journaling/settlement,
 text encoding, an LLM generator or answer quality. No component cost may be
 presented as full service latency.
+
+## Recorded campaign
+
+[2026-09-19 ARM campaign](benchmarks/governed-memory-20260919.md): all 18 cases passed, including 100k assets per tenant with four concurrent tenants. The report includes raw distributions, recovery equality and the exact measured code and binary hashes.

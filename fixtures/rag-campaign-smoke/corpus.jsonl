@@ -1,0 +1,6 @@
+{"content_sha256":"sha256:fa1f6c48ddd7ec9b1360b541d8724aab69039c93e65c5f6fd55a03c56d8717c2","id":"acme-paris","principals":["alice"],"state":"active","tenant":"acme","text":"Acme est situé à Paris."}
+{"content_sha256":"sha256:3dd5e3fc09dfb09645d96556fdce4bb036160ecb6ac495b228933078ecbb3095","id":"acme-api","principals":["alice"],"state":"active","tenant":"acme","text":"API depends on Database."}
+{"content_sha256":"sha256:709f4a0eb77232b093ab448eeb605e583a857443f16efc471d28c3620638ec25","id":"beta-lyon","principals":["bob"],"state":"active","tenant":"beta","text":"Beta est situé à Lyon."}
+{"content_sha256":"sha256:6d9c7edf652044901325e88ec3ec59dbe12f62454bc8a50459926a791ad9e4cd","id":"acme-old","principals":["alice"],"state":"deleted","tenant":"acme","text":"Ancien secret retiré."}
+{"content_sha256":"sha256:8c41d8db7197e24b53b3c692c988d6629771b241b2604f3339da8d4492c04242","id":"acme-private","principals":["operator"],"state":"active","tenant":"acme","text":"Document réservé aux opérateurs."}
+{"content_sha256":"sha256:a804c23ea51e4ede0ba2bd62af71e5a23b2bfb7ef025db50b7fe1c17115b751e","id":"acme-superseded","principals":["alice"],"state":"superseded","tenant":"acme","text":"Adresse ancienne : Lille."}

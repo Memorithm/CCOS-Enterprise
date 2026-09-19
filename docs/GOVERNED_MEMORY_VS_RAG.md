@@ -83,6 +83,13 @@ supporting citations, unsupported claims, abstentions and stale/deleted evidence
 alongside retrieval metrics and operational costs. Preserve all adverse results.
 See [the encoder decision](EMBEDDING_MODEL_DECISION.md).
 
+The [comparative campaign](RAG_COMPARATIVE_CAMPAIGN.md) now supplies an executable
+artifact contract and paired scorer for all five reference families, with strict
+input hashes, exact-source citations, policy failures and cluster uncertainty.
+Its committed smoke data is synthetic and contains no executed model results.
+The [A06 relation baseline](MEASURED_SEMANTIC_EXTRACTION.md) likewise reports its
+missed paraphrases and limited coverage without claiming general extraction quality.
+
 No completed end-to-end RAG superiority result is claimed here. A09 is a synthetic
 cost/recovery workload and excludes MCP transport, a text encoder and generation.
 Normal process restart is not forced power loss. Physical purge, tenant KMS,

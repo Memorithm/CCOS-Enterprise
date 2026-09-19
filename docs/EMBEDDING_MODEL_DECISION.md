@@ -80,3 +80,10 @@ The encoder may propose candidates only. It cannot promote trust, bypass
 
 Status: decision and evaluation design only. No newly trained model, measured
 quality gain, model artifact or completed comparative campaign is claimed.
+
+The [campaign contract and scorer](RAG_COMPARATIVE_CAMPAIGN.md) are now executable.
+They require the same encoder in each governed/dense/hybrid/reranked comparison
+and preserve negative results. The next evidence needed is an authorized,
+independently judged domain corpus and completed real-model runs. The existing
+[A06 rule baseline](MEASURED_SEMANTIC_EXTRACTION.md) has measured authored-fixture
+misses; it is not proof that a proprietary embedding model would fix them.

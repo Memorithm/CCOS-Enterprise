@@ -1,0 +1,26 @@
+name: Comparative RAG campaign contract
+on:
+  pull_request:
+    paths:
+      - 'scripts/evaluate-rag-campaign.py'
+      - 'scripts/test-rag-campaign.py'
+      - 'fixtures/rag-campaign-smoke/**'
+      - '.github/workflows/ci-rag-campaign.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  campaign:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/test-rag-campaign.py
+      - name: Reproduce synthetic protocol smoke (not system performance)
+        run: |
+          python3 scripts/evaluate-rag-campaign.py fixtures/rag-campaign-smoke/manifest.json > "$RUNNER_TEMP/rag-smoke-report.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rag-protocol-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/rag-smoke-report.json
+          if-no-files-found: error

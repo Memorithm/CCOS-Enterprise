@@ -132,8 +132,10 @@ physical intents rolls forward before serving. See the complete
 [purge contract](GOVERNED_PHYSICAL_PURGE.md), including real process-kill tests
 and the separate MCP settlement boundary.
 
-Tenant KMS, external monotonic rollback protection, backup-wide erasure and
-physical power-loss qualification remain separate work. Images are still
-plaintext. A09 measures the bounded synthetic pipeline and normal reconstruction;
+Explicitly encrypted roots use [tenant envelope KMS](TENANT_ENVELOPE_KMS.md)
+for images, governance, selector and purge metadata; plaintext roots remain an
+explicit separate mode. External monotonic rollback protection, backup-wide
+erasure and physical power-loss qualification remain separate work.
+A09 measures the bounded plaintext synthetic pipeline and normal reconstruction;
 it does not establish retrieval-quality superiority over RAG. No Core source
 change or Enterprise dependency backflow is introduced by these mechanisms.

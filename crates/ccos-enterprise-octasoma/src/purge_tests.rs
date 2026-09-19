@@ -226,7 +226,7 @@ fn altered_intent_never_returns_the_old_serving_owner() {
     let store = initialize(&dir.0);
     let mut prepared = store.prepare_purge(&tenant(), id("root")).unwrap();
     prepared.intent.next_digest = "0".repeat(64);
-    write_metadata(&dir.0, INTENT, &prepared.intent).unwrap();
+    write_metadata(&dir.0, INTENT, &prepared.intent, None).unwrap();
     drop(store);
     assert!(ProviderGenerationStore::open(&dir.0, tenant()).is_err());
     assert!(dir.0.join(INTENT).exists());

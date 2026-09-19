@@ -17,6 +17,9 @@
 mod execution;
 #[path = "../execution_backend.rs"]
 mod execution_backend;
+#[cfg(test)]
+#[path = "../kms_server_tests.rs"]
+mod kms_server_tests;
 #[path = "../served_governed_stdio.rs"]
 mod served_governed_stdio;
 #[path = "../served_governed_write.rs"]
@@ -86,6 +89,7 @@ struct Config {
     call_cost_tokens: u64,
     state_dir: PathBuf,
     governed_memory_root: Option<PathBuf>,
+    envelope: Option<std::sync::Arc<ccos_enterprise_envelope::EnvelopeCipher>>,
 }
 
 impl Config {
@@ -105,6 +109,17 @@ impl Config {
             }
             Some(value) => Some(PathBuf::from(value)),
         };
+        let envelope = std::env::var_os("CCOS_ENTERPRISE_ENVELOPE_CONFIG")
+            .map(|path| {
+                if governed_memory_root.is_none() || path.is_empty() {
+                    return Err("envelope config requires provider root".to_string());
+                }
+                let tenant_id = ccos_enterprise_tenancy::TenantId::validated(&tenant)
+                    .ok_or("invalid encrypted tenant")?;
+                ccos_enterprise_envelope::vault::from_config_file(tenant_id, &PathBuf::from(path))
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()?;
         Ok(Self {
             audience: required_env("CCOS_ENTERPRISE_AUDIENCE")?,
             issuer_kid: required_env("CCOS_ENTERPRISE_ISSUER_KID")?,
@@ -125,6 +140,7 @@ impl Config {
                 .unwrap_or(1),
             state_dir: PathBuf::from(required_env("CCOS_ENTERPRISE_STATE_DIR")?),
             governed_memory_root,
+            envelope,
         })
     }
 }
@@ -209,6 +225,8 @@ struct EffectRecord {
     governed_image_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     governed_purged_assets: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    governed_key_id: Option<String>,
 }
 
 impl EffectRecord {
@@ -242,6 +260,7 @@ impl EffectRecord {
             governed_asset_id: None,
             governed_image_sha256: None,
             governed_purged_assets: None,
+            governed_key_id: None,
         }
     }
 
@@ -922,17 +941,10 @@ impl Server {
         .map_err(|error| format!("cannot open Enterprise host-correlation journal: {error}"))?
         .journal;
 
-        let governed_memory = match &config.governed_memory_root {
-            Some(root) => Some(
-                ccos_enterprise_provider_adapter::generation::ProviderGenerationStore::open(
-                    root,
-                    ccos_enterprise_tenancy::TenantId::validated(&config.tenant).ok_or_else(
-                        || "configured tenant cannot select governed memory".to_string(),
-                    )?,
-                )
-                .map_err(|error| format!("cannot open governed provider generation: {error}"))?,
-            ),
-            None => None,
+        let governed_memory = if config.governed_memory_root.is_some() {
+            Some(open_governed_provider(&config)?)
+        } else {
+            None
         };
 
         Ok(Self {
@@ -1603,6 +1615,7 @@ impl Server {
         if [
             ccos_enterprise_mcp::GOVERNED_EVIDENCE_WRITE_TOOL,
             ccos_enterprise_mcp::GOVERNED_PURGE_TOOL,
+            ccos_enterprise_mcp::GOVERNED_KEY_ROTATE_TOOL,
         ]
         .contains(&request.tool.as_str())
             && self.governed_memory.is_some()
@@ -1880,6 +1893,16 @@ fn enterprise_specs(include_governed_context: bool) -> Result<Vec<Value>, (i64, 
             ));
         }
         governed.push(ccos_enterprise_mcp::governed_purge_tool_spec());
+        if governed.iter().any(|tool| {
+            tool.get("name").and_then(Value::as_str)
+                == Some(ccos_enterprise_mcp::GOVERNED_KEY_ROTATE_TOOL)
+        }) {
+            return Err((
+                -32000,
+                "Enterprise key rotation capability collides with catalogue".into(),
+            ));
+        }
+        governed.push(ccos_enterprise_mcp::governed_key_rotate_tool_spec());
     }
     governed.sort_by(|left, right| {
         left.get("name")
@@ -1930,13 +1953,37 @@ fn main() {
     }
 }
 
+fn open_governed_provider(
+    config: &Config,
+) -> Result<ccos_enterprise_provider_adapter::generation::ProviderGenerationStore, String> {
+    let root = config
+        .governed_memory_root
+        .as_ref()
+        .ok_or("governed provider root is not configured")?;
+    let tenant = ccos_enterprise_tenancy::TenantId::validated(&config.tenant)
+        .ok_or("invalid governed tenant")?;
+    let result = match &config.envelope {
+        Some(cipher) => {
+            ccos_enterprise_provider_adapter::generation::ProviderGenerationStore::open_encrypted(
+                root,
+                tenant,
+                std::sync::Arc::clone(cipher),
+            )
+        }
+        None => ccos_enterprise_provider_adapter::generation::ProviderGenerationStore::open(
+            root, tenant,
+        ),
+    };
+    result.map_err(|e| format!("cannot open governed provider generation: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ccos_enterprise_auth::{issue_identity_token, IdentityClaims, IDENTITY_TOKEN_VERSION};
     use ed25519_dalek::SigningKey;
 
-    fn test_config(label: &str) -> Config {
+    pub(super) fn test_config(label: &str) -> Config {
         let seed = [7u8; 32];
         let signing = SigningKey::from_bytes(&seed);
         let now = now().unwrap();
@@ -1964,10 +2011,17 @@ mod tests {
                 std::process::id()
             )),
             governed_memory_root: None,
+            envelope: None,
         }
     }
 
-    fn call(id: u64, actor: &str, request_id: &str, tool: &str, arguments: Value) -> Value {
+    pub(super) fn call(
+        id: u64,
+        actor: &str,
+        request_id: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Value {
         json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -2305,6 +2359,7 @@ mod tests {
                 governed_asset_id: None,
                 governed_image_sha256: None,
                 governed_purged_assets: None,
+                governed_key_id: None,
             };
             write_effect(&effect_path(&root), &effect).unwrap();
         }
@@ -2604,6 +2659,7 @@ mod tests {
                 governed_asset_id: None,
                 governed_image_sha256: None,
                 governed_purged_assets: None,
+                governed_key_id: None,
             };
             write_effect(&effect_path(&root), &effect).unwrap();
         }

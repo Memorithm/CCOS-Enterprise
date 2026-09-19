@@ -37,6 +37,9 @@ allow = [
 # them. This keeps an unrelated dependency from silently inheriting the same
 # licence exception.
 exceptions = [
+    # Mozilla root-certificate data used by Vault HTTPS. Exact reviewed package;
+    # ship docs/licenses/webpki-roots-1.0.9.txt with binary distributions.
+    { name = "webpki-roots", version = "=1.0.9", allow = ["CDLA-Permissive-2.0"] },
     { name = "ccos-core", allow = ["PolyForm-Noncommercial-1.0.0"] },
     { name = "ccos-memory-runtime", allow = ["PolyForm-Noncommercial-1.0.0"] },
     { name = "octasoma", allow = ["LicenseRef-CheckupAuto-Dual"] },

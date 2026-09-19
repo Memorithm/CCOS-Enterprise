@@ -122,7 +122,7 @@ impl ProviderGenerationStore {
             return Err(ProviderGenerationError::Invalid("stale purge preparation"));
         }
         reject_existing(&self.root.join(INTENT))?;
-        write_metadata(&self.root, INTENT, intent)?;
+        write_metadata(&self.root, INTENT, intent, self.cipher.as_deref())?;
         checkpoint(&self.root, "intent")?;
         self.publish_generation(&prepared.authority, self.config, &prepared.records)?;
         checkpoint(&self.root, "selector")?;
@@ -130,8 +130,9 @@ impl ProviderGenerationStore {
         let tenant = self.tenant.clone();
         let asset_id = MemoryAssetId::new(intent.root_asset.clone())
             .map_err(|_| ProviderGenerationError::Invalid("invalid purge asset"))?;
+        let cipher = self.cipher.clone();
         drop(self);
-        let next = Self::open(root, tenant)?;
+        let next = Self::open_with_cipher(root, tenant, cipher)?;
         let receipt = PurgeReceipt {
             generation: next.generation,
             asset_id,
@@ -179,7 +180,7 @@ impl ProviderGenerationStore {
             self.validate_floor(false)?;
             return Ok(self);
         }
-        let intent: PurgeIntent = read_metadata(&self.root.join(INTENT))?;
+        let intent: PurgeIntent = read_metadata(&self.root, INTENT, self.cipher.as_deref())?;
         if intent.version != 1
             || intent.tenant != self.tenant.as_str()
             || intent.base_generation.checked_add(1) != Some(intent.next_generation)
@@ -224,8 +225,9 @@ impl ProviderGenerationStore {
             self.publish_generation(&prepared.authority, self.config, &prepared.records)?;
             let root = self.root.clone();
             let tenant = self.tenant.clone();
+            let cipher = self.cipher.clone();
             drop(self);
-            return Self::open(root, tenant);
+            return Self::open_with_cipher(root, tenant, cipher);
         }
         if self.generation != intent.next_generation
             || hex_digest(self.recovered.digest()) != intent.next_digest
@@ -280,6 +282,7 @@ impl ProviderGenerationStore {
                 generation: self.generation,
                 purged: intent.purged,
             },
+            self.cipher.as_deref(),
         )?;
         checkpoint(&self.root, "floor")?;
         remove_regular_if_exists(&self.root.join(INTENT))?;
@@ -296,7 +299,7 @@ impl ProviderGenerationStore {
             }
             return Ok(());
         }
-        let floor: PurgeFloor = read_metadata(&self.root.join(FLOOR))?;
+        let floor: PurgeFloor = read_metadata(&self.root, FLOOR, self.cipher.as_deref())?;
         if floor.version != 1
             || floor.tenant != self.tenant.as_str()
             || floor.generation > self.generation
@@ -313,7 +316,7 @@ impl ProviderGenerationStore {
     }
 }
 
-fn canonical_generation_name(name: &str, governance: bool) -> bool {
+pub(super) fn canonical_generation_name(name: &str, governance: bool) -> bool {
     let suffix = if governance {
         ".governance.json"
     } else {
@@ -345,13 +348,11 @@ fn remove_regular_if_exists(path: &Path) -> Result<(), ProviderGenerationError> 
 }
 
 fn read_metadata<T: serde::de::DeserializeOwned>(
-    path: &Path,
+    root: &Path,
+    name: &str,
+    cipher: Option<&EnvelopeCipher>,
 ) -> Result<T, ProviderGenerationError> {
-    let bytes = read_bounded_file(
-        path,
-        MAX_PURGE_METADATA,
-        "purge metadata exceeds byte limit",
-    )?;
+    let bytes = read_artifact(root, cipher, &root.join(name), MAX_PURGE_METADATA)?;
     serde_json::from_slice(&bytes).map_err(ProviderGenerationError::Json)
 }
 
@@ -359,6 +360,7 @@ fn write_metadata(
     root: &Path,
     name: &str,
     value: &impl Serialize,
+    cipher: Option<&EnvelopeCipher>,
 ) -> Result<(), ProviderGenerationError> {
     let bytes = serde_json::to_vec(value).map_err(ProviderGenerationError::Json)?;
     if bytes.len() > MAX_PURGE_METADATA {
@@ -368,6 +370,7 @@ fn write_metadata(
     }
     let target = root.join(name);
     regular_file_exists(&target)?;
+    let bytes = encode_artifact(root, cipher, &target, &bytes, MAX_PURGE_METADATA)?;
     let temp = TemporarySelector(root.join(format!(
         ".{name}-{}-{}.tmp",
         std::process::id(),

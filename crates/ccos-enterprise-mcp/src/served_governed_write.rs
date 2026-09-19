@@ -7,14 +7,16 @@
 //! converted to a retryable tool failure.
 
 use super::*;
-use ccos_enterprise_mcp::{GOVERNED_EVIDENCE_WRITE_TOOL, GOVERNED_PURGE_TOOL};
+use ccos_enterprise_mcp::{
+    GOVERNED_EVIDENCE_WRITE_TOOL, GOVERNED_KEY_ROTATE_TOOL, GOVERNED_PURGE_TOOL,
+};
 use ccos_enterprise_memory::{MemoryAssetId, MemoryEvidenceRef};
 use ccos_enterprise_provider_adapter::accepted_write::PreparedEvidenceGeneration;
 use ccos_enterprise_provider_adapter::accepted_write::{
     AcceptedEvidenceWrite, EvidenceGenerationReceipt,
 };
 use ccos_enterprise_provider_adapter::generation::{
-    PreparedPurge, ProviderGenerationStore, PurgeReceipt,
+    EncryptionRotationReceipt, PreparedPurge, ProviderGenerationStore, PurgeReceipt,
 };
 use ccos_enterprise_tenancy::TenantId;
 
@@ -25,16 +27,19 @@ struct GovernedEvidenceArguments {
 enum MutationArguments {
     Evidence(AcceptedEvidenceWrite),
     Purge(MemoryAssetId),
+    Rotate,
 }
 enum PreparedMutation {
     Evidence(PreparedEvidenceGeneration),
     Purge(PreparedPurge),
+    Rotate(TenantId),
 }
 struct MutationReceipt {
     generation: u64,
-    asset_id: MemoryAssetId,
+    asset_id: Option<MemoryAssetId>,
     image_digest: [u8; 32],
     purged_assets: Option<usize>,
+    key_id: Option<String>,
     value: Value,
 }
 
@@ -45,6 +50,13 @@ impl MutationArguments {
         tenant: &str,
     ) -> Result<PreparedMutation, String> {
         match self {
+            Self::Rotate => {
+                let tenant = TenantId::validated(tenant).ok_or("invalid admitted tenant")?;
+                if &tenant != store.tenant() || store.encryption_key_id().is_none() {
+                    return Err("tenant encryption is not configured".into());
+                }
+                Ok(PreparedMutation::Rotate(tenant))
+            }
             Self::Evidence(write) => {
                 if write.embedding.len() != store.config().dimension {
                     return Err(format!(
@@ -75,6 +87,25 @@ impl PreparedMutation {
         store: ProviderGenerationStore,
     ) -> Result<(ProviderGenerationStore, MutationReceipt), String> {
         match self {
+            Self::Rotate(tenant) => {
+                let (next, receipt) = store
+                    .rotate_encryption(&tenant)
+                    .map_err(|e| e.to_string())?;
+                let value = json!({"content":[{"type":"text","text":"Tenant provider key rotation completed"}],
+                    "structuredContent":{"tool":GOVERNED_KEY_ROTATE_TOOL,"generation":receipt.generation,
+                        "key_id":receipt.key_id,"provider_image_sha256":hex_digest(receipt.image_digest)}});
+                Ok((
+                    next,
+                    MutationReceipt {
+                        generation: receipt.generation,
+                        asset_id: None,
+                        image_digest: receipt.image_digest,
+                        purged_assets: None,
+                        key_id: Some(receipt.key_id),
+                        value,
+                    },
+                ))
+            }
             Self::Evidence(prepared) => {
                 let (next, receipt) = store
                     .commit_prepared_evidence(prepared)
@@ -84,9 +115,10 @@ impl PreparedMutation {
                     next,
                     MutationReceipt {
                         generation: receipt.generation,
-                        asset_id: receipt.asset_id,
+                        asset_id: Some(receipt.asset_id),
                         image_digest: receipt.image_digest,
                         purged_assets: None,
+                        key_id: None,
                         value,
                     },
                 ))
@@ -105,9 +137,10 @@ impl PreparedMutation {
                     next,
                     MutationReceipt {
                         generation: receipt.generation,
-                        asset_id: receipt.asset_id,
+                        asset_id: Some(receipt.asset_id),
                         image_digest: receipt.image_digest,
                         purged_assets: Some(receipt.purged_assets),
+                        key_id: None,
                         value,
                     },
                 ))
@@ -124,7 +157,12 @@ impl Server {
         meta: &Meta,
         arguments: &Value,
     ) -> Result<Value, (i64, String)> {
-        let parsed = if request.tool == GOVERNED_PURGE_TOOL {
+        let parsed = if request.tool == GOVERNED_KEY_ROTATE_TOOL {
+            if !arguments.as_object().is_some_and(|o| o.is_empty()) {
+                return Err((-32602, "key rotation accepts an empty object".into()));
+            }
+            MutationArguments::Rotate
+        } else if request.tool == GOVERNED_PURGE_TOOL {
             let object = arguments
                 .as_object()
                 .ok_or_else(|| (-32602, "purge arguments must be an object".into()))?;
@@ -258,9 +296,10 @@ impl Server {
                 effect.state = EffectState::Succeeded;
                 effect.output_sha256 = Some(output_sha256.clone());
                 effect.governed_generation = Some(receipt.generation);
-                effect.governed_asset_id = Some(receipt.asset_id.as_str().to_string());
+                effect.governed_asset_id = receipt.asset_id.map(|id| id.as_str().to_string());
                 effect.governed_image_sha256 = Some(hex_digest(receipt.image_digest));
                 effect.governed_purged_assets = receipt.purged_assets;
+                effect.governed_key_id = receipt.key_id;
                 if let Err(error) = write_effect(&effect_path(&self.config.state_dir), &effect) {
                     self.poisoned = Some(error.clone());
                     return Err((
@@ -372,7 +411,12 @@ pub(super) fn validate_recovered_evidence_effect(
     config: &Config,
     effect: &EffectRecord,
 ) -> Result<(), String> {
-    if ![GOVERNED_EVIDENCE_WRITE_TOOL, GOVERNED_PURGE_TOOL].contains(&effect.tool.as_str())
+    if ![
+        GOVERNED_EVIDENCE_WRITE_TOOL,
+        GOVERNED_PURGE_TOOL,
+        GOVERNED_KEY_ROTATE_TOOL,
+    ]
+    .contains(&effect.tool.as_str())
         || effect.state != EffectState::Succeeded
     {
         return Ok(());
@@ -380,6 +424,30 @@ pub(super) fn validate_recovered_evidence_effect(
     let generation = effect
         .governed_generation
         .ok_or_else(|| "governed evidence effect is missing generation receipt".to_string())?;
+    let digest = parse_digest(
+        effect
+            .governed_image_sha256
+            .as_deref()
+            .ok_or_else(|| "governed evidence effect is missing provider digest".to_string())?,
+    )?;
+    let store = open_governed_provider(config)?;
+    if effect.tool == GOVERNED_KEY_ROTATE_TOOL {
+        let receipt = EncryptionRotationReceipt {
+            generation,
+            image_digest: digest,
+            key_id: effect
+                .governed_key_id
+                .clone()
+                .ok_or("key rotation effect is missing key receipt")?,
+        };
+        if !store
+            .matches_encryption_receipt(&receipt)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("key rotation effect does not match encrypted artifacts".into());
+        }
+        return Ok(());
+    }
     let asset = MemoryAssetId::new(
         effect
             .governed_asset_id
@@ -387,21 +455,6 @@ pub(super) fn validate_recovered_evidence_effect(
             .ok_or_else(|| "governed evidence effect is missing asset receipt".to_string())?,
     )
     .map_err(|error| format!("invalid governed evidence effect asset: {error}"))?;
-    let digest = parse_digest(
-        effect
-            .governed_image_sha256
-            .as_deref()
-            .ok_or_else(|| "governed evidence effect is missing provider digest".to_string())?,
-    )?;
-    let root = config
-        .governed_memory_root
-        .as_ref()
-        .ok_or_else(|| "governed evidence effect requires configured provider root".to_string())?;
-    let tenant = TenantId::validated(&config.tenant)
-        .ok_or_else(|| "configured tenant cannot validate governed evidence receipt".to_string())?;
-    let store =
-        ccos_enterprise_provider_adapter::generation::ProviderGenerationStore::open(root, tenant)
-            .map_err(|error| format!("cannot reopen governed evidence generation: {error}"))?;
     let matches = if effect.tool == GOVERNED_PURGE_TOOL {
         store.matches_purge_receipt(&PurgeReceipt {
             generation,

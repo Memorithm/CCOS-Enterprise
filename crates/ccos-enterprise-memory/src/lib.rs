@@ -41,6 +41,9 @@ pub use governed_recall_budget::GovernedSemanticMemoryProviderExt;
 mod governed_context;
 pub use governed_context::{assemble_governed_bootstrap_context, GovernedMemoryContextAssembly};
 
+mod snapshot;
+pub use snapshot::GovernedMemorySnapshot;
+
 mod governed_provider;
 pub use governed_provider::{
     GovernedMemoryObservation, GovernedMemoryWrite, GovernedSemanticMemoryProvider,

@@ -82,10 +82,10 @@ Selector temporary files are created exclusively. Normal Unix rename semantics
 provide one local pointer switch; an unsupported platform replacement failure
 leaves the old selector in place and fails closed.
 
-Restore reads at most 64 MiB + 1 byte and rejects oversized input. Limits also
-cover 16,384 records/capacity, dimension 8,192, SimHash width 4,096, 32 MiB of
+Restore reads at most 256 MiB + 1 byte and rejects oversized input. Limits also
+cover 131,072 records/capacity, dimension 8,192, SimHash width 4,096, 32 MiB of
 projector coefficients, 32 MiB of raw vectors and 16 MiB of payloads. Canonical
-governance retains its existing 16 MiB wire bound. Archive input and selectors
+governance retains its 64 MiB wire bound. Archive input and selectors
 use deny-unknown-fields decoding; malformed shapes, duplicate keys, unknown
 assets, incomplete populations, nonfinite vectors, invalid digests and
 unsupported revisions fail closed.

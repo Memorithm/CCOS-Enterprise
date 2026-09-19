@@ -1,84 +1,73 @@
 # Governed memory and retrieval-augmented generation
 
-Retrieval and governance answer different questions. A retrieval score orders
-candidates; it does not establish their authorization, provenance, validity or
-truth. CCOS combines retrieval with explicit governance checks. This is a
-composition contract, not evidence that CCOS outperforms modern RAG systems.
-Other retrieval systems must not be assumed to lack access control, persistence,
-provenance or temporal filtering merely because they use RAG.
+Status reconciled with merged PRs #152–#163 and the A09 workload, 2026-09-19.
+The objective is measurable improvement over strong RAG reference systems.
+Similarity orders candidates; it does not establish authorization, provenance,
+validity or truth. RAG reference systems may themselves implement governance.
 
-## Implemented library composition
+## Implemented served path
 
-`assemble_served_governed_context` composes the following library operations:
+The actual stdio server exposes `memory.context` and `memory.evidence.write`
+through authenticated `Deployment::admit`, quota/audit and the existing durable
+execution/effect/settlement lifecycle. #135 and #136 are closed; they no longer
+describe missing server wiring. Writes fix tenant space, Evidence stratum and
+Unverified trust server-side. They cannot choose their own authority or promote
+themselves into the default VerifiedOnly served context.
 
-1. narrow an explicit `MemoryLoadoutPlan` to bootstrap-enabled spaces;
-2. request bounded, tenant-scoped provider recall;
-3. check asset identity, memory space, active lineage and the selected trust policy;
-4. assemble an item- and payload-byte-bounded context.
+`ProviderGenerationStore` owns the cooperating-writer lock and selects immutable
+provider and governance artifacts through one selector published last. Startup
+validates the selected generation and reconstructs OctaSoma through the governed
+adapter. Succeeded write receipts are checked before settlement; an ambiguous
+Started write is refused on restart. See the
+[recovery contract](GOVERNED_PROVIDER_RECOVERY_CONTRACT.md).
 
-`assemble_attested_served_context` additionally attaches categorical eligibility
-metadata using a `GovernedMemoryProjection`. Attestation rechecks the exact space
-as well as identity, active lineage and recall-eligible trust. Its output includes
-parent identities and evidence references. A missing join fails closed.
+PR #163 replaced raw governed-context assembly with opaque admitted observations.
+They bind the expected tenant, canonical projection version and SHA-256, exact
+payload SHA-256, asset, space, lineage and trust eligibility. Assembly rejects a
+different projection. The A09 immutable snapshot caches validated canonical bytes
+and their fingerprint within an owned, non-mutable generation; asset eligibility
+and payload checks still run on each query. APIs taking an independently supplied
+mutable projection continue to validate and fingerprint it on each call.
 
-These are library seams. They do not perform authentication or
-`Deployment::admit` themselves. The stdio server is not made operationally
-complete merely by exporting these functions. Issue #135 tracks actual server
-wiring and protocol/restart conformance. Issue #136 tracks the governance
-projection prerequisite.
+## Authority and remaining provenance boundary
 
-## Projection guarantees and operating assumptions
+Attestation reports what was admitted and under which snapshot. Its hash is not a
+signature, a proof that a statement is true, or proof that a MemoryEvidenceRef
+resolves to an EvidenceRecord and an immutable SourceRecord. The evidence/source
+join and content-hash/citation validation require their own qualified resolver.
+The categorical Verified label is not a universal truth certificate.
 
-`save_governed_memory_projection` validates the entire projection before writing.
-It writes an exclusively created temporary file, syncs its contents, replaces the
-fixed destination filename, and propagates parent-directory synchronization
-errors. A failure after replacement means publication may already be visible:
-callers must reload or stop, not assume rollback. Unix temporary files are created
-with mode `0600`.
+The served authority is owned by a generation store, not supplied by the calling
+agent. Low-level projection save/load helpers remain available for explicitly
+controlled import/inspection; they are not an alternate authorization front door.
+Tenant IDs and reference labels are opaque data rather than arbitrary paths.
 
-The encoded projection contains tenant, asset descriptors, explicit lineage
-states, trust metadata and loadout bindings. It contains no embeddings or provider
-index. Restore uses validating constructors and requires exactly one state for
-every asset. Duplicate/unknown states and active children of inactive parents are
-rejected. Unknown wire fields and duplicate lineage references are refused.
-The encoded file has a 16 MiB limit; loading reads at most that limit plus one byte
-before rejecting oversized input. This bounds the input bytes, not the total
-allocation or CPU cost of reconstruction.
+## Scale and resource accounting
 
-Served callers must load with `Some(expected_tenant)`. `None` is only suitable for
-inspection/import before selecting a tenant. The destination directory must be
-controlled by the deployment. Governance writers must be serialized externally:
-atomic replacement is not a multi-writer transaction, an authenticated journal,
-or protection against rollback to an older valid snapshot. A missing projection
-must not silently create authority state for a served request.
+A09 provides a reproducible subprocess workload for 1k/10k/100k assets per tenant,
+one and four concurrent tenants, signed identity admission, governed recall,
+context assembly and attestation. It records raw latencies, empirical p50/p95/p99,
+per-tenant and aggregate throughput, process RSS/high-water RSS, generation bytes
+and fresh-process recovery equality. See [A09](GOVERNED_MEMORY_BENCHMARK.md).
 
-Memory-space labels, asset IDs and evidence references retain their existing
-opaque-data contracts. They are not filesystem paths; the projection uses fixed
-filenames and JSON encoding instead of joining those values to a root. Tenant
-path validation remains a separate tenancy boundary.
+Hard maxima are 64 MiB per governance projection and 256 MiB per provider image,
+with bounded records, raw vector bytes and payload bytes. These are input limits,
+not a peak-RAM or latency guarantee. Tenant capacity is still explicitly configured.
+The scale workload uses synthetic 32-dimensional vectors and 64-byte payloads;
+it cannot establish quality, capacity for larger embedding models, or production
+SLOs. Prompt framing, tokenizer version and output reserves need separate budgets.
 
-## What is not established
+## Fair comparison and claim boundaries
 
-An attestation is not an unforgeable admission token. It does not bind the returned
-payload cryptographically to its evidence, authenticate a snapshot version, prove
-that a reference resolves, or guarantee a generated answer is true. `Verified` is
-a categorical asset state under a policy, not a universal truth certificate.
-The public raw-observation assembly API remains available. A future sealed
-admission result should bind tenant, space, asset, content digest and snapshot
-generation before entering a served response.
+Use the same corpus/version, queries, held-out judgments, generator, access rights,
+context/token budgets and hardware. Include lexical, dense, hybrid and reranked
+systems; swap the same encoder into both CCOS and RAG arms. Record answers with
+supporting citations, unsupported claims, abstentions and stale/deleted evidence
+alongside retrieval metrics and operational costs. Preserve all adverse results.
+See [the encoder decision](EMBEDDING_MODEL_DECISION.md).
 
-Item/payload-byte limits are not exact model-token limits. Final prompt framing,
-metadata, tokenizer version and output reserves require separate accounting.
-A reconstruction test or injected I/O failure is not a physical power-cut test.
-No physical purge, encryption of this JSON file, distributed consistency, measured
-latency target or end-to-end RAG superiority is claimed by this slice.
-
-## Evidence required to close the vertical slice
-
-Exercise the real binary through its authenticated MCP protocol: authorized
-write/import, durable projection and provider reconstruction, admitted recall,
-sourced response, invalidation, restart and replay. Negative cases must cover
-cross-tenant and cross-space access, missing trust, stale/invalidated assets,
-quarantine, corrupted state and uncertain publication. Compare quality only with
-shared generators, equivalent rights and budgets, versioned data and held-out
-evaluation; retain unfavorable results as well as favorable ones.
+No completed end-to-end RAG superiority result is claimed here. A09 is a synthetic
+cost/recovery workload and excludes MCP transport, a text encoder and generation.
+Normal process restart is not forced power loss. Physical purge, tenant KMS,
+anti-rollback and distributed consistency must be assessed against their own
+implemented contracts and tests; they do not follow from a selector or checksum.

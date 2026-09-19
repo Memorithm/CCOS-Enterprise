@@ -68,8 +68,10 @@ Use one directory per immutable campaign; all paths must resolve inside it.
    from summed latency, peak RSS and restart time. Interleave randomized arm
    order and repeat trials; use separate manifests per repetition/checkpoint.
 6. Blind and randomize answer presentation for independent adjudication. Store
-   total/supported claims, answer correctness, adjudicator ID and rubric hash in
-   a separate frozen JSONL file. Integrity of a quote does not judge entailment
+   total/supported claims, answer correctness, adjudicator ID, rubric hash and
+   `result_sha256` in a separate frozen JSONL file. Capture this result binding
+   **when the reviewer receives the output**, preserving it with that review.
+   Integrity of a quote does not judge entailment
    or answer correctness. Audit disagreements and retain adverse cases.
 
 The runtime protocol digest binds inputs and common execution settings; answer
@@ -78,6 +80,30 @@ bytes, not an authenticated runner. Runner latency/RSS/token counts, blinded
 review declarations and training provenance require independent operational
 verification. This preparation does not silently launch paid model jobs or
 download restricted datasets.
+
+### Schema 2: bind each judgment to the result actually reviewed
+
+An `(arm_id, query_id)` join alone permits a substituted answer to inherit an old
+favorable review, even when the result artifact's file hash is updated correctly.
+Each judgment now requires `result_sha256`, calculated as SHA-256 of the UTF-8
+canonical JSON object `{"arm_id": arm_id, "result": complete_result_row}`. Use
+`judgment_result_hash()` in the evaluator: sorted object keys, compact separators,
+unescaped Unicode, no non-finite numbers, no trailing newline. Array order and
+all row fields are significant, including query ID, protocol hash, answer,
+citations, context, ranking, runtime outcome and measured costs.
+
+The review export must retain the hash captured at review time. Do not recompute
+old review hashes against replacement results merely to make validation pass.
+Changed results require a new review; JSON whitespace/key-order changes alone do
+not. The scorer checks every binding before scoring that arm. A missing or stale
+binding refuses the entire campaign, with no partial report. It does not repair
+bindings or relabel results automatically.
+
+Schema 1 is refused. For existing campaigns, recover the exact reviewed outputs
+and their review records, verify their correspondence, then export schema 2;
+otherwise repeat adjudication. The synthetic fixture was explicitly re-bound as
+test data. These hashes prevent unnoticed mismatch, not coordinated falsification
+of both results and reviews; they are not signatures or proof of honest review.
 
 ## Run and inspect
 

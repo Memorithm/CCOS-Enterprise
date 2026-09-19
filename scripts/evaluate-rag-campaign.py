@@ -56,6 +56,11 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
+def judgment_result_hash(arm_id, row):
+    """Bind review to one arm's complete output, including its frozen protocol."""
+    return sha(canonical({"arm_id": arm_id, "result": row}))
+
+
 def unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -216,7 +221,7 @@ def evaluate(path):
     manifest_bytes = bounded_read(path, 2 * 1024 * 1024)
     manifest = decode(manifest_bytes)
     fields(manifest, "schema_version scope protocol corpus queries qrels judgments arms comparisons dataset_provenance")
-    require(type(manifest["schema_version"]) is int and manifest["schema_version"] == 1 and manifest["scope"] in ("synthetic_smoke", "held_out"), "unsupported campaign")
+    require(type(manifest["schema_version"]) is int and manifest["schema_version"] == 2 and manifest["scope"] in ("synthetic_smoke", "held_out"), "unsupported campaign (requires schema 2 with result-bound judgments)")
     provenance = manifest["dataset_provenance"]
     fields(provenance, "origin license split_author training_overlap_audit_sha256")
     for key in ("origin", "license", "split_author"):
@@ -275,9 +280,10 @@ def evaluate(path):
     require({a["family"] for a in arms.values()} == {"governed_memory", "lexical", "dense", "hybrid", "reranked"}, "all five reference families are required")
     judgments = {}
     for judgment in artifact(root, manifest["judgments"]):
-        fields(judgment, "arm_id query_id total_claims supported_claims answer_correct adjudicator blinded rubric_sha256")
+        fields(judgment, "arm_id query_id result_sha256 total_claims supported_claims answer_correct adjudicator blinded rubric_sha256")
         key = (judgment["arm_id"], judgment["query_id"])
         require(key[0] in arms and key[1] in queries and key not in judgments, "invalid/duplicate answer judgment")
+        valid_hash(judgment["result_sha256"])
         integer(judgment["supported_claims"], 0, integer(judgment["total_claims"], 0, 10000))
         require(type(judgment["answer_correct"]) is bool and judgment["blinded"] is True
                 and judgment["rubric_sha256"] == protocol["rubric_sha256"], "invalid adjudication protocol")
@@ -311,6 +317,9 @@ def evaluate(path):
         integer(measure["peak_rss_bytes"], 1)
         rows = index(artifact(root, arm["results"]), "query_id")
         require(set(rows) == set(queries), "missing/extra query output")
+        for qid, row in rows.items():
+            require(judgments[(aid, qid)]["result_sha256"] == judgment_result_hash(aid, row),
+                    "judgment result hash mismatch: " + aid + "/" + qid)
         evaluated = {qid: evaluate_row(rows[qid], queries[qid], docs, qrels, judgments[(aid, qid)], protocol, protocol_hash) for qid in sorted(queries)}
         summary = {key: mean([r[key] for r in evaluated.values()]) for key in metrics}
         summary.update({key: sum(r[key] for r in evaluated.values()) for key in counts})
@@ -333,7 +342,7 @@ def evaluate(path):
     for aid, arm in arms.items():
         if arm["family"] == "governed_memory":
             require({arms[b]["family"] for a, b in pairs if a == aid} == {"lexical", "dense", "hybrid", "reranked"}, "missing governed/reference comparison")
-    return {"schema_version": 1, "scope": manifest["scope"], "manifest_sha256": sha(manifest_bytes),
+    return {"schema_version": 2, "scope": manifest["scope"], "manifest_sha256": sha(manifest_bytes),
             "evaluator_sha256": sha(Path(__file__).read_bytes()), "protocol_sha256": protocol_hash,
             "protocol": protocol, "dataset_provenance": provenance, "query_count": len(queries), "source_count": len(docs),
             "superiority_claim": False, "arms": results, "comparisons": comparisons}

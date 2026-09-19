@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -38,6 +39,17 @@ class CampaignTests(unittest.TestCase):
         (self.root / spec["path"]).write_bytes(data)
         spec["sha256"] = CAMPAIGN.sha(data)
 
+    def replace_and_rejudge(self, spec, rows):
+        """Only metric tests manufacture new synthetic reviews for changed outputs."""
+        self.replace(spec, rows)
+        aid = next(a["id"] for a in self.manifest["arms"] if a["results"] is spec)
+        judgments = self.rows(self.manifest["judgments"])
+        by_query = {r["query_id"]: r for r in rows}
+        for judgment in judgments:
+            if judgment["arm_id"] == aid:
+                judgment["result_sha256"] = CAMPAIGN.judgment_result_hash(aid, by_query[judgment["query_id"]])
+        self.replace(self.manifest["judgments"], judgments)
+
     def test_frozen_report_is_deterministic_and_makes_no_superiority_claim(self):
         first = self.evaluate()
         self.assertEqual(first, self.evaluate())
@@ -56,6 +68,75 @@ class CampaignTests(unittest.TestCase):
         with self.assertRaises(CAMPAIGN.InvalidCampaign):
             CAMPAIGN.decode('{"x":NaN}')
 
+    def test_changed_answer_cannot_reuse_a_favorable_judgment(self):
+        spec = self.manifest["arms"][0]["results"]
+        rows = self.rows(spec)
+        rows[0]["answer"]["text"] = "An unrelated invented answer."
+        self.replace(spec, rows)
+        with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "judgment result hash mismatch"):
+            self.evaluate()
+
+    def test_every_part_of_the_reviewed_result_is_bound(self):
+        mutations = [
+            lambda r: r.update(context_doc_ids=[]),
+            lambda r: r.update(ranking=list(reversed(r["ranking"])) + ["acme-api"]),
+            lambda r: r["answer"].update(citations=[]),
+            lambda r: r["answer"]["citations"][0].update(end=1),
+            lambda r: r.update(status="error"),
+            lambda r: r.update(latency_ms=r["latency_ms"] + 1),
+            lambda r: r.update(protocol_sha256=CAMPAIGN.sha(b"other protocol")),
+        ]
+        spec = self.manifest["arms"][0]["results"]
+        original = self.rows(spec)
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                rows = json.loads(json.dumps(original))
+                mutate(rows[0])
+                self.replace(spec, rows)
+                with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "judgment result hash mismatch"):
+                    self.evaluate()
+
+    def test_identical_outputs_from_different_arms_do_not_share_review_receipts(self):
+        judgments = self.rows(self.manifest["judgments"])
+        a = next(j for j in judgments if j["arm_id"] == "ccos" and j["query_id"] == "q-fr")
+        b = next(j for j in judgments if j["arm_id"] == "dense" and j["query_id"] == "q-fr")
+        self.assertNotEqual(a["result_sha256"], b["result_sha256"])
+        a["result_sha256"] = b["result_sha256"]
+        self.replace(self.manifest["judgments"], judgments)
+        with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "judgment result hash mismatch"):
+            self.evaluate()
+
+    def test_legacy_and_missing_review_bindings_are_refused(self):
+        self.manifest["schema_version"] = 1
+        with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "requires schema 2"):
+            self.evaluate()
+        self.manifest["schema_version"] = 2
+        judgments = self.rows(self.manifest["judgments"])
+        del judgments[0]["result_sha256"]
+        self.replace(self.manifest["judgments"], judgments)
+        with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "unexpected/missing fields"):
+            self.evaluate()
+
+    def test_json_formatting_does_not_change_reviewed_content(self):
+        spec = self.manifest["arms"][0]["results"]
+        rows = self.rows(spec)
+        raw = b"".join(json.dumps(dict(reversed(list(r.items()))), ensure_ascii=True).encode() + b"\n" for r in rows)
+        (self.root / spec["path"]).write_bytes(raw)
+        spec["sha256"] = CAMPAIGN.sha(raw)
+        self.assertEqual(self.evaluate()["arms"]["ccos"]["summary"]["task_success"], 1)
+
+    def test_cli_refuses_stale_review_without_emitting_a_partial_report(self):
+        spec = self.manifest["arms"][0]["results"]
+        rows = self.rows(spec)
+        rows[0]["answer"]["text"] = "Unreviewed replacement."
+        self.replace(spec, rows)
+        self.path.write_text(json.dumps(self.manifest))
+        result = subprocess.run([sys.executable, str(Path(CAMPAIGN.__file__)), str(self.path)],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("judgment result hash mismatch", result.stderr)
+
     def test_missing_query_and_duplicate_rank_are_rejected(self):
         spec = self.manifest["arms"][0]["results"]
         rows = self.rows(spec)
@@ -63,7 +144,7 @@ class CampaignTests(unittest.TestCase):
         with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "missing/extra query"):
             self.evaluate()
         rows[0]["ranking"] *= 2
-        self.replace(spec, rows)
+        self.replace_and_rejudge(spec, rows)
         with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "duplicate ranking"):
             self.evaluate()
 
@@ -74,7 +155,7 @@ class CampaignTests(unittest.TestCase):
         rows[0]["context_doc_ids"] += ["beta-lyon", "acme-old"]
         rows[0]["context_tokens"] = 129
         rows[0]["answer"]["citations"][0]["quote_sha256"] = CAMPAIGN.sha(b"invented quote")
-        self.replace(spec, rows)
+        self.replace_and_rejudge(spec, rows)
         report = self.evaluate()
         adverse = report["arms"]["ccos"]["rows"]["q-fr"]
         for key in ("rights_violations", "stale_returns", "budget_violations", "citation_violations"):
@@ -89,7 +170,7 @@ class CampaignTests(unittest.TestCase):
         rows = self.rows(spec)
         foreign = rows[2]["answer"]["citations"][0]
         rows[0]["answer"]["citations"] = [foreign]
-        self.replace(spec, rows)
+        self.replace_and_rejudge(spec, rows)
         row = self.evaluate()["arms"]["ccos"]["rows"]["q-fr"]
         self.assertEqual(row["valid_citations"], 0)
         self.assertEqual(row["citation_rights_violations"], 1)
@@ -99,7 +180,7 @@ class CampaignTests(unittest.TestCase):
         rows = self.rows(spec)
         rows[0]["ranking"] = ["acme-api", "acme-paris"]
         rows[3]["answer"] = {"text": "Invented secret", "abstained": False, "citations": []}
-        self.replace(spec, rows)
+        self.replace_and_rejudge(spec, rows)
         judgments = self.rows(self.manifest["judgments"])
         judgment = next(j for j in judgments if j["arm_id"] == "ccos" and j["query_id"] == "q-deleted")
         judgment.update(total_claims=1, supported_claims=0, answer_correct=False)
@@ -125,7 +206,7 @@ class CampaignTests(unittest.TestCase):
         rows = self.rows(spec)
         citation = rows[0]["answer"]["citations"][0]
         citation.update(start=-1, source_sha256="hallucinated hash")
-        self.replace(spec, rows)
+        self.replace_and_rejudge(spec, rows)
         adverse = self.evaluate()["arms"]["ccos"]["rows"]["q-fr"]
         self.assertEqual(adverse["citation_violations"], 1)
         self.assertEqual(adverse["task_success"], 0)
@@ -134,7 +215,7 @@ class CampaignTests(unittest.TestCase):
         spec = self.manifest["arms"][0]["results"]
         rows = self.rows(spec)
         rows[3]["status"] = "error"
-        self.replace(spec, rows)
+        self.replace_and_rejudge(spec, rows)
         row = self.evaluate()["arms"]["ccos"]["rows"]["q-deleted"]
         self.assertEqual(row["runtime_failures"], 1)
         self.assertEqual(row["task_success"], 0)

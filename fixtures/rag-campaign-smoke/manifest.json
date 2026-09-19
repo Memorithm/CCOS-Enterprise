@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "scope": "synthetic_smoke",
   "protocol": {
     "generator": {
@@ -192,7 +192,7 @@
   ],
   "judgments": {
     "path": "judgments.jsonl",
-    "sha256": "sha256:0650f95e8726a51ca1d2be02aa8beb204bd0b6a1dd2835de412493fc1e203836"
+    "sha256": "sha256:4bfc3615466a3fac3ba7387614196c138c2b10bfadfa28133faead7e10a8376f"
   },
   "comparisons": [
     {

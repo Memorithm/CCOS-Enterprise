@@ -365,11 +365,11 @@ reviewed_tenant_envelope_slices:
 
 pending_memory_slices_2026_09_19:
   GitHub_execution_blocker:
-    status: account_billing_or_spending_limit_prevents_job_start
+    status: historical_billing_failure_retries_pending_after_public_visibility
     confirmed_runs: [35440263234, 35440289246, 35440330172]
     observed: zero_started_steps_with_account_payments_or_spending_limit_failure_annotation
     merged_after_blocker: false
-    required_next_action: account_owner_restore_Actions_execution_then_rerun_all_applicable_exact_head_gates
+    required_next_action: await_public_repository_retries_and_verify_every_applicable_exact_head_gate
     forbidden_shortcut: local_green_tests_do_not_authorize_merge_while_GitHub_gates_are_red
   slices:
     - pr: 168
@@ -471,3 +471,39 @@ reviewed_campaign_result_binding_2026_09_19:
     - hashes_are_not_signatures_or_protection_against_coordinated_result_and_review_falsification
     - no_independent_holdout_or_proprietary_encoder_training_or_RAG_superiority_result
     - existing_real_schema_1_artifacts_require_explicit_migration
+
+public_visibility_CI_retry_2026_09_19:
+  visibility: public_verified_on_GitHub
+  main: 838199d59a2c044dcf9754262f15a928a0ce05fb
+  status: queued_runner_assignment_no_new_failure_annotation_observed
+  merges_performed: []
+  pr_168:
+    head: 37d4a36573af861a31b4f1f85538bc370ba2877b
+    rerun_ids: [35440263225, 35440263194, 35440263200, 35440263221, 35440263196, 35440263234]
+    fast_attempt: 3
+    other_attempts: 2
+  pr_169:
+    head: 183648eb7bfb410673e50274eb2c9a295decfd6b
+    rerun_ids: [35440289246, 35440289208, 35440289207, 35440289293, 35440289202, 35440289224, 35440289296]
+    attempts: 2
+  pr_170:
+    head: 66617ac5f54d9cb7e8f9b93117f32550ab1a4277
+    rerun_ids: [35441273068, 35441273041, 35441272964, 35441272972, 35441273084]
+    attempts: 2
+  fresh_public_nightly:
+    run: 35441764201
+    event: workflow_dispatch
+    head: 838199d59a2c044dcf9754262f15a928a0ce05fb
+    created_at: "2026-09-19T12:03:03Z"
+  latest_observation:
+    checked_at: "2026-09-19T12:06:46Z"
+    queued_workflows: 19
+    completed_successes: 0
+    runner_not_yet_assigned_to_fast_or_fresh_nightly: true
+    new_billing_annotation_seen: false
+  resume_order: [168, 169, 170]
+  rules:
+    - inspect_current_run_attempt_jobs_and_annotations_before_diagnosing_failure
+    - no_merge_on_local_results_or_on_queued_gates
+    - preserve_clean_branches_and_recheck_applicable_CI_after_retargeting
+    - keep_roadmap_separate_from_main

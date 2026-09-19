@@ -1,0 +1,47 @@
+name: Semantic extraction regression
+on:
+  pull_request:
+    paths:
+      - 'crates/ccos-enterprise-extract/**'
+      - 'crates/ccos-enterprise-parse/**'
+      - 'crates/ccos-enterprise-normalize/**'
+      - 'fixtures/semantic-relations-v1.jsonl'
+      - '.github/workflows/ci-semantic-extraction.yml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  evaluate:
+    name: Relation observations (${{ matrix.rust }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        rust: ['1.89.0', stable]
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - run: cargo test --locked -p ccos-enterprise-extract
+      - name: Measure frozen synthetic regression
+        run: |
+          cargo run --locked --release -p ccos-enterprise-extract --example semantic_extract_eval -- fixtures/semantic-relations-v1.jsonl > "$RUNNER_TEMP/semantic-evaluation.json"
+          python3 - "$RUNNER_TEMP/semantic-evaluation.json" <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          assert report['scope'] == 'authored_synthetic_regression_not_independent_holdout'
+          assert report['cases'] == 48 and report['tp'] >= 20
+          assert report['fp'] == 0 and report['fn'] <= 8
+          assert report['source_dirty'] is False
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semantic-regression-${{ matrix.rust }}-${{ github.sha }}
+          path: ${{ runner.temp }}/semantic-evaluation.json
+          if-no-files-found: error

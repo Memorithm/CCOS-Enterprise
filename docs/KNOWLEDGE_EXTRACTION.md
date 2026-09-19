@@ -1,6 +1,6 @@
 # CCOS Enterprise Knowledge Plane — deterministic structural extraction
 
-Status: **P2a structural extraction foundation**.
+Status: **P2a structural/prose extraction and opt-in A06 relation observations**.
 
 P2a deliberately does less than a generic NER/LLM extraction stack: it extracts
 only structure the source format already states. That makes the first extraction
@@ -91,3 +91,11 @@ exercises exactly that route; extraction itself never calls the store.
 Next: entity-resolution candidates and reversible merge proposals. Canonical
 entity merges must remain separate journaled decisions, never side effects of
 this extraction crate.
+
+## Opt-in relation observations
+
+`semantic::extract_relations` now provides a separate English/French rule
+baseline with explicit polarity, mention byte spans and abstention. It does not
+change `extract()` or create canonical entities/facts. See
+[A06 measurement](MEASURED_SEMANTIC_EXTRACTION.md) for its grammar, resource limits,
+48-case reproducible regression and the independent quality work still needed.

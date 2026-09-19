@@ -1,7 +1,7 @@
 schema_version: 1
 kind: ccos_enterprise_ecosystem_agent_roadmap
 status: active
-last_updated: "2026-09-16"
+last_updated: "2026-09-19"
 repository: Memorithm/CCOS-Enterprise
 intended_consumer: autonomous_coding_agent
 merge_policy: never_merge_this_file_to_default_branch_unless_user_explicitly_requests
@@ -262,3 +262,37 @@ agent_operating_protocol:
     If this roadmap cannot be read, do not make major Core-sync, authorization,
     tenancy, governance, external-adapter, or merge decisions. Read-only diagnosis
     is allowed.
+
+reviewed_operational_slices:
+  - id: NIGHTLY_AUTHOR_POLICY_2026_09_19
+    status: merged
+    pr: 164
+    reviewed_commit: 59c83c2cf4e960c03c6f6c3a409ff18fdb802e8f
+    merge_commit: d34c77f5d77d26fb803dffbc29aef1e399ab42a2
+    accepted_runs: [35434691930, 35434691937, 35434691939, 35434691944, 35434690612]
+    delivers:
+      - full_history_policy_with_six_exact_immutable_legacy_self_trailer_normalizations
+      - new_contribution_trailers_still_rejected_including_replayed_legacy_messages
+      - invalid_empty_and_shallow_history_scans_fail_closed
+      - permanent_adversarial_author_policy_regressions
+    original_failure_run: 35430257768
+
+active_memory_campaign_2026_09_19:
+  baseline_main: 89a97f70804ff7ac39963b4cebb9c339865bdd48
+  bound_context_pr_163_merge: 89a97f70804ff7ac39963b4cebb9c339865bdd48
+  A09: implementation_and_measurement_in_progress
+  A10: governed_physical_purge_and_crash_recovery_pending
+  tenant_envelope_KMS: pending
+  evidence_source_hash_resolution: pending
+  A06_measured_semantics: pending
+  compact_embedding_model:
+    status: evaluated_for_controlled_comparative_prototype_not_trained
+    SciRust_reviewed_commit: 9b34f52df617b71b233d00017fdc0728504b6342
+    component: scirust-core/src/embed.rs
+    finding: existing_MiniLLM_embedding_engine_is_not_evidence_of_held_out_retrieval_quality
+    gates:
+      - compare_lexical_dense_hybrid_and_reranked_arms_with_fixed_generator_rights_and_budgets
+      - compare_existing_Rust_inference_domain_adaptation_and_compact_distillation
+      - freeze_model_tokenizer_pooling_normalization_dimension_and_dataset_hashes
+      - keep_similarity_and_model_outputs_non_authoritative
+      - no_Core_duplication_or_Enterprise_dependency_backflow

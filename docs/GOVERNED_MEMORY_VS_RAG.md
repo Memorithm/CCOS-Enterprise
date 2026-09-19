@@ -1,6 +1,7 @@
 # Governed memory and retrieval-augmented generation
 
-Status reconciled with merged PRs #152–#163 and the A09 workload, 2026-09-19.
+Status reconciled with governed generations, A09, A10, tenant envelope KMS
+and explicit source citation resolution, 2026-09-19.
 The objective is measurable improvement over strong RAG reference systems.
 Similarity orders candidates; it does not establish authorization, provenance,
 validity or truth. RAG reference systems may themselves implement governance.
@@ -41,12 +42,16 @@ and their fingerprint within an owned, non-mutable generation; asset eligibility
 and payload checks still run on each query. APIs taking an independently supplied
 mutable projection continue to validate and fingerprint it on each call.
 
-## Authority and remaining provenance boundary
+## Authority and provenance boundary
 
 Attestation reports what was admitted and under which snapshot. Its hash is not a
 signature, a proof that a statement is true, or proof that a MemoryEvidenceRef
-resolves to an EvidenceRecord and an immutable SourceRecord. The evidence/source
-join and content-hash/citation validation require their own qualified resolver.
+resolves to an EvidenceRecord and SourceRecord. The optional strict resolver
+now performs that exact join, verifies both whole-source hashes against original
+bytes, and returns bounded exact byte citations. Missing or inconsistent evidence
+refuses the context request; unconfigured resolution is explicitly `unresolved`.
+See [verified citations](VERIFIED_MEMORY_CITATIONS.md) for deployment, frozen
+Knowledge metadata, byte budgets and the remaining semantic-entailment boundary.
 The categorical Verified label is not a universal truth certificate.
 
 The served authority is owned by a generation store, not supplied by the calling

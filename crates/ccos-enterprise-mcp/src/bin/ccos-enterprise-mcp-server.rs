@@ -24,6 +24,8 @@ mod kms_server_tests;
 mod served_governed_stdio;
 #[path = "../served_governed_write.rs"]
 mod served_governed_write;
+#[path = "../served_provenance.rs"]
+mod served_provenance;
 #[path = "../skill_projection.rs"]
 mod skill_projection;
 
@@ -90,6 +92,7 @@ struct Config {
     state_dir: PathBuf,
     governed_memory_root: Option<PathBuf>,
     envelope: Option<std::sync::Arc<ccos_enterprise_envelope::EnvelopeCipher>>,
+    evidence_roots: Option<(PathBuf, PathBuf)>,
 }
 
 impl Config {
@@ -120,6 +123,14 @@ impl Config {
                     .map_err(|e| e.to_string())
             })
             .transpose()?;
+        let evidence_roots = match (
+            std::env::var_os("CCOS_ENTERPRISE_EVIDENCE_KNOWLEDGE_ROOT"),
+            std::env::var_os("CCOS_ENTERPRISE_SOURCE_BLOBS_ROOT"),
+        ) {
+            (None, None) => None,
+            (Some(knowledge), Some(blobs)) if !knowledge.is_empty() && !blobs.is_empty() && governed_memory_root.is_some() => Some((knowledge.into(), blobs.into())),
+            _ => return Err("evidence resolution requires both knowledge and source roots and a governed provider".into()),
+        };
         Ok(Self {
             audience: required_env("CCOS_ENTERPRISE_AUDIENCE")?,
             issuer_kid: required_env("CCOS_ENTERPRISE_ISSUER_KID")?,
@@ -141,6 +152,7 @@ impl Config {
             state_dir: PathBuf::from(required_env("CCOS_ENTERPRISE_STATE_DIR")?),
             governed_memory_root,
             envelope,
+            evidence_roots,
         })
     }
 }
@@ -712,6 +724,7 @@ struct Server {
     correlation: execution::ExecutionJournal,
     front_door: GovernedMcp<JournaledBackend>,
     governed_memory: Option<ccos_enterprise_provider_adapter::generation::ProviderGenerationStore>,
+    evidence: Option<served_provenance::ServedEvidence>,
     poisoned: Option<String>,
 }
 
@@ -947,6 +960,13 @@ impl Server {
             None
         };
 
+        let evidence = config
+            .evidence_roots
+            .as_ref()
+            .map(|(knowledge, blobs)| {
+                served_provenance::ServedEvidence::load(&config.tenant, knowledge, blobs)
+            })
+            .transpose()?;
         Ok(Self {
             config,
             authenticator,
@@ -958,6 +978,7 @@ impl Server {
             correlation,
             front_door,
             governed_memory,
+            evidence,
             poisoned: None,
         })
     }
@@ -2012,6 +2033,7 @@ mod tests {
             )),
             governed_memory_root: None,
             envelope: None,
+            evidence_roots: None,
         }
     }
 

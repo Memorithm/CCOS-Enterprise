@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
+ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

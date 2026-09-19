@@ -359,6 +359,9 @@ dependencies = [
  "ccos-enterprise-envelope",
  "ccos-enterprise-execution",
  "ccos-enterprise-gateway",
+ "ccos-enterprise-knowledge",
+ "ccos-enterprise-knowledge-model",
+ "ccos-enterprise-knowledge-store",
  "ccos-enterprise-memory",
  "ccos-enterprise-octasoma",
  "ccos-enterprise-qpages",
@@ -380,6 +383,7 @@ dependencies = [
 name = "ccos-enterprise-memory"
 version = "0.1.0-pre"
 dependencies = [
+ "ccos-enterprise-knowledge-model",
  "ccos-enterprise-tenancy",
  "serde",
  "serde_json",

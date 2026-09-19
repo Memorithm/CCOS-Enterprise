@@ -87,6 +87,7 @@ pub use projection::{
 };
 
 mod attestation;
+pub mod provenance;
 pub use attestation::{attest_governed_context, MemoryAdmissionReason, MemoryContextAttestation};
 
 /// A semantic-memory namespace inside one tenant.

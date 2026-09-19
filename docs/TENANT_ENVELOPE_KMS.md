@@ -131,3 +131,11 @@ cargo test -p ccos-enterprise-envelope --locked
 cargo test -p ccos-enterprise-octasoma --lib generation::encrypted_artifacts --locked
 cargo test -p ccos-enterprise-mcp --bin ccos-enterprise-mcp-server kms_server_tests --locked
 ```
+
+## TLS dependency and redistribution
+
+The locked Rustls version is 0.23.45, which fixes RUSTSEC-2026-0285.
+The certificate data in webpki-roots 1.0.9 uses CDLA-Permissive-2.0; its
+exception in cargo-deny is limited to that exact package and version. Include
+[the complete license](licenses/webpki-roots-1.0.9.txt) when redistributing
+binaries that embed this data. Other license and advisory gates remain active.

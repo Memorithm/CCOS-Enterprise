@@ -1,0 +1,48 @@
+{"id":"en-01","language":"en","text":"Alice works at Acme.","expected":[{"subject":"Alice","relation":"works_for","polarity":"affirmed","object":"Acme"}]}
+{"id":"en-02","language":"en","text":"Bob works for Beta Labs.","expected":[{"subject":"Bob","relation":"works_for","polarity":"affirmed","object":"Beta Labs"}]}
+{"id":"en-03","language":"en","text":"Alice does not work at Beta.","expected":[{"subject":"Alice","relation":"works_for","polarity":"negated","object":"Beta"}]}
+{"id":"en-04","language":"en","text":"Bob does not work for Acme.","expected":[{"subject":"Bob","relation":"works_for","polarity":"negated","object":"Acme"}]}
+{"id":"en-05","language":"en","text":"Acme is located in Paris.","expected":[{"subject":"Acme","relation":"located_in","polarity":"affirmed","object":"Paris"}]}
+{"id":"en-06","language":"en","text":"Beta is not located in Lyon.","expected":[{"subject":"Beta","relation":"located_in","polarity":"negated","object":"Lyon"}]}
+{"id":"en-07","language":"en","text":"API depends on Database.","expected":[{"subject":"API","relation":"depends_on","polarity":"affirmed","object":"Database"}]}
+{"id":"en-08","language":"en","text":"Worker does not depend on Cache.","expected":[{"subject":"Worker","relation":"depends_on","polarity":"negated","object":"Cache"}]}
+{"id":"en-09","language":"en","text":"  Mary-Jane works at Acme Labs.  ","expected":[{"subject":"Mary-Jane","relation":"works_for","polarity":"affirmed","object":"Acme Labs"}]}
+{"id":"en-10","language":"en","text":"O'Connor works for Delta.","expected":[{"subject":"O'Connor","relation":"works_for","polarity":"affirmed","object":"Delta"}]}
+{"id":"fr-11","language":"fr","text":"Élodie travaille chez Acme.","expected":[{"subject":"Élodie","relation":"works_for","polarity":"affirmed","object":"Acme"}]}
+{"id":"fr-12","language":"fr","text":"Luc ne travaille pas chez Beta.","expected":[{"subject":"Luc","relation":"works_for","polarity":"negated","object":"Beta"}]}
+{"id":"fr-13","language":"fr","text":"Acme est situé à Paris.","expected":[{"subject":"Acme","relation":"located_in","polarity":"affirmed","object":"Paris"}]}
+{"id":"fr-14","language":"fr","text":"Usine est située à Lyon.","expected":[{"subject":"Usine","relation":"located_in","polarity":"affirmed","object":"Lyon"}]}
+{"id":"fr-15","language":"fr","text":"Acme n'est pas situé à Lille.","expected":[{"subject":"Acme","relation":"located_in","polarity":"negated","object":"Lille"}]}
+{"id":"fr-16","language":"fr","text":"Usine n'est pas située à Tours.","expected":[{"subject":"Usine","relation":"located_in","polarity":"negated","object":"Tours"}]}
+{"id":"fr-17","language":"fr","text":"API dépend de Stockage.","expected":[{"subject":"API","relation":"depends_on","polarity":"affirmed","object":"Stockage"}]}
+{"id":"fr-18","language":"fr","text":"Service ne dépend pas de Cache.","expected":[{"subject":"Service","relation":"depends_on","polarity":"negated","object":"Cache"}]}
+{"id":"en-19","language":"en","text":"﻿Alice works at Acme.\r\n","expected":[{"subject":"Alice","relation":"works_for","polarity":"affirmed","object":"Acme"}]}
+{"id":"fr-20","language":"fr","text":"  Léa travaille chez Énergie.\r\n","expected":[{"subject":"Léa","relation":"works_for","polarity":"affirmed","object":"Énergie"}]}
+{"id":"en-21","language":"en","text":"Alice is employed by Acme.","expected":[{"subject":"Alice","relation":"works_for","polarity":"affirmed","object":"Acme"}]}
+{"id":"en-22","language":"en","text":"Acme employs Bob.","expected":[{"subject":"Bob","relation":"works_for","polarity":"affirmed","object":"Acme"}]}
+{"id":"en-23","language":"en","text":"The API relies on Database.","expected":[{"subject":"API","relation":"depends_on","polarity":"affirmed","object":"Database"}]}
+{"id":"en-24","language":"en","text":"Acme has its headquarters in Paris.","expected":[{"subject":"Acme","relation":"located_in","polarity":"affirmed","object":"Paris"}]}
+{"id":"fr-25","language":"fr","text":"Acme emploie Élodie.","expected":[{"subject":"Élodie","relation":"works_for","polarity":"affirmed","object":"Acme"}]}
+{"id":"fr-26","language":"fr","text":"Luc est salarié de Beta.","expected":[{"subject":"Luc","relation":"works_for","polarity":"affirmed","object":"Beta"}]}
+{"id":"fr-27","language":"fr","text":"API repose sur Stockage.","expected":[{"subject":"API","relation":"depends_on","polarity":"affirmed","object":"Stockage"}]}
+{"id":"fr-28","language":"fr","text":"Acme se trouve à Paris.","expected":[{"subject":"Acme","relation":"located_in","polarity":"affirmed","object":"Paris"}]}
+{"id":"en-29","language":"en","text":"Alice may work at Acme.","expected":[]}
+{"id":"en-30","language":"en","text":"Does Alice work at Acme?","expected":[]}
+{"id":"en-31","language":"en","text":"She works at Acme.","expected":[]}
+{"id":"en-32","language":"en","text":"If Alice works at Acme.","expected":[]}
+{"id":"en-33","language":"en","text":"Bob says Alice works at Acme.","expected":[]}
+{"id":"en-34","language":"en","text":"Alice works at Acme or Beta.","expected":[]}
+{"id":"en-35","language":"en","text":"Alice works at Acme?","expected":[]}
+{"id":"en-36","language":"en","text":"Alice no longer works at Acme.","expected":[]}
+{"id":"en-37","language":"en","text":"Alice worked at Acme in 2020.","expected":[]}
+{"id":"en-38","language":"en","text":"\"Alice works at Acme.\"","expected":[]}
+{"id":"fr-39","language":"fr","text":"Élodie pourrait travailler chez Acme.","expected":[]}
+{"id":"fr-40","language":"fr","text":"Elle travaille chez Acme.","expected":[]}
+{"id":"fr-41","language":"fr","text":"Si Luc travaille chez Beta.","expected":[]}
+{"id":"fr-42","language":"fr","text":"Luc travaille chez Beta ?","expected":[]}
+{"id":"fr-43","language":"fr","text":"Luc affirme que Léa travaille chez Acme.","expected":[]}
+{"id":"fr-44","language":"fr","text":"Léa travaille chez Acme ou Beta.","expected":[]}
+{"id":"fr-45","language":"fr","text":"Luc ne travaille plus chez Acme.","expected":[]}
+{"id":"fr-46","language":"fr","text":"Léa travaillait chez Acme en 2020.","expected":[]}
+{"id":"fr-47","language":"fr","text":"# Élodie travaille chez Acme.","expected":[]}
+{"id":"en-48","language":"en","text":"Acme and Beta are located in Paris.","expected":[]}

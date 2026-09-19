@@ -1,0 +1,505 @@
+{
+  "abstained_units": 28,
+  "binary_sha256": "sha256:cf1279a1d1b4b3dac21233e5bc17f8c8011d52bedd552bb24b4f572c600066e2",
+  "case_coverage": 0.4166666666666667,
+  "cases": 48,
+  "code_sha": "94d68ff9c582852268eda42affb49ca6d33f9617",
+  "f1": 0.8333333333333334,
+  "fixture_sha256": "sha256:7f832043c50cbe90122217c8b83170742020db9989a62ec0fea4abf33e0d804f",
+  "fn": 8,
+  "fp": 0,
+  "latency_ns": {
+    "p50": 3260,
+    "p95": 7750,
+    "p99": 20361
+  },
+  "precision": 1.0,
+  "recall": 0.7142857142857143,
+  "rows": [
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-01",
+      "language": "en",
+      "latency_ns": 20361,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-02",
+      "language": "en",
+      "latency_ns": 8083,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-03",
+      "language": "en",
+      "latency_ns": 7750,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-04",
+      "language": "en",
+      "latency_ns": 6269,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-05",
+      "language": "en",
+      "latency_ns": 7028,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-06",
+      "language": "en",
+      "latency_ns": 5991,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-07",
+      "language": "en",
+      "latency_ns": 6019,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-08",
+      "language": "en",
+      "latency_ns": 5907,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-09",
+      "language": "en",
+      "latency_ns": 7231,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-10",
+      "language": "en",
+      "latency_ns": 5870,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-11",
+      "language": "fr",
+      "latency_ns": 6750,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-12",
+      "language": "fr",
+      "latency_ns": 5815,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-13",
+      "language": "fr",
+      "latency_ns": 5861,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-14",
+      "language": "fr",
+      "latency_ns": 5704,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-15",
+      "language": "fr",
+      "latency_ns": 5778,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-16",
+      "language": "fr",
+      "latency_ns": 5852,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-17",
+      "language": "fr",
+      "latency_ns": 5759,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-18",
+      "language": "fr",
+      "latency_ns": 5778,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-19",
+      "language": "en",
+      "latency_ns": 5611,
+      "tp": 1
+    },
+    {
+      "abstentions": 0,
+      "candidates": 1,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-20",
+      "language": "fr",
+      "latency_ns": 5759,
+      "tp": 1
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 1,
+      "fp": 0,
+      "id": "en-21",
+      "language": "en",
+      "latency_ns": 2852,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 1,
+      "fp": 0,
+      "id": "en-22",
+      "language": "en",
+      "latency_ns": 3232,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 1,
+      "fp": 0,
+      "id": "en-23",
+      "language": "en",
+      "latency_ns": 3093,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 1,
+      "fp": 0,
+      "id": "en-24",
+      "language": "en",
+      "latency_ns": 3260,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 1,
+      "fp": 0,
+      "id": "fr-25",
+      "language": "fr",
+      "latency_ns": 3074,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 1,
+      "fp": 0,
+      "id": "fr-26",
+      "language": "fr",
+      "latency_ns": 3250,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 1,
+      "fp": 0,
+      "id": "fr-27",
+      "language": "fr",
+      "latency_ns": 2852,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 1,
+      "fp": 0,
+      "id": "fr-28",
+      "language": "fr",
+      "latency_ns": 3020,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-29",
+      "language": "en",
+      "latency_ns": 2907,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-30",
+      "language": "en",
+      "latency_ns": 2777,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-31",
+      "language": "en",
+      "latency_ns": 2602,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-32",
+      "language": "en",
+      "latency_ns": 2889,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-33",
+      "language": "en",
+      "latency_ns": 3204,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-34",
+      "language": "en",
+      "latency_ns": 3760,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-35",
+      "language": "en",
+      "latency_ns": 3046,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-36",
+      "language": "en",
+      "latency_ns": 3185,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-37",
+      "language": "en",
+      "latency_ns": 2815,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-38",
+      "language": "en",
+      "latency_ns": 2815,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-39",
+      "language": "fr",
+      "latency_ns": 3222,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-40",
+      "language": "fr",
+      "latency_ns": 2611,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-41",
+      "language": "fr",
+      "latency_ns": 2935,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-42",
+      "language": "fr",
+      "latency_ns": 3130,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-43",
+      "language": "fr",
+      "latency_ns": 3639,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-44",
+      "language": "fr",
+      "latency_ns": 3426,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-45",
+      "language": "fr",
+      "latency_ns": 3593,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-46",
+      "language": "fr",
+      "latency_ns": 2778,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "fr-47",
+      "language": "fr",
+      "latency_ns": 3139,
+      "tp": 0
+    },
+    {
+      "abstentions": 1,
+      "candidates": 0,
+      "fn": 0,
+      "fp": 0,
+      "id": "en-48",
+      "language": "en",
+      "latency_ns": 2907,
+      "tp": 0
+    }
+  ],
+  "rule_version": "ccos-relations-en-fr-v1",
+  "schema_version": 1,
+  "scope": "authored_synthetic_regression_not_independent_holdout",
+  "source_dirty": false,
+  "tp": 20
+}

@@ -1,5 +1,5 @@
 [package]
-name = "ccos-enterprise-octasoma"
+name = "ccos-enterprise-envelope"
 version = "0.1.0-pre"
 edition.workspace = true
 rust-version.workspace = true
@@ -7,15 +7,12 @@ license.workspace = true
 publish = false
 
 [dependencies]
-ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
-ccos-enterprise-envelope = { path = "../ccos-enterprise-envelope" }
-zeroize = "1.8"
-octasoma.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-
-[dev-dependencies]
-chacha20poly1305 = "=0.10.1"
 rand.workspace = true
+base64 = "0.22"
+chacha20poly1305 = "=0.10.1"
+zeroize = "1.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

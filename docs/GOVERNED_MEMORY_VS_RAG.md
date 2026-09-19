@@ -20,6 +20,12 @@ retired generation files. Reserved inactive IDs and a durable floor prevent
 resurrection within the retained tenant root. See [A10](GOVERNED_PHYSICAL_PURGE.md)
 for crash recovery, backup boundaries and residual metadata.
 
+An explicitly encrypted provider root uses tenant envelope KMS with governed
+`memory.keys.rotate`, durable rotation intent and restart recovery. The Vault
+connector and the limits of the local key-service qualification are documented
+in [the envelope contract](TENANT_ENVELOPE_KMS.md). Source stores, Core workspaces
+and audit journals are outside that provider encryption boundary.
+
 `ProviderGenerationStore` owns the cooperating-writer lock and selects immutable
 provider and governance artifacts through one selector published last. Startup
 validates the selected generation and reconstructs OctaSoma through the governed

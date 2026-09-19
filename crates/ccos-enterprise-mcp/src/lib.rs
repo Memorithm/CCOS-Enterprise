@@ -54,7 +54,9 @@ pub mod governed_context_tool;
 pub mod governed_evidence_tool;
 pub mod governed_purge_tool;
 pub use governed_purge_tool::{
-    govern_governed_purge, governed_purge_tool_spec, GOVERNED_PURGE_PERMISSION, GOVERNED_PURGE_TOOL,
+    govern_governed_purge, governed_key_rotate_tool_spec, governed_purge_tool_spec,
+    GOVERNED_KEY_ROTATE_PERMISSION, GOVERNED_KEY_ROTATE_TOOL, GOVERNED_PURGE_PERMISSION,
+    GOVERNED_PURGE_TOOL,
 };
 pub mod served_context;
 pub mod server;

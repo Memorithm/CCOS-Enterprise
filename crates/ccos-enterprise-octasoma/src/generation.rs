@@ -11,10 +11,12 @@
 //! owner: if publication becomes uncertain the caller cannot keep serving the
 //! old in-memory owner and must explicitly reopen the durable selector.
 
+use ccos_enterprise_envelope::{EnvelopeCipher, EnvelopeError};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use ccos_enterprise_memory::{
     decode_governed_memory_projection, encode_governed_memory_projection, GovernedMemoryProjection,
@@ -44,6 +46,12 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 #[path = "purge.rs"]
 mod purge;
 pub use purge::{PreparedPurge, PurgeReceipt};
+#[path = "encrypted_artifacts.rs"]
+mod encrypted_artifacts;
+pub use encrypted_artifacts::EncryptionRotationReceipt;
+use encrypted_artifacts::{
+    encode_artifact, new_artifact, new_or_exact_artifact, read_artifact, resume_rotation,
+};
 
 #[derive(Debug)]
 pub enum ProviderGenerationError {
@@ -52,6 +60,7 @@ pub enum ProviderGenerationError {
     Projection(GovernedMemoryProjectionError),
     Governance(GovernedMemoryStoreError),
     Recovery(RecoveryError),
+    Encryption(EnvelopeError),
     AlreadyOpen { path: PathBuf },
     AlreadyInitialized { path: PathBuf },
     MissingSelector { path: PathBuf },
@@ -69,6 +78,7 @@ impl std::fmt::Display for ProviderGenerationError {
             Self::Projection(error) => write!(f, "provider generation projection: {error}"),
             Self::Governance(error) => write!(f, "provider generation governance: {error}"),
             Self::Recovery(error) => write!(f, "provider generation recovery: {error}"),
+            Self::Encryption(error) => write!(f, "{error}"),
             Self::AlreadyOpen { path } => write!(f, "provider generation already owned: {path:?}"),
             Self::AlreadyInitialized { path } => {
                 write!(f, "provider generation already initialized: {path:?}")
@@ -113,6 +123,12 @@ impl From<GovernedMemoryStoreError> for ProviderGenerationError {
     }
 }
 
+impl From<EnvelopeError> for ProviderGenerationError {
+    fn from(error: EnvelopeError) -> Self {
+        Self::Encryption(error)
+    }
+}
+
 impl From<RecoveryError> for ProviderGenerationError {
     fn from(value: RecoveryError) -> Self {
         Self::Recovery(value)
@@ -147,6 +163,7 @@ pub struct ProviderGenerationStore {
     governance: GenerationGovernance,
     recovered: RecoveredGovernedMemory,
     _lock: File,
+    cipher: Option<Arc<EnvelopeCipher>>,
 }
 
 impl Drop for ProviderGenerationStore {
@@ -167,7 +184,28 @@ impl ProviderGenerationStore {
         config: RecoveryConfig,
         records: &[RecoveryRecord],
     ) -> Result<Self, ProviderGenerationError> {
+        Self::initialize_with_cipher(root, authority, config, records, None)
+    }
+
+    pub fn initialize_encrypted(
+        root: impl AsRef<Path>,
+        authority: GovernedMemoryProjection,
+        config: RecoveryConfig,
+        records: &[RecoveryRecord],
+        cipher: Arc<EnvelopeCipher>,
+    ) -> Result<Self, ProviderGenerationError> {
+        Self::initialize_with_cipher(root, authority, config, records, Some(cipher))
+    }
+
+    fn initialize_with_cipher(
+        root: impl AsRef<Path>,
+        authority: GovernedMemoryProjection,
+        config: RecoveryConfig,
+        records: &[RecoveryRecord],
+        cipher: Option<Arc<EnvelopeCipher>>,
+    ) -> Result<Self, ProviderGenerationError> {
         let tenant = authority.tenant.clone();
+        validate_cipher(&tenant, cipher.as_deref())?;
         if records.iter().any(RecoveryRecord::is_physically_purged) {
             return Err(ProviderGenerationError::Invalid(
                 "initialization cannot invent purge history",
@@ -191,12 +229,21 @@ impl ProviderGenerationStore {
         let image = RecoveryImage::capture(&current, config, records)?;
         let generation = 0;
         let governance_file = governance_generation_filename(generation);
-        write_new_bytes(
+        new_artifact(
+            &root,
+            cipher.as_deref(),
             &governance_generations.join(&governance_file),
             &governance_bytes,
+            MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
         )?;
         let image_file = provider_generation_filename(generation);
-        image.write_new(provider_generations.join(&image_file))?;
+        new_artifact(
+            &root,
+            cipher.as_deref(),
+            &provider_generations.join(&image_file),
+            image.as_bytes(),
+            crate::recovery::MAX_RECOVERY_IMAGE_BYTES,
+        )?;
         let selector = WireSelector {
             version: GENERATION_SELECTOR_VERSION,
             tenant: tenant.as_str().to_string(),
@@ -207,13 +254,13 @@ impl ProviderGenerationStore {
             governance_sha256: sha256_hex(&governance_bytes),
             config,
         };
-        publish_initial_selector(&root, &selector)?;
+        publish_initial_selector(&root, &selector, cipher.as_deref())?;
 
         let lock_path = root.join(PROVIDER_LOCK_FILE);
         lock.unlock()
             .map_err(|source| io_error(&lock_path, source))?;
         drop(lock);
-        Self::open(&root, tenant)
+        Self::open_with_cipher(&root, tenant, cipher)
     }
 
     /// Open exactly the generation named by the trusted local selector.
@@ -226,18 +273,50 @@ impl ProviderGenerationStore {
         root: impl AsRef<Path>,
         expected_tenant: TenantId,
     ) -> Result<Self, ProviderGenerationError> {
+        Self::open_with_cipher(root, expected_tenant, None)
+    }
+
+    pub fn open_encrypted(
+        root: impl AsRef<Path>,
+        tenant: TenantId,
+        cipher: Arc<EnvelopeCipher>,
+    ) -> Result<Self, ProviderGenerationError> {
+        Self::open_with_cipher(root, tenant, Some(cipher))
+    }
+
+    fn open_with_cipher(
+        root: impl AsRef<Path>,
+        expected_tenant: TenantId,
+        cipher: Option<Arc<EnvelopeCipher>>,
+    ) -> Result<Self, ProviderGenerationError> {
         validate_tenant(&expected_tenant)?;
+        validate_cipher(&expected_tenant, cipher.as_deref())?;
         let requested = root.as_ref();
         let root = fs::canonicalize(requested).map_err(|source| io_error(requested, source))?;
         let lock = acquire_lock(&root)?;
+        resume_rotation(&root, cipher.as_deref())?;
         sync_visible_selector(&root)?;
-        let selector = read_selector(&root.join(PROVIDER_SELECTOR_FILE))?;
+        let selector_bytes = read_artifact(
+            &root,
+            cipher.as_deref(),
+            &root.join(PROVIDER_SELECTOR_FILE),
+            MAX_SELECTOR_BYTES,
+        )?;
+        let selector: WireSelector =
+            serde_json::from_slice(&selector_bytes).map_err(ProviderGenerationError::Json)?;
         validate_selector(&selector, &expected_tenant)?;
         let store = match selector.version {
             LEGACY_GENERATION_SELECTOR_VERSION => {
+                if cipher.is_some() {
+                    return Err(ProviderGenerationError::Invalid(
+                        "encrypted legacy selectors are unsupported",
+                    ));
+                }
                 Self::open_v1(root, lock, expected_tenant, selector)
             }
-            GENERATION_SELECTOR_VERSION => Self::open_v2(root, lock, expected_tenant, selector),
+            GENERATION_SELECTOR_VERSION => {
+                Self::open_v2(root, lock, expected_tenant, selector, cipher)
+            }
             _ => Err(ProviderGenerationError::Invalid(
                 "unsupported selector version",
             )),
@@ -263,7 +342,7 @@ impl ProviderGenerationStore {
         if selector.governance_sha256 != expected_governance {
             return Err(ProviderGenerationError::GovernanceMismatch);
         }
-        let recovered = open_provider_image(&root, &selector, current)?;
+        let recovered = open_provider_image(&root, &selector, current, None)?;
         Ok(Self {
             root,
             tenant: expected_tenant,
@@ -272,6 +351,7 @@ impl ProviderGenerationStore {
             governance: GenerationGovernance::Legacy(governance),
             recovered,
             _lock: lock,
+            cipher: None,
         })
     }
 
@@ -280,6 +360,7 @@ impl ProviderGenerationStore {
         lock: File,
         expected_tenant: TenantId,
         selector: WireSelector,
+        cipher: Option<Arc<EnvelopeCipher>>,
     ) -> Result<Self, ProviderGenerationError> {
         let expected_governance_file = governance_generation_filename(selector.generation);
         let governance_file =
@@ -295,16 +376,17 @@ impl ProviderGenerationStore {
             ));
         }
         let governance_path = root.join(GOVERNANCE_GENERATIONS_DIR).join(governance_file);
-        let governance_bytes = read_bounded_file(
+        let governance_bytes = read_artifact(
+            &root,
+            cipher.as_deref(),
             &governance_path,
             MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
-            "governance generation exceeds byte limit",
         )?;
         if sha256_hex(&governance_bytes) != selector.governance_sha256 {
             return Err(ProviderGenerationError::GovernanceMismatch);
         }
         let current = decode_governed_memory_projection(&governance_bytes, &expected_tenant)?;
-        let recovered = open_provider_image(&root, &selector, &current)?;
+        let recovered = open_provider_image(&root, &selector, &current, cipher.as_deref())?;
         Ok(Self {
             root,
             tenant: expected_tenant,
@@ -313,6 +395,7 @@ impl ProviderGenerationStore {
             governance: GenerationGovernance::Immutable(current),
             recovered,
             _lock: lock,
+            cipher,
         })
     }
 
@@ -335,8 +418,9 @@ impl ProviderGenerationStore {
         self.publish_generation(&authority, config, records)?;
         let root = self.root.clone();
         let tenant = self.tenant.clone();
+        let cipher = self.cipher.clone();
         drop(self);
-        Self::open(&root, tenant)
+        Self::open_with_cipher(&root, tenant, cipher)
     }
 
     fn publish_generation(
@@ -361,12 +445,21 @@ impl ProviderGenerationStore {
         ensure_directory(&provider_generations)?;
 
         let governance_file = governance_generation_filename(generation);
-        write_new_or_verify_exact(
+        new_or_exact_artifact(
+            root,
+            self.cipher.as_deref(),
             &governance_generations.join(&governance_file),
             &governance_bytes,
+            MAX_GOVERNED_MEMORY_PROJECTION_BYTES,
         )?;
         let image_file = provider_generation_filename(generation);
-        write_new_or_verify_exact(&provider_generations.join(&image_file), image.as_bytes())?;
+        new_or_exact_artifact(
+            root,
+            self.cipher.as_deref(),
+            &provider_generations.join(&image_file),
+            image.as_bytes(),
+            crate::recovery::MAX_RECOVERY_IMAGE_BYTES,
+        )?;
         purge::checkpoint(root, "artifacts")?;
         let selector = WireSelector {
             version: GENERATION_SELECTOR_VERSION,
@@ -378,7 +471,7 @@ impl ProviderGenerationStore {
             governance_sha256: sha256_hex(&governance_bytes),
             config,
         };
-        replace_selector(root, &selector)
+        replace_selector(root, &selector, self.cipher.as_deref())
     }
 
     pub fn root(&self) -> &Path {
@@ -415,6 +508,7 @@ fn open_provider_image(
     root: &Path,
     selector: &WireSelector,
     current: &GovernedMemoryProjection,
+    cipher: Option<&EnvelopeCipher>,
 ) -> Result<RecoveredGovernedMemory, ProviderGenerationError> {
     let expected_file = provider_generation_filename(selector.generation);
     if selector.image_file != expected_file {
@@ -426,6 +520,16 @@ fn open_provider_image(
     let image_path = root
         .join(PROVIDER_GENERATIONS_DIR)
         .join(&selector.image_file);
+    if cipher.is_some() {
+        let bytes = read_artifact(
+            root,
+            cipher,
+            &image_path,
+            crate::recovery::MAX_RECOVERY_IMAGE_BYTES,
+        )?;
+        return restore_governed_memory(bytes.as_slice(), digest, current, selector.config)
+            .map_err(ProviderGenerationError::Recovery);
+    }
     let image = File::open(&image_path).map_err(|source| io_error(&image_path, source))?;
     restore_governed_memory(image, digest, current, selector.config)
         .map_err(ProviderGenerationError::Recovery)
@@ -523,11 +627,6 @@ fn sync_visible_selector(root: &Path) -> Result<(), ProviderGenerationError> {
     sync_directory(root)
 }
 
-fn read_selector(path: &Path) -> Result<WireSelector, ProviderGenerationError> {
-    let bytes = read_bounded_file(path, MAX_SELECTOR_BYTES, "selector exceeds byte limit")?;
-    serde_json::from_slice(&bytes).map_err(ProviderGenerationError::Json)
-}
-
 fn read_bounded_file(
     path: &Path,
     max_bytes: usize,
@@ -594,13 +693,18 @@ impl Drop for TemporarySelector {
 fn publish_initial_selector(
     root: &Path,
     selector: &WireSelector,
+    cipher: Option<&EnvelopeCipher>,
 ) -> Result<(), ProviderGenerationError> {
     let path = root.join(PROVIDER_SELECTOR_FILE);
     reject_existing(&path)?;
-    write_selector(root, &path, selector)
+    write_selector(root, &path, selector, cipher)
 }
 
-fn replace_selector(root: &Path, selector: &WireSelector) -> Result<(), ProviderGenerationError> {
+fn replace_selector(
+    root: &Path,
+    selector: &WireSelector,
+    cipher: Option<&EnvelopeCipher>,
+) -> Result<(), ProviderGenerationError> {
     let path = root.join(PROVIDER_SELECTOR_FILE);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -614,13 +718,14 @@ fn replace_selector(root: &Path, selector: &WireSelector) -> Result<(), Provider
         }
         Err(source) => return Err(io_error(&path, source)),
     }
-    write_selector(root, &path, selector)
+    write_selector(root, &path, selector, cipher)
 }
 
 fn write_selector(
     root: &Path,
     path: &Path,
     selector: &WireSelector,
+    cipher: Option<&EnvelopeCipher>,
 ) -> Result<(), ProviderGenerationError> {
     let bytes = serde_json::to_vec_pretty(selector).map_err(ProviderGenerationError::Json)?;
     if bytes.len() > MAX_SELECTOR_BYTES {
@@ -628,6 +733,7 @@ fn write_selector(
             "selector exceeds byte limit",
         ));
     }
+    let bytes = encode_artifact(root, cipher, path, &bytes, MAX_SELECTOR_BYTES)?;
     let ordinal = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let temp = root.join(format!(
         ".provider-current-{}-{ordinal}.tmp",
@@ -762,4 +868,14 @@ fn io_error(path: &Path, source: io::Error) -> ProviderGenerationError {
         path: path.to_path_buf(),
         source,
     }
+}
+
+fn validate_cipher(
+    tenant: &TenantId,
+    cipher: Option<&EnvelopeCipher>,
+) -> Result<(), ProviderGenerationError> {
+    if cipher.is_some_and(|c| c.tenant() != tenant) {
+        return Err(ProviderGenerationError::TenantMismatch);
+    }
+    Ok(())
 }

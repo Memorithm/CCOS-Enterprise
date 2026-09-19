@@ -4,9 +4,18 @@ use serde_json::{json, Value};
 
 pub const GOVERNED_PURGE_TOOL: &str = "memory.purge";
 pub const GOVERNED_PURGE_PERMISSION: &str = "memory.purge";
+pub const GOVERNED_KEY_ROTATE_TOOL: &str = "memory.keys.rotate";
+pub const GOVERNED_KEY_ROTATE_PERMISSION: &str = "memory.keys.rotate";
 
 pub fn govern_governed_purge(deployment: &mut Deployment) {
     deployment.govern_tool(GOVERNED_PURGE_TOOL, GOVERNED_PURGE_PERMISSION);
+    deployment.govern_tool(GOVERNED_KEY_ROTATE_TOOL, GOVERNED_KEY_ROTATE_PERMISSION);
+}
+
+pub fn governed_key_rotate_tool_spec() -> Value {
+    json!({"name":GOVERNED_KEY_ROTATE_TOOL,
+        "description":"Rewrap this tenant's encrypted provider artifacts to the operator-configured active key. Requires an explicit key-rotation permission.",
+        "inputSchema":{"type":"object","additionalProperties":false,"properties":{}}})
 }
 
 pub fn governed_purge_tool_spec() -> Value {

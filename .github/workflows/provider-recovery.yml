@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'crates/ccos-enterprise-memory/**'
+      - 'crates/ccos-enterprise-envelope/**'
       - 'crates/ccos-enterprise-octasoma/**'
       - 'crates/ccos-enterprise-mcp/**'
       - 'crates/ccos-enterprise-tenancy/**'
@@ -14,6 +15,7 @@ on:
     branches: [main]
     paths:
       - 'crates/ccos-enterprise-memory/**'
+      - 'crates/ccos-enterprise-envelope/**'
       - 'crates/ccos-enterprise-octasoma/**'
       - 'crates/ccos-enterprise-mcp/**'
       - 'crates/ccos-enterprise-tenancy/**'
@@ -52,6 +54,9 @@ jobs:
           grep -E '^recovery::tests::fresh_process_reconstructs_actual_provider_from_the_durable_image: test$' /tmp/recovery-tests.txt
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --lib recovery::tests --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --lib generation::purge::tests --locked
+          cargo +"$TOOLCHAIN" test -p ccos-enterprise-envelope --locked
+          cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --lib generation::encrypted_artifacts::tests --locked
+          cargo +"$TOOLCHAIN" test -p ccos-enterprise-mcp --bin ccos-enterprise-mcp-server kms_server_tests --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --test generation_selector --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --test generation_retry --locked
           cargo +"$TOOLCHAIN" test -p ccos-enterprise-octasoma --test accepted_evidence_write --locked

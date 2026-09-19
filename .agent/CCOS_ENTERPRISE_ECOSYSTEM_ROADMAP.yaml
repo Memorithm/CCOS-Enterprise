@@ -407,7 +407,7 @@ pending_memory_slices_2026_09_19:
         - eight_unsupported_positive_paraphrases_remain_measured_misses
     - pr: 170
       name: reproducible_governed_memory_and_RAG_comparative_campaign
-      head: 838ae18292a09f98995cacc4b97c6b569b9e9857
+      head: 66617ac5f54d9cb7e8f9b93117f32550ab1a4277
       base: feat/measured-semantic-candidates-20260919
       status: open_no_conflicts_GitHub_execution_blocked
       contract: docs/RAG_COMPARATIVE_CAMPAIGN.md
@@ -416,7 +416,7 @@ pending_memory_slices_2026_09_19:
         - frozen_artifact_hashes_and_independently_supplied_answer_judgments
         - ranking_citations_policy_abstention_failure_cost_and_paired_cluster_metrics
         - runtime_errors_never_rewarded_as_correct_abstentions
-      local_python_tests: 12_passed
+      local_python_tests: 18_passed_on_scratch_and_connected_ARM_host
       limits:
         - supplied_runner_measurements_are_not_authenticated_by_the_scorer
         - synthetic_smoke_outputs_and_timings_not_executed_system_results
@@ -436,3 +436,38 @@ pending_memory_slices_2026_09_19:
     - resolve_all_conflicts_and_red_gates_before_each_merge
     - retarget_or_rebase_stacked_branches_after_predecessor_merge_then_verify_applicable_CI_again
     - never_merge_this_roadmap_to_main_without_explicit_user_request
+
+reviewed_campaign_result_binding_2026_09_19:
+  status: published_pr_170_unmerged_GitHub_gates_pending
+  head: 66617ac5f54d9cb7e8f9b93117f32550ab1a4277
+  base_head: 838ae18292a09f98995cacc4b97c6b569b9e9857
+  contract: docs/RAG_COMPARATIVE_CAMPAIGN.md
+  reproduced_defect: replaced_answer_inherited_old_favorable_review_after_result_file_hash_update
+  regression_before_fix: expected_rejection_test_failed_on_previous_evaluator
+  delivers:
+    - schema_2_judgment_result_sha256_binds_arm_and_complete_reviewed_result_row
+    - query_protocol_answer_citations_context_ranking_outcome_and_costs_are_bound
+    - stale_or_missing_binding_refuses_campaign_without_partial_output
+    - legacy_schema_requires_original_reviewed_outputs_or_repeated_adjudication
+    - no_automatic_rebinding_of_real_reviews
+  local_validation:
+    python_tests: 18_passed_on_scratch_and_connected_ARM_host
+    cli_synthetic_smoke: passed_no_real_model_measurement
+    full_history_author_policy: passed_on_exact_head
+    changed_files: 5
+    Core_changes: none
+  GitHub_verification:
+    pr_168_retry_run: 35440263234
+    retry_attempt: 2
+    retry_observation: zero_started_steps_account_payments_or_spending_limit_annotation
+    new_pr_170_runs: [35441272964, 35441272972, 35441273041, 35441273068, 35441273084]
+    latest_observation: queued_no_completed_success_claim
+    merge_performed: false
+  related_component_review:
+    path: core/src/eval.rs
+    observation: inline_integer_answer_grading_has_no_external_judgment_join_to_patch
+    reuse_rule: external_review_consumers_should_bind_reviews_to_exact_results_without_copying_Core
+  limits:
+    - hashes_are_not_signatures_or_protection_against_coordinated_result_and_review_falsification
+    - no_independent_holdout_or_proprietary_encoder_training_or_RAG_superiority_result
+    - existing_real_schema_1_artifacts_require_explicit_migration

@@ -57,7 +57,7 @@ their raw sources; canonical promotion remains an explicit governed decision.
 ## Recorded local regression, 2026-09-19
 
 [Raw report](benchmarks/semantic-relations-20260919-aarch64.json), clean code
-`af6aa594bcfd0b665770cfe35ecc59f027103b8d`, Rust 1.89, ARM64 NVIDIA Thor:
+`94d68ff9c582852268eda42affb49ca6d33f9617`, Rust 1.89, ARM64 NVIDIA Thor:
 20 TP, 0 FP, 8 FN; precision 1.0, recall 0.714286, F1 0.833333, case coverage
 0.416667. The 28 abstained units include eight missed paraphrases. These numbers
 apply only to the authored fixture, not independent language understanding.

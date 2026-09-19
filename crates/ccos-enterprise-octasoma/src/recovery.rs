@@ -28,6 +28,7 @@ const MAX_VECTOR_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROJECTOR_BYTES: usize = 32 * 1024 * 1024;
 const FORMAT_VERSION: u32 = 1;
+const PURGE_FORMAT_VERSION: u32 = 2;
 // Deliberately fail closed across backend revisions; migration must be qualified.
 const BACKEND_REVISION: &str = "2e2e0f1ed88d81675f301819529aeb3aa6053c72";
 
@@ -68,14 +69,31 @@ impl RecoveryConfig {
 /// One original governed insertion, in original insertion order.
 ///
 /// Space comes only from the canonical descriptor, never a provider label.
-/// Forgotten rows retain payload and capacity consumption: omission would change
-/// quota and could resurrect an asset after recovery. This is not physical purge.
+/// Logical forget retains payload and capacity. A physical tombstone retains only
+/// its identity: empty embedding and payload with `forgotten = true`. Recovery
+/// accepts that sentinel only for inactive governance and never inserts it into
+/// the provider. Generation publication additionally preserves the purge floor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecoveryRecord {
     pub asset_id: MemoryAssetId,
     pub embedding: Vec<f32>,
     pub payload: Vec<u8>,
     pub forgotten: bool,
+}
+
+impl RecoveryRecord {
+    pub fn physical_tombstone(asset_id: MemoryAssetId) -> Self {
+        Self {
+            asset_id,
+            embedding: Vec::new(),
+            payload: Vec::new(),
+            forgotten: true,
+        }
+    }
+
+    pub fn is_physically_purged(&self) -> bool {
+        self.forgotten && self.embedding.is_empty() && self.payload.is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -191,7 +209,11 @@ impl RecoveryImage {
             encode_governed_memory_projection(authority).map_err(RecoveryError::Projection)?;
         validate_records(authority, config, records)?;
         let wire = WireImage {
-            version: FORMAT_VERSION,
+            version: if records.iter().any(RecoveryRecord::is_physically_purged) {
+                PURGE_FORMAT_VERSION
+            } else {
+                FORMAT_VERSION
+            },
             backend_revision: BACKEND_REVISION.into(),
             config,
             governance: String::from_utf8(governance)
@@ -432,7 +454,9 @@ pub fn restore_governed_memory(
         return Err(RecoveryError::DigestMismatch);
     }
     let wire: WireImage = serde_json::from_slice(&bytes).map_err(RecoveryError::Json)?;
-    if wire.version != FORMAT_VERSION || wire.backend_revision != BACKEND_REVISION {
+    if ![FORMAT_VERSION, PURGE_FORMAT_VERSION].contains(&wire.version)
+        || wire.backend_revision != BACKEND_REVISION
+    {
         return Err(RecoveryError::Invalid(
             "unsupported format or backend revision",
         ));
@@ -459,6 +483,11 @@ pub fn restore_governed_memory(
             })
         })
         .collect::<Result<Vec<_>, RecoveryError>>()?;
+    if wire.version == FORMAT_VERSION && records.iter().any(RecoveryRecord::is_physically_purged) {
+        return Err(RecoveryError::Invalid(
+            "legacy image cannot contain physical tombstones",
+        ));
+    }
     validate_records(authority, expected_config, &records)?;
     let mut provider = EnterpriseOctaSoma::new(
         expected_config.dimension,
@@ -468,6 +497,9 @@ pub fn restore_governed_memory(
     )
     .map_err(RecoveryError::Provider)?;
     for record in &records {
+        if record.is_physically_purged() {
+            continue;
+        }
         let descriptor = authority
             .graph
             .descriptor(&record.asset_id)
@@ -503,7 +535,9 @@ fn validate_records(
     config: RecoveryConfig,
     records: &[RecoveryRecord],
 ) -> Result<(), RecoveryError> {
-    if records.len() > config.per_tenant_capacity || records.len() > MAX_RECORDS {
+    if records.iter().filter(|r| !r.is_physically_purged()).count() > config.per_tenant_capacity
+        || records.len() > MAX_RECORDS
+    {
         return Err(RecoveryError::Limit("record count"));
     }
     if records.len() != authority.graph.len() {
@@ -524,6 +558,16 @@ fn validate_records(
         }
         if record.asset_id.as_str().len() > 4096 {
             return Err(RecoveryError::Limit("asset identifier bytes"));
+        }
+        if record.is_physically_purged() {
+            if authority.graph.state(&record.asset_id)
+                == Some(ccos_enterprise_memory::MemoryAssetState::Active)
+            {
+                return Err(RecoveryError::Invalid(
+                    "physical tombstone must remain inactive",
+                ));
+            }
+            continue;
         }
         crate::validate_embedding(&record.embedding, config.dimension)
             .map_err(RecoveryError::Provider)?;

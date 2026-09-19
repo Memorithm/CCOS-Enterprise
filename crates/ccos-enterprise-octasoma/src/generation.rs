@@ -41,6 +41,10 @@ const PROVIDER_LOCK_FILE: &str = ".provider-generation.lock";
 const MAX_SELECTOR_BYTES: usize = 64 * 1024;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
+#[path = "purge.rs"]
+mod purge;
+pub use purge::{PreparedPurge, PurgeReceipt};
+
 #[derive(Debug)]
 pub enum ProviderGenerationError {
     Io { path: PathBuf, source: io::Error },
@@ -164,6 +168,11 @@ impl ProviderGenerationStore {
         records: &[RecoveryRecord],
     ) -> Result<Self, ProviderGenerationError> {
         let tenant = authority.tenant.clone();
+        if records.iter().any(RecoveryRecord::is_physically_purged) {
+            return Err(ProviderGenerationError::Invalid(
+                "initialization cannot invent purge history",
+            ));
+        }
         validate_tenant(&tenant)?;
         let requested = root.as_ref();
         fs::create_dir_all(requested).map_err(|source| io_error(requested, source))?;
@@ -224,7 +233,7 @@ impl ProviderGenerationStore {
         sync_visible_selector(&root)?;
         let selector = read_selector(&root.join(PROVIDER_SELECTOR_FILE))?;
         validate_selector(&selector, &expected_tenant)?;
-        match selector.version {
+        let store = match selector.version {
             LEGACY_GENERATION_SELECTOR_VERSION => {
                 Self::open_v1(root, lock, expected_tenant, selector)
             }
@@ -232,7 +241,8 @@ impl ProviderGenerationStore {
             _ => Err(ProviderGenerationError::Invalid(
                 "unsupported selector version",
             )),
-        }
+        }?;
+        store.recover_pending_purge()
     }
 
     fn open_v1(
@@ -321,14 +331,28 @@ impl ProviderGenerationStore {
         config: RecoveryConfig,
         records: &[RecoveryRecord],
     ) -> Result<Self, ProviderGenerationError> {
+        self.validate_purge_transition(&authority, records)?;
+        self.publish_generation(&authority, config, records)?;
         let root = self.root.clone();
         let tenant = self.tenant.clone();
+        drop(self);
+        Self::open(&root, tenant)
+    }
+
+    fn publish_generation(
+        &self,
+        authority: &GovernedMemoryProjection,
+        config: RecoveryConfig,
+        records: &[RecoveryRecord],
+    ) -> Result<(), ProviderGenerationError> {
+        let root = &self.root;
+        let tenant = &self.tenant;
         let generation = self
             .generation
             .checked_add(1)
             .ok_or(ProviderGenerationError::GenerationOverflow)?;
-        let governance_bytes = encode_governed_memory_projection(&authority)?;
-        let current = decode_governed_memory_projection(&governance_bytes, &tenant)?;
+        let governance_bytes = encode_governed_memory_projection(authority)?;
+        let current = decode_governed_memory_projection(&governance_bytes, tenant)?;
         let image = RecoveryImage::capture(&current, config, records)?;
 
         let governance_generations = root.join(GOVERNANCE_GENERATIONS_DIR);
@@ -343,6 +367,7 @@ impl ProviderGenerationStore {
         )?;
         let image_file = provider_generation_filename(generation);
         write_new_or_verify_exact(&provider_generations.join(&image_file), image.as_bytes())?;
+        purge::checkpoint(root, "artifacts")?;
         let selector = WireSelector {
             version: GENERATION_SELECTOR_VERSION,
             tenant: tenant.as_str().to_string(),
@@ -353,9 +378,7 @@ impl ProviderGenerationStore {
             governance_sha256: sha256_hex(&governance_bytes),
             config,
         };
-        replace_selector(&root, &selector)?;
-        drop(self);
-        Self::open(&root, tenant)
+        replace_selector(root, &selector)
     }
 
     pub fn root(&self) -> &Path {

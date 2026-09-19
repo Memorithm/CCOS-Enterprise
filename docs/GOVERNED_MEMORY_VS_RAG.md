@@ -7,12 +7,18 @@ validity or truth. RAG reference systems may themselves implement governance.
 
 ## Implemented served path
 
-The actual stdio server exposes `memory.context` and `memory.evidence.write`
+The actual stdio server exposes `memory.context`, `memory.evidence.write` and `memory.purge`
 through authenticated `Deployment::admit`, quota/audit and the existing durable
 execution/effect/settlement lifecycle. #135 and #136 are closed; they no longer
 describe missing server wiring. Writes fix tenant space, Evidence stratum and
 Unverified trust server-side. They cannot choose their own authority or promote
 themselves into the default VerifiedOnly served context.
+
+Physical purge requires its own permission, invalidates the complete descendant
+closure, rebuilds the provider without the purged payloads/vectors and removes
+retired generation files. Reserved inactive IDs and a durable floor prevent
+resurrection within the retained tenant root. See [A10](GOVERNED_PHYSICAL_PURGE.md)
+for crash recovery, backup boundaries and residual metadata.
 
 `ProviderGenerationStore` owns the cooperating-writer lock and selects immutable
 provider and governance artifacts through one selector published last. Startup

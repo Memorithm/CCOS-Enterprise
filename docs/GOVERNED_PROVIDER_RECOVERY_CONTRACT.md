@@ -1,6 +1,6 @@
 # Governed provider recovery and generation publication
 
-Incremental A07/A08 recovery work after #152/#154/#155, tracked by #136.
+A07/A08 recovery and served writes (#152–#163), A09 bounded scale, and A10 physical purge. Issues #135/#136 were closed by the served paths.
 This contract covers reconstructible provider data plus local generation
 selection. It does not claim that arbitrary Core `memory.ingest` calls already
 produce governed semantic records, nor does it create authority from retrieval
@@ -14,7 +14,7 @@ seed and per-tenant capacity. It records the original finite f32 bit patterns,
 opaque asset identities, binary payloads and logical-forget tombstones. Spaces
 come from canonical descriptors. Exactly one record per descriptor and explicit
 trust for each asset are required; stale/invalidated assets are retained, not
-reactivated or silently dropped. Forgotten rows continue to consume capacity.
+reactivated or silently dropped. Logically forgotten rows continue to consume capacity. A10 format-2 physical tombstones retain inactive identity metadata with empty vectors/payloads and do not consume provider capacity; format 1 remains readable.
 The source order is retained because replay order is part of the input contract.
 
 The image includes canonical governance bytes, format version and the exact
@@ -115,35 +115,25 @@ read/sync errors and fresh-process provider reconstruction. The real MCP stdio
 regression verifies that the selected provider generation still composes with
 the authenticated governed-context path delivered by #155.
 
-## Still required for #136
+## Served mutation and purge status
 
-1. **Authoritative accepted-write capture.** `memory.ingest` carries source text,
-   not the governed semantic tuple (`MemoryAssetId`, canonical `MemorySpace`,
-   embedding, payload). CCOS must define the authoritative producer of that tuple
-   and capture it only after the corresponding governed write is accepted. No
-   embedding may be fabricated from Core ingest input merely to populate a
-   recovery image.
-2. **Admitted generation advancement.** The server must invoke generation
-   advancement from the existing request/effect/execution/quota/audit lifecycle,
-   with a durable receipt identifying which accepted writes constitute the
-   complete next generation. A library-level `advance` call is not itself an MCP
-   authorization or settlement event.
-3. **Crash/restart qualification around live advancement.** The current tests
-   prove selector-last publication and fresh-process reopen, but do not claim a
-   forced-termination test at every server settlement boundary or a physical
-   power-loss/fsync experiment.
-4. **Optional anti-rollback/encryption work.** Generation receipts are integrity
-   bindings, not signatures, monotonic hardware counters or encryption. Images
-   contain plaintext payloads and embeddings. Logical forget remains distinct
-   from physical purge.
+PR #159 connected `memory.evidence.write` to the authenticated admission,
+execution/effect/quota/audit lifecycle, closing #136. Inputs remain explicit
+asset/evidence/embedding/payload tuples; the server fixes tenant space, direct
+Evidence stratum and Unverified trust. Succeeded generation receipts are checked
+on restart before settlement. Ambiguous Started effects require reconciliation.
+Core ingest does not fabricate embeddings or promote semantic truth.
 
-No measured retrieval-quality or large-scale performance superiority is claimed
-by this contract. The reusable consumer surface may later support SoulSystem or
-other Memorithm products, but those consumers must not create local authority or
-gain raw adapter state.
+A10 adds independently authorized `memory.purge`, durable intent, physical
+compaction and a retained local purge floor. The floor additionally constrains
+selector opens and ordinary generation advancement; an older selector cannot
+resurrect purged identities while the latest floor remains. Reopening pending
+physical intents rolls forward before serving. See the complete
+[purge contract](GOVERNED_PHYSICAL_PURGE.md), including real process-kill tests
+and the separate MCP settlement boundary.
 
-Source baseline: Memorithm/CCOS-Enterprise `main` at
-`f908fb7b6128e083bd8dafbc255272bb9e18f4f1` (15 September 2026), plus the
-#136 generation-v2 candidate. Rust standard-library filesystem guarantees are
-used conservatively; no claim extends them to malicious filesystems or power-loss
-behavior not explicitly tested.
+Tenant KMS, external monotonic rollback protection, backup-wide erasure and
+physical power-loss qualification remain separate work. Images are still
+plaintext. A09 measures the bounded synthetic pipeline and normal reconstruction;
+it does not establish retrieval-quality superiority over RAG. No Core source
+change or Enterprise dependency backflow is introduced by these mechanisms.

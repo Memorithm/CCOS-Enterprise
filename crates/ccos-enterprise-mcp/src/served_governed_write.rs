@@ -1,4 +1,4 @@
-//! Durable stdio execution seam for `memory.evidence.write`.
+//! Durable stdio execution seam for evidence writes and physical purge.
 //!
 //! The module reuses the server's authenticated identity, Deployment admission,
 //! execution journal, effect marker and quota settlement. Provider generation
@@ -7,10 +7,14 @@
 //! converted to a retryable tool failure.
 
 use super::*;
-use ccos_enterprise_mcp::GOVERNED_EVIDENCE_WRITE_TOOL;
+use ccos_enterprise_mcp::{GOVERNED_EVIDENCE_WRITE_TOOL, GOVERNED_PURGE_TOOL};
 use ccos_enterprise_memory::{MemoryAssetId, MemoryEvidenceRef};
+use ccos_enterprise_provider_adapter::accepted_write::PreparedEvidenceGeneration;
 use ccos_enterprise_provider_adapter::accepted_write::{
     AcceptedEvidenceWrite, EvidenceGenerationReceipt,
+};
+use ccos_enterprise_provider_adapter::generation::{
+    PreparedPurge, ProviderGenerationStore, PurgeReceipt,
 };
 use ccos_enterprise_tenancy::TenantId;
 
@@ -18,15 +22,127 @@ struct GovernedEvidenceArguments {
     write: AcceptedEvidenceWrite,
 }
 
+enum MutationArguments {
+    Evidence(AcceptedEvidenceWrite),
+    Purge(MemoryAssetId),
+}
+enum PreparedMutation {
+    Evidence(PreparedEvidenceGeneration),
+    Purge(PreparedPurge),
+}
+struct MutationReceipt {
+    generation: u64,
+    asset_id: MemoryAssetId,
+    image_digest: [u8; 32],
+    purged_assets: Option<usize>,
+    value: Value,
+}
+
+impl MutationArguments {
+    fn prepare(
+        self,
+        store: &ProviderGenerationStore,
+        tenant: &str,
+    ) -> Result<PreparedMutation, String> {
+        match self {
+            Self::Evidence(write) => {
+                if write.embedding.len() != store.config().dimension {
+                    return Err(format!(
+                        "embedding dimension mismatch: expected {}, found {}",
+                        store.config().dimension,
+                        write.embedding.len()
+                    ));
+                }
+                store
+                    .prepare_unverified_evidence(write)
+                    .map(PreparedMutation::Evidence)
+                    .map_err(|e| e.to_string())
+            }
+            Self::Purge(asset_id) => {
+                let tenant = TenantId::validated(tenant).ok_or("invalid admitted tenant")?;
+                store
+                    .prepare_purge(&tenant, asset_id)
+                    .map(PreparedMutation::Purge)
+                    .map_err(|e| e.to_string())
+            }
+        }
+    }
+}
+
+impl PreparedMutation {
+    fn commit(
+        self,
+        store: ProviderGenerationStore,
+    ) -> Result<(ProviderGenerationStore, MutationReceipt), String> {
+        match self {
+            Self::Evidence(prepared) => {
+                let (next, receipt) = store
+                    .commit_prepared_evidence(prepared)
+                    .map_err(|e| e.to_string())?;
+                let value = evidence_write_result(&receipt);
+                Ok((
+                    next,
+                    MutationReceipt {
+                        generation: receipt.generation,
+                        asset_id: receipt.asset_id,
+                        image_digest: receipt.image_digest,
+                        purged_assets: None,
+                        value,
+                    },
+                ))
+            }
+            Self::Purge(prepared) => {
+                let (next, receipt) = store
+                    .commit_prepared_purge(prepared)
+                    .map_err(|e| e.to_string())?;
+                let value = json!({
+                    "content": [{"type": "text", "text": "Governed provider purge and compaction completed"}],
+                    "structuredContent": { "tool": GOVERNED_PURGE_TOOL, "generation": receipt.generation,
+                        "asset_id": receipt.asset_id.as_str(), "purged_assets_total": receipt.purged_assets,
+                        "provider_image_sha256": hex_digest(receipt.image_digest) }
+                });
+                Ok((
+                    next,
+                    MutationReceipt {
+                        generation: receipt.generation,
+                        asset_id: receipt.asset_id,
+                        image_digest: receipt.image_digest,
+                        purged_assets: Some(receipt.purged_assets),
+                        value,
+                    },
+                ))
+            }
+        }
+    }
+}
+
 impl Server {
-    pub(super) fn call_governed_evidence_write(
+    pub(super) fn call_governed_mutation(
         &mut self,
         identity: &ccos_enterprise_auth::AuthenticatedActor,
         request: &GatewayRequest,
         meta: &Meta,
         arguments: &Value,
     ) -> Result<Value, (i64, String)> {
-        let parsed = parse_arguments(arguments).map_err(|error| (-32602, error))?;
+        let parsed = if request.tool == GOVERNED_PURGE_TOOL {
+            let object = arguments
+                .as_object()
+                .ok_or_else(|| (-32602, "purge arguments must be an object".into()))?;
+            if object.len() != 1 || !object.contains_key("asset_id") {
+                return Err((-32602, "purge accepts only asset_id".into()));
+            }
+            let name = object["asset_id"]
+                .as_str()
+                .filter(|s| s.len() <= 4096)
+                .ok_or_else(|| (-32602, "invalid purge asset_id".into()))?;
+            MutationArguments::Purge(MemoryAssetId::new(name).map_err(|e| (-32602, e.to_string()))?)
+        } else {
+            MutationArguments::Evidence(
+                parse_arguments(arguments)
+                    .map_err(|error| (-32602, error))?
+                    .write,
+            )
+        };
         let checkpoint = DeploymentCheckpoint::capture(self.front_door.deployment());
         let execution = DispatchExecution::new(
             meta.turn_id.clone(),
@@ -59,7 +175,7 @@ impl Server {
                         turn_id: execution.turn_id.clone(),
                         step_id: execution.step_id.clone(),
                         call_id: execution.call_id.clone(),
-                        tool: GOVERNED_EVIDENCE_WRITE_TOOL.to_string(),
+                        tool: request.tool.clone(),
                         input_sha256,
                     },
                 )?;
@@ -101,20 +217,7 @@ impl Server {
                         "governed provider tenant differs from admitted request".into(),
                     );
                 }
-                if parsed.write.embedding.len() != store.config().dimension {
-                    let found = parsed.write.embedding.len();
-                    let expected = store.config().dimension;
-                    self.governed_memory = Some(store);
-                    return self.fail_governed_evidence_without_side_effect(
-                        checkpoint,
-                        request,
-                        &execution,
-                        effect,
-                        format!("embedding dimension mismatch: expected {expected}, found {found}"),
-                    );
-                }
-
-                let prepared = match store.prepare_unverified_evidence(parsed.write) {
+                let prepared = match parsed.prepare(&store, &request.tenant) {
                     Ok(prepared) => prepared,
                     Err(error) => {
                         self.governed_memory = Some(store);
@@ -131,7 +234,7 @@ impl Server {
                 // From here publication can become externally visible. Any error
                 // is an unknown outcome: do not rewrite the Started marker and do
                 // not restore the admission checkpoint. Startup will fail closed.
-                let (store, receipt) = match store.commit_prepared_evidence(prepared) {
+                let (store, receipt) = match prepared.commit(store) {
                     Ok(committed) => committed,
                     Err(error) => {
                         let reason = format!(
@@ -143,7 +246,7 @@ impl Server {
                 };
                 self.governed_memory = Some(store);
 
-                let value = evidence_write_result(&receipt);
+                let value = receipt.value;
                 let output_sha256 = successful_output_sha256(&value).map_err(|error| {
                     let reason = format!("cannot hash governed-evidence output: {error}");
                     self.poisoned = Some(reason);
@@ -157,6 +260,7 @@ impl Server {
                 effect.governed_generation = Some(receipt.generation);
                 effect.governed_asset_id = Some(receipt.asset_id.as_str().to_string());
                 effect.governed_image_sha256 = Some(hex_digest(receipt.image_digest));
+                effect.governed_purged_assets = receipt.purged_assets;
                 if let Err(error) = write_effect(&effect_path(&self.config.state_dir), &effect) {
                     self.poisoned = Some(error.clone());
                     return Err((
@@ -268,7 +372,9 @@ pub(super) fn validate_recovered_evidence_effect(
     config: &Config,
     effect: &EffectRecord,
 ) -> Result<(), String> {
-    if effect.tool != GOVERNED_EVIDENCE_WRITE_TOOL || effect.state != EffectState::Succeeded {
+    if ![GOVERNED_EVIDENCE_WRITE_TOOL, GOVERNED_PURGE_TOOL].contains(&effect.tool.as_str())
+        || effect.state != EffectState::Succeeded
+    {
         return Ok(());
     }
     let generation = effect
@@ -296,12 +402,23 @@ pub(super) fn validate_recovered_evidence_effect(
     let store =
         ccos_enterprise_provider_adapter::generation::ProviderGenerationStore::open(root, tenant)
             .map_err(|error| format!("cannot reopen governed evidence generation: {error}"))?;
-    let receipt = EvidenceGenerationReceipt {
-        generation,
-        asset_id: asset,
-        image_digest: digest,
+    let matches = if effect.tool == GOVERNED_PURGE_TOOL {
+        store.matches_purge_receipt(&PurgeReceipt {
+            generation,
+            asset_id: asset,
+            image_digest: digest,
+            purged_assets: effect
+                .governed_purged_assets
+                .ok_or("purge effect is missing tombstone count")?,
+        })
+    } else {
+        store.matches_evidence_receipt(&EvidenceGenerationReceipt {
+            generation,
+            asset_id: asset,
+            image_digest: digest,
+        })
     };
-    if !store.matches_evidence_receipt(&receipt) {
+    if !matches {
         return Err("governed evidence effect receipt does not match selected generation".into());
     }
     Ok(())

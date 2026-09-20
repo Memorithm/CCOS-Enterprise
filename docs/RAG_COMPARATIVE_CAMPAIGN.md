@@ -81,7 +81,7 @@ review declarations and training provenance require independent operational
 verification. This preparation does not silently launch paid model jobs or
 download restricted datasets.
 
-### Schema 2: bind each judgment to the result actually reviewed
+### Schema 3: bind reviews, decision rules and qrel coverage
 
 An `(arm_id, query_id)` join alone permits a substituted answer to inherit an old
 favorable review, even when the result artifact's file hash is updated correctly.
@@ -99,11 +99,26 @@ not. The scorer checks every binding before scoring that arm. A missing or stale
 binding refuses the entire campaign, with no partial report. It does not repair
 bindings or relabel results automatically.
 
-Schema 1 is refused. For existing campaigns, recover the exact reviewed outputs
-and their review records, verify their correspondence, then export schema 2;
+Schema 1 and schema 2 are refused. For existing campaigns, recover the exact reviewed outputs
+and their review records, verify their correspondence, then export schema 3;
 otherwise repeat adjudication. The synthetic fixture was explicitly re-bound as
 test data. These hashes prevent unnoticed mismatch, not coordinated falsification
 of both results and reviews; they are not signatures or proof of honest review.
+
+Schema 3 requires a decision_rule object in the manifest. It names the primary
+RAG baseline and metric, the minimum mean improvement, maximum p95 latency/RAM/
+cost regressions and whether authority regressions are forbidden. The scorer
+validates that the baseline is present and paired with governed memory, computes
+decision_rule_sha256 from its canonical JSON, exposes the rule and an explicit
+assessment in the report, and still emits superiority_claim: false. Cost is
+recorded as an integer cost_microunits measurement so a real run cannot leave
+that guardrail declarative-only. The manifest hash also covers this section.
+
+Retrieval scores now expose qrel denominators: each row reports judged and
+unjudged returned documents plus qrel_coverage over the top-k results; arm
+summaries aggregate the same numerator and denominator. Unjudged documents are
+not silently reclassified as negative evidence: nDCG still follows the declared
+zero-gain convention, while coverage makes incomplete judgments visible.
 
 ## Run and inspect
 
@@ -129,8 +144,9 @@ failed requests or label them `status: ok`.
 Reports include nDCG@k (gain `2^relevance - 1`), Recall@k, MRR@k, abstention,
 adjudicated support, task success, citation integrity, unauthorized/stale
 returns, budget violations, token totals, p50/p95/p99, batch throughput, peak
-RSS and restart time. Unjudged documents have relevance zero; disclose judgment
-coverage. Retrieval means exclude questions without positive qrels and report
+RSS, restart time, cost and qrel judgment coverage. Unjudged documents have
+relevance zero for the declared retrieval metrics, but each row and arm summary
+also exposes judged/unjudged denominators. Retrieval means exclude questions without positive qrels and report
 null where undefined. Those questions still count in abstention/task metrics.
 The full per-query rows preserve denominators and misses.
 

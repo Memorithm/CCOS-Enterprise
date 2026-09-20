@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "scope": "synthetic_smoke",
   "protocol": {
     "generator": {
@@ -41,6 +41,15 @@
     "split_author": "synthetic-fixture",
     "training_overlap_audit_sha256": "sha256:c7dcdacced3be0ee35d39376f5832fdb14f3e44095328910e75870e715a387f8"
   },
+  "decision_rule": {
+    "primary_baseline": "reranked",
+    "primary_metric": "task_success",
+    "minimum_mean_improvement": 0,
+    "max_p95_latency_regression_percent": 25,
+    "max_peak_rss_regression_percent": 25,
+    "max_cost_regression_percent": 25,
+    "require_zero_authority_regressions": true
+  },
   "arms": [
     {
       "id": "ccos",
@@ -66,7 +75,8 @@
       "measurement": {
         "wall_seconds": 0.06,
         "restart_ms": 0,
-        "peak_rss_bytes": 1024
+        "peak_rss_bytes": 1024,
+        "cost_microunits": 100
       },
       "results": {
         "path": "ccos.jsonl",
@@ -89,7 +99,8 @@
       "measurement": {
         "wall_seconds": 0.06,
         "restart_ms": 0,
-        "peak_rss_bytes": 1024
+        "peak_rss_bytes": 1024,
+        "cost_microunits": 100
       },
       "results": {
         "path": "lexical.jsonl",
@@ -120,7 +131,8 @@
       "measurement": {
         "wall_seconds": 0.06,
         "restart_ms": 0,
-        "peak_rss_bytes": 1024
+        "peak_rss_bytes": 1024,
+        "cost_microunits": 100
       },
       "results": {
         "path": "dense.jsonl",
@@ -151,7 +163,8 @@
       "measurement": {
         "wall_seconds": 0.06,
         "restart_ms": 0,
-        "peak_rss_bytes": 1024
+        "peak_rss_bytes": 1024,
+        "cost_microunits": 100
       },
       "results": {
         "path": "hybrid.jsonl",
@@ -182,7 +195,8 @@
       "measurement": {
         "wall_seconds": 0.06,
         "restart_ms": 0,
-        "peak_rss_bytes": 1024
+        "peak_rss_bytes": 1024,
+        "cost_microunits": 100
       },
       "results": {
         "path": "reranked.jsonl",

@@ -56,6 +56,9 @@ class CampaignTests(unittest.TestCase):
         self.assertFalse(first["superiority_claim"])
         self.assertEqual(first["scope"], "synthetic_smoke")
         self.assertEqual(first["arms"]["ccos"]["summary"]["ndcg"], 1)
+        self.assertEqual(first["arms"]["ccos"]["summary"]["qrel_coverage"], 1)
+        self.assertEqual(first["decision_rule"]["primary_baseline"], "reranked")
+        self.assertTrue(first["decision_rule_assessment"]["eligible_to_claim"])
         self.assertEqual(first["comparisons"][0]["paired_cluster_bootstrap"]["ndcg"]["ci95"], [0, 0])
 
     def test_modified_bytes_and_duplicate_json_keys_are_rejected(self):
@@ -108,9 +111,9 @@ class CampaignTests(unittest.TestCase):
 
     def test_legacy_and_missing_review_bindings_are_refused(self):
         self.manifest["schema_version"] = 1
-        with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "requires schema 2"):
+        with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "requires schema 3"):
             self.evaluate()
-        self.manifest["schema_version"] = 2
+        self.manifest["schema_version"] = 3
         judgments = self.rows(self.manifest["judgments"])
         del judgments[0]["result_sha256"]
         self.replace(self.manifest["judgments"], judgments)
@@ -190,7 +193,20 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(result["q-fr"]["recall"], 1)
         self.assertEqual(result["q-fr"]["mrr"], 0.5)
         self.assertEqual(result["q-deleted"]["unsupported_claims"], 1)
+        self.assertEqual(result["q-fr"]["retrieved_judged_documents"], 1)
+        self.assertEqual(result["q-fr"]["retrieved_unjudged_documents"], 1)
+        self.assertEqual(result["q-fr"]["qrel_coverage"], 0.5)
+        self.assertIsNone(result["q-deleted"]["qrel_coverage"])
         self.assertEqual(result["q-deleted"]["task_success"], 0)
+
+    def test_decision_rule_must_name_a_compared_rag_baseline(self):
+        self.manifest["decision_rule"]["primary_baseline"] = "ccos"
+        with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "must be a RAG arm"):
+            self.evaluate()
+        self.manifest["decision_rule"]["primary_baseline"] = "reranked"
+        self.manifest["comparisons"] = [c for c in self.manifest["comparisons"] if c["baseline"] != "reranked"]
+        with self.assertRaisesRegex(CAMPAIGN.InvalidCampaign, "not compared|missing governed/reference"):
+            self.evaluate()
 
     def test_protocol_and_encoder_mismatches_cannot_win_a_comparison(self):
         self.manifest["arms"][2]["encoder"]["dimension"] = 256

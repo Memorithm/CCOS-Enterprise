@@ -167,6 +167,8 @@ def evaluate_row(row, query, docs, qrels, judgment, protocol, protocol_hash):
     ) for c in answer["citations"])
     labels = qrels.get(query["id"], {})
     top = returned[:protocol["k"]]
+    judged_top = sum(doc in labels for doc in top)
+    unjudged_top = len(top) - judged_top
     positives = {doc for doc, grade in labels.items() if grade > 0}
     gain = lambda grade: 2**grade - 1
     dcg = sum(gain(labels.get(doc, 0)) / math.log2(i + 2) for i, doc in enumerate(top))
@@ -184,6 +186,9 @@ def evaluate_row(row, query, docs, qrels, judgment, protocol, protocol_hash):
     return {
         "query_id": query["id"], "group": query["group"], "ndcg": dcg / ideal if ideal else None,
         "recall": len(set(top) & positives) / len(positives) if positives else None,
+        "judged_documents": len(labels), "positive_documents": len(positives),
+        "retrieved_judged_documents": judged_top, "retrieved_unjudged_documents": unjudged_top,
+        "qrel_coverage": judged_top / len(top) if top else None,
         "mrr": next((1 / (i + 1) for i, doc in enumerate(top) if doc in positives), 0.0) if positives else None,
         "abstention_correct": int(not runtime_failures and answer["abstained"] == (not query["answerable"])),
         "task_success": int(success), "adjudicated_support": supported / claims if claims else None,
@@ -220,8 +225,17 @@ def evaluate(path):
     root = path.parent
     manifest_bytes = bounded_read(path, 2 * 1024 * 1024)
     manifest = decode(manifest_bytes)
-    fields(manifest, "schema_version scope protocol corpus queries qrels judgments arms comparisons dataset_provenance")
-    require(type(manifest["schema_version"]) is int and manifest["schema_version"] == 2 and manifest["scope"] in ("synthetic_smoke", "held_out"), "unsupported campaign (requires schema 2 with result-bound judgments)")
+    fields(manifest, "schema_version scope protocol corpus queries qrels judgments arms comparisons dataset_provenance decision_rule")
+    require(type(manifest["schema_version"]) is int and manifest["schema_version"] == 3 and manifest["scope"] in ("synthetic_smoke", "held_out"), "unsupported campaign (requires schema 3 with result-bound judgments and a bound decision rule)")
+    decision_rule = manifest["decision_rule"]
+    fields(decision_rule, "primary_baseline primary_metric minimum_mean_improvement max_p95_latency_regression_percent max_peak_rss_regression_percent max_cost_regression_percent require_zero_authority_regressions")
+    label(decision_rule["primary_baseline"])
+    require(decision_rule["primary_metric"] in ("ndcg", "recall", "mrr", "abstention_correct", "task_success", "adjudicated_support"), "invalid primary decision metric")
+    for key in ("minimum_mean_improvement", "max_p95_latency_regression_percent",
+                "max_peak_rss_regression_percent", "max_cost_regression_percent"):
+        number(decision_rule[key])
+    require(type(decision_rule["require_zero_authority_regressions"]) is bool, "invalid authority decision rule")
+    decision_rule_sha256 = sha(canonical(decision_rule))
     provenance = manifest["dataset_provenance"]
     fields(provenance, "origin license split_author training_overlap_audit_sha256")
     for key in ("origin", "license", "split_author"):
@@ -278,6 +292,8 @@ def evaluate(path):
     arms = index(manifest["arms"], "id")
     require(len(arms) <= 64 and len(queries) <= 100000, "campaign population ceiling exceeded")
     require({a["family"] for a in arms.values()} == {"governed_memory", "lexical", "dense", "hybrid", "reranked"}, "all five reference families are required")
+    require(decision_rule["primary_baseline"] in arms, "primary decision baseline is not an arm")
+    require(arms[decision_rule["primary_baseline"]]["family"] != "governed_memory", "primary decision baseline must be a RAG arm")
     judgments = {}
     for judgment in artifact(root, manifest["judgments"]):
         fields(judgment, "arm_id query_id result_sha256 total_claims supported_claims answer_correct adjudicator blinded rubric_sha256")
@@ -293,7 +309,7 @@ def evaluate(path):
     require(len(judgments) == len(arms) * len(queries), "missing answer judgments")
     results = {}
     metrics = ("ndcg", "recall", "mrr", "abstention_correct", "task_success", "adjudicated_support")
-    counts = ("runtime_failures", "unsupported_claims", "rights_violations", "stale_returns", "context_violations", "budget_violations", "citation_count", "valid_citations", "citation_violations", "citation_rights_violations", "context_tokens", "answer_tokens", "embedding_tokens")
+    counts = ("runtime_failures", "unsupported_claims", "rights_violations", "stale_returns", "context_violations", "budget_violations", "citation_count", "valid_citations", "citation_violations", "citation_rights_violations", "context_tokens", "answer_tokens", "embedding_tokens", "judged_documents", "positive_documents", "retrieved_judged_documents", "retrieved_unjudged_documents")
     for aid, arm in arms.items():
         fields(arm, "id family encoder runner measurement results")
         if arm["family"] == "lexical":
@@ -311,10 +327,11 @@ def evaluate(path):
         require(isinstance(arm["runner"]["command"], list) and all(isinstance(s, str) for s in arm["runner"]["command"])
                 and arm["runner"]["command"] and isinstance(arm["runner"]["index_config"], dict), "missing runner recipe")
         measure = arm["measurement"]
-        fields(measure, "wall_seconds restart_ms peak_rss_bytes")
+        fields(measure, "wall_seconds restart_ms peak_rss_bytes cost_microunits")
         number(measure["wall_seconds"], positive=True)
         number(measure["restart_ms"])
         integer(measure["peak_rss_bytes"], 1)
+        integer(measure["cost_microunits"])
         rows = index(artifact(root, arm["results"]), "query_id")
         require(set(rows) == set(queries), "missing/extra query output")
         for qid, row in rows.items():
@@ -324,7 +341,13 @@ def evaluate(path):
         summary = {key: mean([r[key] for r in evaluated.values()]) for key in metrics}
         summary.update({key: sum(r[key] for r in evaluated.values()) for key in counts})
         summary["citation_integrity"] = (summary["valid_citations"] / summary["citation_count"] if summary["citation_count"] else None)
+        summary["qrel_coverage"] = (summary["retrieved_judged_documents"] /
+                                    (summary["retrieved_judged_documents"] + summary["retrieved_unjudged_documents"])
+                                    if summary["retrieved_judged_documents"] + summary["retrieved_unjudged_documents"] else None)
         summary["latency_ms"] = {f"p{p}": quantile([r["latency_ms"] for r in evaluated.values()], p) for p in (50, 95, 99)}
+        summary["peak_rss_bytes"] = measure["peak_rss_bytes"]
+        summary["restart_ms"] = measure["restart_ms"]
+        summary["cost_microunits"] = measure["cost_microunits"]
         summary["throughput_queries_per_second"] = len(queries) / measure["wall_seconds"]
         summary["protocol_clean"] = not any(summary[k] for k in ("runtime_failures", "rights_violations", "stale_returns", "context_violations", "budget_violations", "citation_violations", "citation_rights_violations"))
         results[aid] = {"family": arm["family"], "encoder": arm["encoder"], "runner": arm["runner"], "measurement": measure, "summary": summary, "rows": evaluated}
@@ -342,8 +365,48 @@ def evaluate(path):
     for aid, arm in arms.items():
         if arm["family"] == "governed_memory":
             require({arms[b]["family"] for a, b in pairs if a == aid} == {"lexical", "dense", "hybrid", "reranked"}, "missing governed/reference comparison")
-    return {"schema_version": 2, "scope": manifest["scope"], "manifest_sha256": sha(manifest_bytes),
+    primary_pair = ("ccos", decision_rule["primary_baseline"])
+    require(primary_pair in pairs, "primary decision baseline is not compared with governed memory")
+    primary = next(c for c in comparisons if (c["candidate"], c["baseline"]) == primary_pair)
+    candidate_summary = results["ccos"]["summary"]
+    baseline_summary = results[decision_rule["primary_baseline"]]["summary"]
+
+    def regression_percent(candidate, baseline):
+        if baseline == 0:
+            return 0 if candidate == 0 else None
+        return max(0, 100 * (candidate - baseline) / baseline)
+
+    primary_delta = primary["paired_cluster_bootstrap"][decision_rule["primary_metric"]]["mean_delta"]
+    latency_regression = regression_percent(candidate_summary["latency_ms"]["p95"], baseline_summary["latency_ms"]["p95"])
+    rss_regression = regression_percent(candidate_summary["peak_rss_bytes"], baseline_summary["peak_rss_bytes"])
+    cost_regression = regression_percent(candidate_summary["cost_microunits"], baseline_summary["cost_microunits"])
+    authority_clean = all(candidate_summary[key] == 0 for key in ("rights_violations", "stale_returns", "context_violations"))
+    authority_rule_ok = not decision_rule["require_zero_authority_regressions"] or authority_clean
+    decision_rule_assessment = {
+        "primary_baseline": decision_rule["primary_baseline"],
+        "primary_metric": decision_rule["primary_metric"],
+        "mean_improvement": primary_delta,
+        "minimum_improvement_met": primary_delta is not None and primary_delta >= decision_rule["minimum_mean_improvement"],
+        "p95_latency_regression_percent": latency_regression,
+        "p95_latency_regression_within_limit": latency_regression is not None and latency_regression <= decision_rule["max_p95_latency_regression_percent"],
+        "peak_rss_regression_percent": rss_regression,
+        "peak_rss_regression_within_limit": rss_regression is not None and rss_regression <= decision_rule["max_peak_rss_regression_percent"],
+        "cost_regression_percent": cost_regression,
+        "cost_regression_within_limit": cost_regression is not None and cost_regression <= decision_rule["max_cost_regression_percent"],
+        "authority_clean": authority_clean,
+        "eligible_to_claim": False,
+    }
+    decision_rule_assessment["eligible_to_claim"] = all((
+        decision_rule_assessment["minimum_improvement_met"],
+        decision_rule_assessment["p95_latency_regression_within_limit"],
+        decision_rule_assessment["peak_rss_regression_within_limit"],
+        decision_rule_assessment["cost_regression_within_limit"],
+        authority_rule_ok,
+    ))
+    return {"schema_version": 3, "scope": manifest["scope"], "manifest_sha256": sha(manifest_bytes),
             "evaluator_sha256": sha(Path(__file__).read_bytes()), "protocol_sha256": protocol_hash,
+            "decision_rule_sha256": decision_rule_sha256, "decision_rule": decision_rule,
+            "decision_rule_assessment": decision_rule_assessment,
             "protocol": protocol, "dataset_provenance": provenance, "query_count": len(queries), "source_count": len(docs),
             "superiority_claim": False, "arms": results, "comparisons": comparisons}
 

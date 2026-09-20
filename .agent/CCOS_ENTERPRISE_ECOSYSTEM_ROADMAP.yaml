@@ -278,14 +278,14 @@ reviewed_operational_slices:
     original_failure_run: 35430257768
 
 active_memory_campaign_2026_09_19:
-  baseline_main: 89a97f70804ff7ac39963b4cebb9c339865bdd48
+  baseline_main: 26a6074d168fa262c28ed2b85e145003dfd08bc0
   bound_context_pr_163_merge: 89a97f70804ff7ac39963b4cebb9c339865bdd48
   A09: merged_pr_165_measured_18_cases_90000_queries
   A10: merged_pr_166_governed_physical_purge_and_process_death_recovery
   tenant_envelope_KMS: merged_pr_167_encrypted_generations_and_governed_rotation
-  evidence_source_hash_resolution: pr_168_locally_validated_GitHub_execution_blocked
-  A06_measured_semantics: pr_169_locally_measured_GitHub_execution_blocked
-  comparative_RAG_campaign: pr_170_executable_contract_and_scorer_no_real_model_result
+  evidence_source_hash_resolution: merged_pr_168_main_26a6074d_GitHub_gates_green
+  A06_measured_semantics: included_in_pr_170_main_retarget_GitHub_gates_pending
+  comparative_RAG_campaign: pr_170_schema_3_contract_decision_rule_qrel_coverage_no_real_model_result
   compact_embedding_model:
     status: evaluated_for_controlled_comparative_prototype_not_trained
     SciRust_reviewed_commit: 9b34f52df617b71b233d00017fdc0728504b6342
@@ -376,7 +376,9 @@ pending_memory_slices_2026_09_19:
       name: exact_evidence_source_hash_and_byte_citation_resolution
       head: 37d4a36573af861a31b4f1f85538bc370ba2877b
       base: main
-      status: open_no_conflicts_GitHub_execution_blocked
+      status: merged_main_26a6074d
+      merge_commit: 26a6074d168fa262c28ed2b85e145003dfd08bc0
+      accepted_runs: [35440263234, 35440263200, 35440263221, 35440263196, 35440263225, 35440263194]
       contract: docs/VERIFIED_MEMORY_CITATIONS.md
       delivers:
         - frozen_bounded_existing_KnowledgeStore_metadata_under_shared_lock
@@ -392,7 +394,8 @@ pending_memory_slices_2026_09_19:
       name: measured_observational_semantic_relation_baseline
       head: 183648eb7bfb410673e50274eb2c9a295decfd6b
       base: feat/verified-memory-provenance-20260919
-      status: open_no_conflicts_GitHub_execution_blocked
+      status: merged_into_stacked_feature_included_by_pr_170
+      merge_commit: 31fa8522_feature_base_not_main
       contract: docs/MEASURED_SEMANTIC_EXTRACTION.md
       measured_clean_code: 94d68ff9c582852268eda42affb49ca6d33f9617
       measurement_branch: bench/semantic-relations-20260919
@@ -407,16 +410,19 @@ pending_memory_slices_2026_09_19:
         - eight_unsupported_positive_paraphrases_remain_measured_misses
     - pr: 170
       name: reproducible_governed_memory_and_RAG_comparative_campaign
-      head: 66617ac5f54d9cb7e8f9b93117f32550ab1a4277
-      base: feat/measured-semantic-candidates-20260919
-      status: open_no_conflicts_GitHub_execution_blocked
+      head: e6f65700e2275569586c859d5dcf20660667f864
+      base: main
+      status: open_no_conflicts_GitHub_gates_pending
+      prior_head: 66617ac5f54d9cb7e8f9b93117f32550ab1a4277
       contract: docs/RAG_COMPARATIVE_CAMPAIGN.md
       delivers:
         - five_reference_families_with_common_generator_rights_budgets_hardware_and_encoder_pairing
         - frozen_artifact_hashes_and_independently_supplied_answer_judgments
         - ranking_citations_policy_abstention_failure_cost_and_paired_cluster_metrics
+        - schema_3_bound_decision_rule_with_latency_ram_cost_guardrails_and_qrel_coverage
         - runtime_errors_never_rewarded_as_correct_abstentions
-      local_python_tests: 18_passed_on_scratch_and_connected_ARM_host
+      local_python_tests: 19_passed_on_scratch_and_connected_ARM_host
+    local_octasoma_tests: 45_passed_3_ignored_after_lock_guard_fix
       limits:
         - supplied_runner_measurements_are_not_authenticated_by_the_scorer
         - synthetic_smoke_outputs_and_timings_not_executed_system_results
@@ -438,31 +444,35 @@ pending_memory_slices_2026_09_19:
     - never_merge_this_roadmap_to_main_without_explicit_user_request
 
 reviewed_campaign_result_binding_2026_09_19:
-  status: published_pr_170_unmerged_GitHub_gates_pending
-  head: 66617ac5f54d9cb7e8f9b93117f32550ab1a4277
-  base_head: 838ae18292a09f98995cacc4b97c6b569b9e9857
+  status: published_pr_170_schema_3_unmerged_GitHub_gates_pending
+  head: e6f65700e2275569586c859d5dcf20660667f864
+  base_head: 26a6074d168fa262c28ed2b85e145003dfd08bc0
   contract: docs/RAG_COMPARATIVE_CAMPAIGN.md
   reproduced_defect: replaced_answer_inherited_old_favorable_review_after_result_file_hash_update
   regression_before_fix: expected_rejection_test_failed_on_previous_evaluator
   delivers:
-    - schema_2_judgment_result_sha256_binds_arm_and_complete_reviewed_result_row
+    - schema_3_judgment_result_sha256_binds_arm_and_complete_reviewed_result_row
+    - canonical_pre_registered_decision_rule_hash_and_guardrail_assessment
+    - per_query_and_summary_qrel_judgment_coverage_denominators
     - query_protocol_answer_citations_context_ranking_outcome_and_costs_are_bound
     - stale_or_missing_binding_refuses_campaign_without_partial_output
     - legacy_schema_requires_original_reviewed_outputs_or_repeated_adjudication
     - no_automatic_rebinding_of_real_reviews
   local_validation:
-    python_tests: 18_passed_on_scratch_and_connected_ARM_host
+    python_tests: 19_passed_on_scratch_and_connected_ARM_host
     cli_synthetic_smoke: passed_no_real_model_measurement
     full_history_author_policy: passed_on_exact_head
-    changed_files: 5
+    changed_files: 5_plus_provider_lock_guard
     Core_changes: none
   GitHub_verification:
     pr_168_retry_run: 35440263234
+    current_main: 26a6074d168fa262c28ed2b85e145003dfd08bc0
     retry_attempt: 2
     retry_observation: zero_started_steps_account_payments_or_spending_limit_annotation
-    new_pr_170_runs: [35441272964, 35441272972, 35441273041, 35441273068, 35441273084]
-    latest_observation: queued_no_completed_success_claim
+    new_pr_170_runs: [35514593943, 35514593940, 35514593926, 35514593931, 35514593939, 35514593991]
+    latest_observation: queued_on_exact_head_after_retarget_to_main_no_completed_success_claim
     merge_performed: false
+    fast_failure_fixed: provider_generation_open_error_path_now_uses_explicit_lock_guard
   related_component_review:
     path: core/src/eval.rs
     observation: inline_integer_answer_grading_has_no_external_judgment_join_to_patch
@@ -507,3 +517,22 @@ public_visibility_CI_retry_2026_09_19:
     - no_merge_on_local_results_or_on_queued_gates
     - preserve_clean_branches_and_recheck_applicable_CI_after_retargeting
     - keep_roadmap_separate_from_main
+resumed_public_visibility_validation_2026_09_20:
+  repository_visibility: public_verified
+  main: 26a6074d168fa262c28ed2b85e145003dfd08bc0
+  pr_170:
+    head: e6f65700e2275569586c859d5dcf20660667f864
+    base: main
+    retargeted_at: "2026-09-20T13:49:04Z"
+    workflows: [35514593943, 35514593940, 35514593926, 35514593931, 35514593939, 35514593991]
+    status: queued_runner_assignment
+    merge_performed: false
+  delivered_since_prior_head:
+    - explicit_LockGuard_releases_provider_generation_lock_on_failed_open
+    - schema_3_pre_registered_decision_rule_hash_and_latency_ram_cost_guardrails
+    - qrel_judged_unjudged_top_k_denominators_and_summary_coverage
+    - nineteen_adversarial_python_tests_and_schema_3_smoke_report
+  merge_gate:
+    - wait_for_all_applicable_workflows_success_on_exact_head
+    - verify_pr_base_main_and_head_sha_before_merge
+    - keep_this_roadmap_branch_separate_from_main

@@ -293,7 +293,7 @@ impl ProviderGenerationStore {
         validate_cipher(&expected_tenant, cipher.as_deref())?;
         let requested = root.as_ref();
         let root = fs::canonicalize(requested).map_err(|source| io_error(requested, source))?;
-        let lock = acquire_lock(&root)?;
+        let lock = LockGuard::new(acquire_lock(&root)?);
         resume_rotation(&root, cipher.as_deref())?;
         sync_visible_selector(&root)?;
         let selector_bytes = read_artifact(
@@ -326,7 +326,7 @@ impl ProviderGenerationStore {
 
     fn open_v1(
         root: PathBuf,
-        lock: File,
+        lock: LockGuard,
         expected_tenant: TenantId,
         selector: WireSelector,
     ) -> Result<Self, ProviderGenerationError> {
@@ -350,14 +350,14 @@ impl ProviderGenerationStore {
             config: selector.config,
             governance: GenerationGovernance::Legacy(governance),
             recovered,
-            _lock: lock,
+            _lock: lock.into_file(),
             cipher: None,
         })
     }
 
     fn open_v2(
         root: PathBuf,
-        lock: File,
+        lock: LockGuard,
         expected_tenant: TenantId,
         selector: WireSelector,
         cipher: Option<Arc<EnvelopeCipher>>,
@@ -394,7 +394,7 @@ impl ProviderGenerationStore {
             config: selector.config,
             governance: GenerationGovernance::Immutable(current),
             recovered,
-            _lock: lock,
+            _lock: lock.into_file(),
             cipher,
         })
     }
@@ -586,6 +586,30 @@ fn provider_generation_filename(generation: u64) -> String {
 
 fn governance_generation_filename(generation: u64) -> String {
     format!("generation-{generation:020}.governance.json")
+}
+
+struct LockGuard {
+    file: Option<File>,
+}
+
+impl LockGuard {
+    fn new(file: File) -> Self {
+        Self { file: Some(file) }
+    }
+
+    fn into_file(mut self) -> File {
+        self.file
+            .take()
+            .expect("provider lock guard consumed exactly once")
+    }
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = file.unlock();
+        }
+    }
 }
 
 fn acquire_lock(root: &Path) -> Result<File, ProviderGenerationError> {

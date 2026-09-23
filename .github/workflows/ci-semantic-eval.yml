@@ -6,6 +6,8 @@ on:
       - 'scripts/test-semantic-extraction-holdout.py'
       - 'scripts/score-semantic-extraction-holdout.py'
       - 'scripts/test-semantic-extraction-scoring.py'
+      - 'scripts/score-semantic-entity-linking.py'
+      - 'scripts/test-semantic-entity-linking.py'
       - '.github/workflows/ci-semantic-eval.yml'
 permissions:
   contents: read
@@ -17,3 +19,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 scripts/test-semantic-extraction-holdout.py
       - run: python3 scripts/test-semantic-extraction-scoring.py
+      - run: python3 scripts/test-semantic-entity-linking.py

@@ -743,3 +743,43 @@ experimental_proof_batch_2026_09_23:
   scientific_boundary:
     - no_real_model_comparison_has_been_executed_by_this_batch
     - no_superiority_claim_until_heldout_real_runs_and_independent_adjudication
+
+
+semantic_quality_batch_2026_09_23:
+  status: open_parallel_qualification
+  purpose: separate_semantic_quality_failure_modes_before_model_adoption
+  prs:
+    - pr: 188
+      branch: feat/semantic-holdout-contract-20260923
+      delivers:
+        - independently_reviewed_EN_FR_holdout_contract
+        - exact_source_hashes_and_byte_spans
+        - required_plain_paraphrase_negation_temporal_entity_confusion_abstention_coverage
+    - pr: 189
+      branch: feat/semantic-holdout-scoring-20260923
+      delivers:
+        - TP_FP_FN_and_precision_recall_F1_by_language_and_challenge
+        - abstention_accuracy
+        - reviewer_exact_agreement
+    - pr: 190
+      branch: feat/semantic-entity-linking-eval-20260923
+      delivers:
+        - entity_linking_scored_only_on_exact_mention_spans
+        - missed_and_spurious_mention_pairs_preserved
+    - pr: 191
+      branch: feat/citation-entailment-eval-20260923
+      delivers:
+        - semantic_entailment_separate_from_hash_span_integrity
+        - independent_reviewer_consensus_and_disagreement
+        - integrity_never_implies_entailment
+    - pr: 192
+      branch: feat/ann-approximation-loss-eval-20260923
+      delivers:
+        - exact_vs_ANN_top_k_overlap
+        - exact_top1_retention_and_reciprocal_rank
+        - index_approximation_loss_not_encoder_quality
+  adoption_rules:
+    - no_learned_extractor_promotion_without_independent_holdout_results
+    - no_entity_resolution_claim_from_relation_mentions_alone
+    - no_answer_truth_claim_from_verified_citation_bytes_alone
+    - measure_exact_search_before_ANN_when_evaluating_an_encoder

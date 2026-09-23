@@ -704,3 +704,42 @@ ent_provenance_batch_2_2026_09_23:
     - merge_only_after_exact_head_green_CI
     - retarget_each_stacked_PR_to_main_after_predecessor_merge_and_requalify
     - no_hypothetical_to_observed_or_verified_relabeling_by_similarity_or_trust
+
+
+experimental_proof_batch_2026_09_23:
+  status: open_parallel_qualification
+  purpose: make_real_comparative_evidence_auditable_before_any_superiority_claim
+  prs:
+    - pr: 183
+      branch: feat/rag-heldout-inventory-20260923
+      delivers:
+        - authorized_only_dataset_inventory
+        - exact_content_hash_disjoint_train_dev_test
+        - document_family_disjoint_train_dev_test
+    - pr: 184
+      branch: feat/rag-overlap-audit-20260923
+      delivers:
+        - canonical_training_overlap_audit
+        - readiness_gate_verifies_exact_audit_hash
+    - pr: 185
+      branch: feat/rag-blinded-review-packet-20260923
+      delivers:
+        - reviewer_packet_without_arm_identity
+        - private_review_id_to_arm_query_result_hash_mapping
+        - deterministic_seeded_randomization
+    - pr: 186
+      branch: feat/rag-encoder-artifact-registry-20260923
+      delivers:
+        - real_weight_and_tokenizer_hash_verification
+        - exact_embedding_space_matching_for_nonlexical_arms
+        - no_same_dimension_space_equivalence_assumption
+    - pr: 187
+      branch: feat/mcp-stdio-fullstack-bench-20260923
+      delivers:
+        - external_process_JSON_RPC_stdio_latency_samples
+        - process_start_to_first_response_and_RSS_HWM_measurements
+        - shell_free_command_execution_and_failure_preservation
+      limit: echo_fixture_CI_is_harness_validation_not_CCOS_performance
+  scientific_boundary:
+    - no_real_model_comparison_has_been_executed_by_this_batch
+    - no_superiority_claim_until_heldout_real_runs_and_independent_adjudication

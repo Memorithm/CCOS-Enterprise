@@ -128,13 +128,25 @@ mod tests {
         let trust = BTreeMap::from([
             (
                 id("source"),
-                MemoryTrustMetadata::new(MemoryValidationState::Verified, 1, 1, 0, ["v:source".to_string()])
-                    .unwrap(),
+                MemoryTrustMetadata::new(
+                    MemoryValidationState::Verified,
+                    1,
+                    1,
+                    0,
+                    ["v:source".to_string()],
+                )
+                .unwrap(),
             ),
             (
                 id("proposal"),
-                MemoryTrustMetadata::new(MemoryValidationState::Verified, 1, 1, 0, ["v:proposal".to_string()])
-                    .unwrap(),
+                MemoryTrustMetadata::new(
+                    MemoryValidationState::Verified,
+                    1,
+                    1,
+                    0,
+                    ["v:proposal".to_string()],
+                )
+                .unwrap(),
             ),
         ]);
         let projection = GovernedMemoryProjection::new(

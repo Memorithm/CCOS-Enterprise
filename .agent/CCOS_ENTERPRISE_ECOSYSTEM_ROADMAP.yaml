@@ -1,7 +1,7 @@
 schema_version: 1
 kind: ccos_enterprise_ecosystem_agent_roadmap
 status: active
-last_updated: "2026-09-19"
+last_updated: "2026-09-23"
 repository: Memorithm/CCOS-Enterprise
 intended_consumer: autonomous_coding_agent
 merge_policy: never_merge_this_file_to_default_branch_unless_user_explicitly_requests
@@ -536,3 +536,53 @@ resumed_public_visibility_validation_2026_09_20:
     - wait_for_all_applicable_workflows_success_on_exact_head
     - verify_pr_base_main_and_head_sha_before_merge
     - keep_this_roadmap_branch_separate_from_main
+
+
+hypothetical_evidence_separation_2026_09_23:
+  status: active_governance_research_boundary
+  motivation: >-
+    Adaptive and recurrent Memorithm runtimes may evaluate hypothetical branches,
+    imagined continuations, repair candidates, or model-derived summaries. CCOS
+    Enterprise must preserve provenance so such states cannot silently acquire
+    the authority of accepted observations.
+  provenance_classes:
+    observed:
+      definition: >-
+        Evidence produced by an admitted real-world/provider/tool effect or other
+        accepted source event under the existing tenant, authorization, quota,
+        audit, generation and evidence-record contracts.
+      authority: may_feed_observed_or_verified_context_only_under_existing_trust_rules
+    derived:
+      definition: >-
+        Deterministic or model-derived material whose complete source/evidence
+        lineage is retained and whose authority never exceeds its inputs.
+      authority: non_authoritative_unless_a_separate_governed_verification_promotes_it
+    hypothetical:
+      definition: >-
+        Simulation, counterfactual, imagined continuation, repair branch,
+        candidate plan, forecast, or unexecuted model proposal.
+      authority: never_observed_never_verified_by_construction
+  invariants:
+    - hypothetical_state_must_not_be_ingested_as_observed_evidence_by_relabeling
+    - derived_state_must_bind_complete_source_or_evidence_references
+    - trust_authority_and_provenance_class_are_independent_fields
+    - semantic_similarity_or_model_confidence_never_promotes_provenance_class
+    - only_a_real_governed_observation_or_explicit_verification_event_may_create_new_authoritative_evidence
+    - restart_backup_restore_purge_and_compaction_must_preserve_the_classification
+    - cross_tenant_isolation_applies_identically_to_all_classes
+  ecosystem_links:
+    Memorithm/FLAT-ATTENTION:
+      role: may_emit_research_repair_or_hypothetical_execution_evidence
+      rule: FLAT_research_evidence_is_not_enterprise_observation_authority
+    Memorithm/SML-GENIUS:
+      role: may_emit_Delta_KV_recurrent_or_context_hypotheses
+      rule: compressed_or_rewritten_memory_never_replaces_raw_source_provenance_when_exact_evidence_is_required
+    Memorithm/ElasticXxx:
+      role: may_emit_forecasts_plans_and_verification_records
+      rule: PLAN_and_FORECAST_are_hypothetical_until_real_ACT_VERIFY_evidence_exists
+  implementation_sequence:
+    - ENT_PROV_0_inventory_current_EvidenceRecord_SourceRecord_and_served_context_classification
+    - ENT_PROV_1_versioned_provenance_class_contract_without_Core_backflow
+    - ENT_PROV_2_fail_closed_context_filters_and_write_admission
+    - ENT_PROV_3_restart_backup_restore_purge_and_compaction_preservation
+    - ENT_PROV_4_cross_adapter_and_agent_runtime_evidence

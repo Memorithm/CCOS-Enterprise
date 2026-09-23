@@ -7,6 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{MemoryAssetId, MemoryLineageGraph, MemoryProvenanceClass, MemoryProvenanceError};
 
+/// Complete origin classification for one governed lineage graph.
+///
+/// Presence in this registry grants no trust or authorization; it only records
+/// how each asset arose and is evaluated orthogonally to existing policy gates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryProvenanceRegistry {
     classes: BTreeMap<MemoryAssetId, MemoryProvenanceClass>,

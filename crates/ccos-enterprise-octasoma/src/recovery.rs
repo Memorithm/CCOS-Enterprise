@@ -556,6 +556,9 @@ fn validate_records(
         if !authority.trust.contains_key(&record.asset_id) {
             return Err(RecoveryError::Invalid("missing explicit trust"));
         }
+        if authority.provenance.class(&record.asset_id).is_none() {
+            return Err(RecoveryError::Invalid("missing explicit provenance"));
+        }
         if record.asset_id.as_str().len() > 4096 {
             return Err(RecoveryError::Limit("asset identifier bytes"));
         }

@@ -1,0 +1,16 @@
+name: Semantic extraction holdout contract
+on:
+  pull_request:
+    paths:
+      - 'scripts/check-semantic-extraction-holdout.py'
+      - 'scripts/test-semantic-extraction-holdout.py'
+      - '.github/workflows/ci-semantic-eval.yml'
+permissions:
+  contents: read
+jobs:
+  semantic-eval:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/test-semantic-extraction-holdout.py

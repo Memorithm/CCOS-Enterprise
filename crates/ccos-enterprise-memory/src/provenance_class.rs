@@ -86,9 +86,7 @@ impl std::error::Error for MemoryProvenanceError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        MemoryAssetId, MemoryEvidenceRef, MemoryLineage, MemorySpace, MemoryStratum,
-    };
+    use crate::{MemoryAssetId, MemoryEvidenceRef, MemoryLineage, MemorySpace, MemoryStratum};
 
     fn id(value: &str) -> MemoryAssetId {
         MemoryAssetId::new(value).unwrap()
@@ -116,8 +114,14 @@ mod tests {
 
     #[test]
     fn migration_inference_never_invents_hypothetical_state() {
-        assert_eq!(MemoryProvenanceClass::inferred(&observed()), MemoryProvenanceClass::Observed);
-        assert_eq!(MemoryProvenanceClass::inferred(&derived()), MemoryProvenanceClass::Derived);
+        assert_eq!(
+            MemoryProvenanceClass::inferred(&observed()),
+            MemoryProvenanceClass::Observed
+        );
+        assert_eq!(
+            MemoryProvenanceClass::inferred(&derived()),
+            MemoryProvenanceClass::Derived
+        );
     }
 
     #[test]

@@ -4,6 +4,8 @@ on:
     paths:
       - 'scripts/evaluate-rag-campaign.py'
       - 'scripts/test-rag-campaign.py'
+      - 'scripts/check-rag-campaign-readiness.py'
+      - 'scripts/test-rag-campaign-readiness.py'
       - 'fixtures/rag-campaign-smoke/**'
       - '.github/workflows/ci-rag-campaign.yml'
   workflow_dispatch:
@@ -16,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/test-rag-campaign.py
+      - run: python3 scripts/test-rag-campaign-readiness.py
       - name: Reproduce synthetic protocol smoke (not system performance)
         run: |
           python3 scripts/evaluate-rag-campaign.py fixtures/rag-campaign-smoke/manifest.json > "$RUNNER_TEMP/rag-smoke-report.json"

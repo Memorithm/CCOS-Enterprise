@@ -780,8 +780,7 @@ mod tests {
         )
         .unwrap();
         let bytes = encode_governed_memory_projection(&classified).unwrap();
-        let restored =
-            decode_governed_memory_projection(&bytes, &classified.tenant).unwrap();
+        let restored = decode_governed_memory_projection(&bytes, &classified.tenant).unwrap();
         assert_eq!(
             restored
                 .provenance

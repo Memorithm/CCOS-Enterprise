@@ -69,6 +69,11 @@ pub use provenance_class::{MemoryProvenanceClass, MemoryProvenanceError};
 mod provenance_registry;
 pub use provenance_registry::{MemoryProvenanceRegistry, MemoryProvenanceRegistryError};
 
+mod provenance_gate;
+pub use provenance_gate::{
+    validate_admitted_provenance, ProvenanceRecallError, ProvenanceRecallPolicy,
+};
+
 mod recall_budget;
 pub use recall_budget::{
     BudgetedMemoryRecall, MemoryRecallBudget, MemoryRecallBudgetError, SemanticMemoryProviderExt,

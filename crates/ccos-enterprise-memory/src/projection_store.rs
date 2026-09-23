@@ -292,8 +292,8 @@ fn validate_candidate(
     candidate: &GovernedMemoryProjection,
 ) -> Result<GovernedMemoryProjection, GovernedMemoryProjectionError> {
     check_tenant(expected, &candidate.tenant)?;
-    let checked = GovernedMemoryProjection::from_wire(Some(expected), candidate.to_wire())?;
-    let encoded = serde_json::to_vec_pretty(&checked.to_wire())
+    let checked = GovernedMemoryProjection::from_wire(Some(expected), candidate.to_wire()?)?;
+    let encoded = serde_json::to_vec_pretty(&checked.to_wire()?)
         .map_err(|error| projection_corrupt(&error.to_string()))?;
     if encoded.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
         return Err(projection_corrupt(

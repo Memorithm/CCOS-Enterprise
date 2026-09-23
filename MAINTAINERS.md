@@ -1,5 +1,7 @@
 # Maintainer
 
-The sole human maintainer and authorized contributor is:
+The sole active human maintainer and authorized contributor identity is:
 
-**ZEKRITI Tarek**
+**CHECKUPAUTO / MEMOPERF**
+
+`CHECKUPAUTO` and `MEMOPERF` are two accepted aliases for the same human contributor.

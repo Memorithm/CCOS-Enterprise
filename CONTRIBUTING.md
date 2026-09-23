@@ -105,22 +105,25 @@ These are enforced by CI greps and tests; don't regress them.
 - Write imperative, scoped commit subjects (`gateway: reject non-canonical
   tool names`), with a body explaining *why* when it isn't obvious.
 - Keep formatting-only churn out of logic commits.
-- **Author policy (§43):** every commit is authored and committed by
-  ZEKRITI Tarek — no other identities, no contribution trailers. CI checks
-  every PR range and the whole history nightly;
+- **Author policy (§43):** every new commit is authored and committed under
+  **CHECKUPAUTO** or **MEMOPERF**, the two accepted aliases of the sole active
+  human contributor — no other current identities and no contribution trailers.
+  CI checks every PR range and the whole history nightly;
   `scripts/install-git-hooks.sh` installs the local hooks that catch a
   violation before it leaves your machine.
 - **Merging a pull request:** both merge and web squash messages must satisfy
   the author policy. A web squash is allowed only with the authorized human
   author and the exact `GitHub <noreply@github.com>` committer stamp. This stamp
   is a metadata convention, not cryptographic identity authentication.
-- **Historical normalization:** six immutable August 2026 squash commits contain
-  the same redundant `MEMOPERF` self-trailer. The policy pins their full object
-  IDs and exact trailer text in `legacy_self_trailer`; all other checks still
-  apply. New commits with that trailer fail, including replays of an old message.
-  No history range is excluded and no Git history is rewritten. Invalid, empty
-  and shallow history scans fail closed. Run `python3 scripts/test-author-policy.py`
-  to exercise both the actual full history and adversarial temporary repositories.
+- **Historical normalization:** the former display name `ZEKRITI Tarek` is
+  accepted only on commits already reachable from the explicit 2026-09-23
+  identity cutover commit. It is not an accepted identity for new commits.
+  Six immutable August 2026 squash commits also contain the same redundant
+  `MEMOPERF` self-trailer; the policy pins their full object IDs and exact
+  trailer text in `legacy_self_trailer`. No history range is excluded and no
+  Git history is rewritten. Invalid, empty and shallow history scans fail closed.
+  Run `python3 scripts/test-author-policy.py` to exercise both the actual full
+  history and adversarial temporary repositories.
 
 ## Pull-request checklist
 

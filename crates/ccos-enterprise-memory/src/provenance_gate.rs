@@ -55,6 +55,9 @@ impl std::error::Error for ProvenanceRecallError {}
 
 /// Validate provenance for every item in an opaque admitted recall.
 ///
+/// This is an authority-separation gate, not a trust upgrade: successful
+/// provenance validation never changes a trust label or observation class.
+///
 /// This function never repairs, relabels or drops individual items. One missing
 /// or forbidden classification rejects the complete batch so a caller cannot
 /// silently weaken provenance semantics by accepting a partial context.

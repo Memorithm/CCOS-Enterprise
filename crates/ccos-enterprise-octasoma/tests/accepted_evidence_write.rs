@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ccos_enterprise_memory::{
     BudgetedMemoryRecall, GovernedMemoryProjection, GovernedRecallTrustPolicy,
     MemoryAssetDescriptor, MemoryAssetId, MemoryEvidenceRef, MemoryLineage, MemoryLineageGraph,
-    MemoryLoadoutBinding, MemoryLoadoutPlan, MemoryRecallBudget, MemorySpace, MemoryStratum,
-    MemoryTrustMetadata, MemoryUsageMode, MemoryValidationState,
+    MemoryLoadoutBinding, MemoryLoadoutPlan, MemoryProvenanceClass, MemoryRecallBudget,
+    MemorySpace, MemoryStratum, MemoryTrustMetadata, MemoryUsageMode, MemoryValidationState,
 };
 use ccos_enterprise_octasoma::accepted_write::{
     AcceptedEvidenceWrite, AcceptedEvidenceWriteError, EvidenceGenerationReceipt,
@@ -157,6 +157,13 @@ fn accepted_evidence_advances_generation_but_stays_out_of_verified_context() {
     assert_eq!(
         store.governance().trust[&id("fresh-unverified")].state(),
         MemoryValidationState::Unverified
+    );
+    assert_eq!(
+        store
+            .governance()
+            .provenance
+            .class(&id("fresh-unverified")),
+        Some(MemoryProvenanceClass::Observed)
     );
 
     let loadout = store

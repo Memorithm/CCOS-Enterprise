@@ -593,7 +593,7 @@ mod tests {
         candidate.graph.invalidate(&id("root")).unwrap();
         let result = store.replace_with(candidate.clone(), |root, projection| {
             let path = root.join(GOVERNED_MEMORY_PROJECTION_FILE);
-            let bytes = serde_json::to_vec_pretty(&projection.to_wire()).unwrap();
+            let bytes = serde_json::to_vec_pretty(&projection.to_wire().unwrap()).unwrap();
             super::super::publish_projection(root, &path, &bytes, |_| {
                 Err(io::Error::other("injected directory sync failure"))
             })?;

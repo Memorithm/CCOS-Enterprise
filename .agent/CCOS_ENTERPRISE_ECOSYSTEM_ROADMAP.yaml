@@ -586,3 +586,79 @@ hypothetical_evidence_separation_2026_09_23:
     - ENT_PROV_2_fail_closed_context_filters_and_write_admission
     - ENT_PROV_3_restart_backup_restore_purge_and_compaction_preservation
     - ENT_PROV_4_cross_adapter_and_agent_runtime_evidence
+
+
+current_state_reconciliation_2026_09_23:
+  source_of_truth:
+    repository_visibility: public
+    main: 006c07991e0e7d726925aa09d123c9675cb73144
+    open_issues_at_batch_start: 0
+    pr_170:
+      status: merged
+      merged_at: "2026-09-20T14:09:39Z"
+      merge_commit: 2178bd536b12e0db0a5f7bd0b500317b09ba0ff8
+      note: >-
+        Earlier roadmap blocks that say PR 170 is open or pending are retained
+        as historical observations and are not the current operational state.
+  ent_provenance_batch_1:
+    intent: >-
+      Introduce an explicit origin class orthogonal to trust and similarity so
+      observed, derived and hypothetical states cannot silently acquire one
+      another's authority.
+    prs:
+      - pr: 173
+        branch: feat/ent-prov-contract-20260923
+        head: 708b7f25404ff01c3ec351344ac04fe21271bce2
+        status: open_CI_running
+        delivers:
+          - observed_derived_hypothetical_class_contract
+          - structural_validation_without_durable_format_change
+          - hypothetical_never_authoritative_by_class_definition
+      - pr: 174
+        branch: feat/ent-prov-registry-20260923
+        head: b0a979f595257e3d4b5cbbac22d265a5525c7edd
+        base: feat/ent-prov-contract-20260923
+        status: open_stacked_CI_running_or_queued
+        delivers:
+          - exhaustive_per_asset_provenance_registry
+          - unknown_duplicate_missing_and_invalid_rows_fail_closed
+          - migration_inference_never_invents_hypothetical_state
+      - pr: 175
+        branch: feat/ent-prov-admission-20260923
+        head: fbc9874f60feac4963ff10fc57ca54545781865c
+        base: feat/ent-prov-registry-20260923
+        status: open_stacked_CI_running_or_queued
+        delivers:
+          - fail_closed_validation_of_already_admitted_recall
+          - hypothetical_refused_even_when_trust_is_verified
+          - optional_observed_only_consumer_policy
+      - pr: 176
+        branch: feat/ent-prov-bundle-20260923
+        head: 1e5c76aa9285b089ee18337b263f05cbc1f02e43
+        base: feat/ent-prov-admission-20260923
+        status: open_stacked_CI_running_or_queued
+        delivers:
+          - portable_bundle_retains_explicit_provenance_class
+          - existing_constructor_infers_only_observed_or_derived
+          - hypothetical_export_requires_explicit_validated_constructor
+      - pr: 177
+        branch: feat/rag-real-campaign-readiness-20260923
+        head: c630b16130cf4aa54296f359d7d78c26d8f9869f
+        base: main
+        status: open_CI_running
+        delivers:
+          - real_campaign_readiness_gate_separate_from_synthetic_smoke
+          - reject_placeholder_scope_hardware_runner_SHA_and_commands
+          - require_all_five_reference_families_dataset_provenance_measurements_and_primary_comparison
+    merge_rules:
+      - no_merge_until_all_applicable_exact_head_CI_is_green
+      - merge_stacked_provenance_PRs_in_order_173_174_175_176
+      - after_each_predecessor_merge_retarget_next_PR_to_main_and_requalify_exact_head
+      - PR_177_is_independent_but_must_be_rebased_or_retarget_checked_against_current_main_before_merge
+    remaining_after_batch:
+      - persist_explicit_provenance_in_canonical_governance_generation_format
+      - wire_provenance_gate_into_real_memory_context_server_path
+      - enforce_write_side_class_assignment_for_observed_derived_hypothetical_inputs
+      - preserve_class_through_provider_generation_recovery_purge_backup_restore_and_encryption
+      - add_cross_adapter_SoulSystem_FLAT_ATTENTION_SML_GENIUS_ElasticXxx_contract_tests
+      - execute_real_CCOS_vs_RAG_campaign_after_dataset_and_runners_are_frozen

@@ -662,3 +662,45 @@ current_state_reconciliation_2026_09_23:
       - preserve_class_through_provider_generation_recovery_purge_backup_restore_and_encryption
       - add_cross_adapter_SoulSystem_FLAT_ATTENTION_SML_GENIUS_ElasticXxx_contract_tests
       - execute_real_CCOS_vs_RAG_campaign_after_dataset_and_runners_are_frozen
+
+
+ent_provenance_batch_2_2026_09_23:
+  status: open_stacked_CI_requalification
+  purpose: persist_and_serve_explicit_origin_classification
+  prs:
+    - pr: 178
+      branch: feat/ent-prov-projection-v2-20260923
+      current_head: 8df6d449ee2eed9f92fb0fb96f52ee3f3959d638
+      delivers:
+        - projection_v2_explicit_per_asset_provenance
+        - backward_read_of_v1_with_conservative_observed_or_derived_inference
+        - accepted_evidence_generation_updates_provenance_atomically
+    - pr: 179
+      branch: feat/ent-prov-attestation-20260923
+      current_head: 0401448f8b3ce1a9b098f01426998df59801aa86
+      delivers:
+        - admitted_observation_binds_provenance_class
+        - attestation_exposes_provenance_class
+    - pr: 180
+      branch: feat/ent-prov-served-context-20260923
+      current_head: 04a0f61ddfa0addde1823e8d993380b47ed35cbf
+      delivers:
+        - authoritative_memory_context_refuses_hypothetical_state
+        - real_stdio_response_exposes_provenance_policy_and_class
+    - pr: 181
+      branch: feat/ent-prov-evidence-write-20260923
+      current_head: e546b50498f3085fb1bd5fa0fc97092de8561b8d
+      delivers:
+        - permanent_write_side_regression_for_observed_unverified_evidence
+        - durable_receipt_requires_observed_origin
+    - pr: 182
+      branch: feat/ent-prov-recovery-purge-20260923
+      current_head: b2b175516d64621b962ad307c988b095530dd364
+      delivers:
+        - recovery_requires_complete_provenance
+        - physical_purge_preserves_origin_class
+        - purge_transition_cannot_rewrite_provenance
+  rules:
+    - merge_only_after_exact_head_green_CI
+    - retarget_each_stacked_PR_to_main_after_predecessor_merge_and_requalify
+    - no_hypothetical_to_observed_or_verified_relabeling_by_similarity_or_trust

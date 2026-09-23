@@ -12,8 +12,9 @@ use ccos_enterprise_memory::{
     BudgetedMemoryRecall, GovernedMemoryContextAssembly, GovernedMemoryProjection,
     GovernedMemoryStore, GovernedMemoryStoreError, GovernedRecallGate, GovernedRecallGateError,
     GovernedRecallTrustPolicy, GovernedSemanticMemoryProvider, GovernedSemanticMemoryProviderExt,
-    MemoryContextAttestation, MemoryContextBudget, MemoryContextError, MemoryError,
-    MemoryLoadoutPlanError, MemoryRecallBudget, MemoryRecallBudgetError,
+    validate_admitted_provenance, MemoryContextAttestation, MemoryContextBudget,
+    MemoryContextError, MemoryError, MemoryLoadoutPlanError, MemoryRecallBudget,
+    MemoryRecallBudgetError, ProvenanceRecallError, ProvenanceRecallPolicy,
 };
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 
@@ -25,6 +26,7 @@ pub enum ServedContextError {
     RecallAdmission(GovernedRecallGateError),
     Context(MemoryContextError),
     Attestation(MemoryError),
+    Provenance(ProvenanceRecallError),
     Store(GovernedMemoryStoreError),
 }
 
@@ -43,6 +45,9 @@ impl fmt::Display for ServedContextError {
             Self::Context(error) => write!(f, "governed memory context assembly failed: {error}"),
             Self::Attestation(error) => {
                 write!(f, "governed memory context attestation failed: {error}")
+            }
+            Self::Provenance(error) => {
+                write!(f, "governed memory provenance admission failed: {error}")
             }
         }
     }
@@ -71,6 +76,12 @@ impl From<GovernedRecallGateError> for ServedContextError {
 impl From<MemoryContextError> for ServedContextError {
     fn from(value: MemoryContextError) -> Self {
         Self::Context(value)
+    }
+}
+
+impl From<ProvenanceRecallError> for ServedContextError {
+    fn from(value: ProvenanceRecallError) -> Self {
+        Self::Provenance(value)
     }
 }
 
@@ -127,6 +138,11 @@ pub fn assemble_served_governed_context<P: GovernedSemanticMemoryProvider + ?Siz
             policy,
         },
         recalled,
+    )?;
+    validate_admitted_provenance(
+        &projection.provenance,
+        &admitted,
+        ProvenanceRecallPolicy::ObservedOrDerived,
     )?;
     Ok(assemble_governed_bootstrap_context(
         projection,

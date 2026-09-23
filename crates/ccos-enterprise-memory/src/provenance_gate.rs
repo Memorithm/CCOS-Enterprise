@@ -64,11 +64,9 @@ pub fn validate_admitted_provenance(
     policy: ProvenanceRecallPolicy,
 ) -> Result<(), ProvenanceRecallError> {
     for observation in admitted.observations() {
-        let class = registry
-            .class(&observation.asset_id)
-            .ok_or_else(|| ProvenanceRecallError::MissingClassification(
-                observation.asset_id.clone(),
-            ))?;
+        let class = registry.class(&observation.asset_id).ok_or_else(|| {
+            ProvenanceRecallError::MissingClassification(observation.asset_id.clone())
+        })?;
         if !class.eligible_for_authoritative_context() || !policy.allows(class) {
             return Err(ProvenanceRecallError::Refused {
                 asset: observation.asset_id.clone(),
@@ -130,12 +128,12 @@ mod tests {
         let trust = BTreeMap::from([
             (
                 id("source"),
-                MemoryTrustMetadata::new(MemoryValidationState::Verified, 1, 1, 0, ["v:source"])
+                MemoryTrustMetadata::new(MemoryValidationState::Verified, 1, 1, 0, ["v:source".to_string()])
                     .unwrap(),
             ),
             (
                 id("proposal"),
-                MemoryTrustMetadata::new(MemoryValidationState::Verified, 1, 1, 0, ["v:proposal"])
+                MemoryTrustMetadata::new(MemoryValidationState::Verified, 1, 1, 0, ["v:proposal".to_string()])
                     .unwrap(),
             ),
         ]);
@@ -155,10 +153,7 @@ mod tests {
         (projection, registry)
     }
 
-    fn admit(
-        projection: &GovernedMemoryProjection,
-        asset: &str,
-    ) -> AdmittedGovernedRecall {
+    fn admit(projection: &GovernedMemoryProjection, asset: &str) -> AdmittedGovernedRecall {
         let tenant = TenantId::new("acme").unwrap();
         admit_governed_recall(
             GovernedRecallGate {

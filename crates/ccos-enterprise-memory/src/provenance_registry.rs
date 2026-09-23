@@ -5,9 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{
-    MemoryAssetId, MemoryLineageGraph, MemoryProvenanceClass, MemoryProvenanceError,
-};
+use crate::{MemoryAssetId, MemoryLineageGraph, MemoryProvenanceClass, MemoryProvenanceError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryProvenanceRegistry {
@@ -28,12 +26,12 @@ impl MemoryProvenanceRegistry {
             if classes.contains_key(&id) {
                 return Err(MemoryProvenanceRegistryError::DuplicateAsset(id));
             }
-            class
-                .validate_for(descriptor)
-                .map_err(|source| MemoryProvenanceRegistryError::InvalidClass {
+            class.validate_for(descriptor).map_err(|source| {
+                MemoryProvenanceRegistryError::InvalidClass {
                     asset: id.clone(),
                     source,
-                })?;
+                }
+            })?;
             classes.insert(id, class);
         }
 
@@ -69,9 +67,7 @@ impl MemoryProvenanceRegistry {
         self.classes.get(id).copied()
     }
 
-    pub fn entries(
-        &self,
-    ) -> impl Iterator<Item = (&MemoryAssetId, MemoryProvenanceClass)> {
+    pub fn entries(&self) -> impl Iterator<Item = (&MemoryAssetId, MemoryProvenanceClass)> {
         self.classes.iter().map(|(id, class)| (id, *class))
     }
 
@@ -106,7 +102,11 @@ impl std::fmt::Display for MemoryProvenanceRegistryError {
                 write!(f, "missing provenance row for asset {}", id.as_str())
             }
             Self::InvalidClass { asset, source } => {
-                write!(f, "invalid provenance for asset {}: {source}", asset.as_str())
+                write!(
+                    f,
+                    "invalid provenance for asset {}: {source}",
+                    asset.as_str()
+                )
             }
         }
     }

@@ -113,6 +113,7 @@ def check_manifest(manifest: dict) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", type=Path)
+    parser.add_argument("--overlap-audit", type=Path)
     args = parser.parse_args()
     try:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
@@ -124,6 +125,11 @@ def main() -> int:
         return 2
 
     errors = check_manifest(manifest)
+    if "synthetic" not in str(manifest.get("scope", "")).lower() and "smoke" not in str(manifest.get("scope", "")).lower():
+        if args.overlap_audit is None:
+            errors.append("real campaign requires --overlap-audit")
+        else:
+            errors.extend(verify_overlap_audit(manifest, args.overlap_audit))
     if errors:
         for error in errors:
             print(f"readiness error: {error}", file=sys.stderr)

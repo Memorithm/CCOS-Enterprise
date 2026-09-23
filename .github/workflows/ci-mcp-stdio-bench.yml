@@ -1,0 +1,17 @@
+name: MCP stdio benchmark harness
+on:
+  pull_request:
+    paths:
+      - 'scripts/bench-mcp-stdio.py'
+      - 'scripts/test-mcp-stdio-bench.py'
+      - 'docs/GOVERNED_MCP_FULLSTACK_BENCHMARK.md'
+      - '.github/workflows/ci-mcp-stdio-bench.yml'
+permissions:
+  contents: read
+jobs:
+  harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/test-mcp-stdio-bench.py

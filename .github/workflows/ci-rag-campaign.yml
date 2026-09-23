@@ -10,6 +10,8 @@ on:
       - 'scripts/test-rag-dataset-inventory.py'
       - 'scripts/build-rag-training-overlap-audit.py'
       - 'scripts/test-rag-training-overlap-audit.py'
+      - 'scripts/build-rag-blinded-review.py'
+      - 'scripts/test-rag-blinded-review.py'
       - 'fixtures/rag-campaign-smoke/**'
       - '.github/workflows/ci-rag-campaign.yml'
   workflow_dispatch:
@@ -25,6 +27,7 @@ jobs:
       - run: python3 scripts/test-rag-campaign-readiness.py
       - run: python3 scripts/test-rag-dataset-inventory.py
       - run: python3 scripts/test-rag-training-overlap-audit.py
+      - run: python3 scripts/test-rag-blinded-review.py
       - name: Reproduce synthetic protocol smoke (not system performance)
         run: |
           python3 scripts/evaluate-rag-campaign.py fixtures/rag-campaign-smoke/manifest.json > "$RUNNER_TEMP/rag-smoke-report.json"

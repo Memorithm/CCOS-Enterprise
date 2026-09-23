@@ -4,6 +4,8 @@ on:
     paths:
       - 'scripts/check-semantic-extraction-holdout.py'
       - 'scripts/test-semantic-extraction-holdout.py'
+      - 'scripts/score-semantic-extraction-holdout.py'
+      - 'scripts/test-semantic-extraction-scoring.py'
       - '.github/workflows/ci-semantic-eval.yml'
 permissions:
   contents: read
@@ -14,3 +16,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/test-semantic-extraction-holdout.py
+      - run: python3 scripts/test-semantic-extraction-scoring.py

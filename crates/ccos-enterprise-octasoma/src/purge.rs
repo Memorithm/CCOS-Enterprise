@@ -150,6 +150,11 @@ impl ProviderGenerationStore {
                 .source_records()
                 .iter()
                 .any(|r| r.asset_id == receipt.asset_id && r.is_physically_purged())
+            && self
+                .governance()
+                .provenance
+                .class(&receipt.asset_id)
+                .is_some()
             && tombstones(self.recovered.source_records()).len() == receipt.purged_assets
     }
 
@@ -166,6 +171,8 @@ impl ProviderGenerationStore {
                     authority.graph.state(&id),
                     Some(MemoryAssetState::Stale | MemoryAssetState::Invalidated)
                 ) || authority.graph.descriptor(&id) != self.governance().graph.descriptor(&id)
+                    || authority.provenance.class(&id)
+                        != self.governance().provenance.class(&id)
             })
         {
             return Err(ProviderGenerationError::Invalid(

@@ -23,10 +23,8 @@ use super::{
 pub fn encode_governed_memory_projection(
     projection: &GovernedMemoryProjection,
 ) -> Result<Vec<u8>, GovernedMemoryProjectionError> {
-    let checked = GovernedMemoryProjection::from_wire(
-        Some(&projection.tenant),
-        projection.to_wire()?,
-    )?;
+    let checked =
+        GovernedMemoryProjection::from_wire(Some(&projection.tenant), projection.to_wire()?)?;
     let bytes = serde_json::to_vec_pretty(&checked.to_wire()?)
         .map_err(|error| projection_corrupt(&error.to_string()))?;
     if bytes.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {

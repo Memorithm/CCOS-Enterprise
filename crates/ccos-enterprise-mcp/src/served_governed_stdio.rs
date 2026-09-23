@@ -7,8 +7,9 @@
 use super::*;
 use ccos_enterprise_mcp::GOVERNED_CONTEXT_TOOL;
 use ccos_enterprise_memory::{
-    attest_governed_context, BudgetedMemoryRecall, GovernedRecallTrustPolicy, MemoryContextBudget,
-    MemoryRecallBudget, MemorySpace, MemoryValidationState,
+    attest_governed_context, validate_admitted_provenance, BudgetedMemoryRecall,
+    GovernedRecallTrustPolicy, MemoryContextBudget, MemoryProvenanceClass, MemoryRecallBudget,
+    MemorySpace, MemoryValidationState, ProvenanceRecallPolicy,
 };
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 
@@ -235,6 +236,12 @@ impl Server {
                 GovernedRecallTrustPolicy::VerifiedOnly,
             )
             .map_err(|error| error.to_string())?;
+        validate_admitted_provenance(
+            &authority.provenance,
+            &observations,
+            ProvenanceRecallPolicy::ObservedOrDerived,
+        )
+        .map_err(|error| error.to_string())?;
         let assembly = store
             .recovered()
             .assemble_current(observations, parsed.context_budget)
@@ -286,6 +293,7 @@ impl Server {
                     "projection_sha256": attestation.projection_sha256,
                     "asset_state": "active",
                     "trust_state": validation_state_label(attestation.trust_state),
+                    "provenance_class": provenance_class_label(attestation.provenance_class),
                     "parents": attestation.parents.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
                     "evidence": attestation.evidence.iter().map(|evidence| evidence.as_str()).collect::<Vec<_>>(),
                     "citations": citations
@@ -304,6 +312,7 @@ impl Server {
                 "tool": GOVERNED_CONTEXT_TOOL,
                 "generation": store.generation(),
                 "trust_policy": "verified_only",
+                "provenance_policy": "observed_or_derived",
                 "payload_bytes": assembly.payload_bytes(),
                 "citation_bytes": citation_bytes,
                 "total_context_bytes": assembly.payload_bytes() + citation_bytes,
@@ -379,6 +388,14 @@ fn memory_space_label(space: &MemorySpace) -> String {
         MemorySpace::Project(id) => format!("project:{id}"),
         MemorySpace::Team(id) => format!("team:{id}"),
         MemorySpace::Agent(id) => format!("agent:{id}"),
+    }
+}
+
+fn provenance_class_label(class: MemoryProvenanceClass) -> &'static str {
+    match class {
+        MemoryProvenanceClass::Observed => "observed",
+        MemoryProvenanceClass::Derived => "derived",
+        MemoryProvenanceClass::Hypothetical => "hypothetical",
     }
 }
 

@@ -9,7 +9,8 @@
 
 use ccos_enterprise_memory::{
     GovernedMemoryProjection, MemoryAssetDescriptor, MemoryAssetId, MemoryError, MemoryEvidenceRef,
-    MemoryGraphError, MemoryLineage, MemorySpace, MemoryStratum, MemoryTrustMetadata,
+    MemoryGraphError, MemoryLineage, MemoryProvenanceClass, MemoryProvenanceRegistry,
+    MemoryProvenanceRegistryError, MemorySpace, MemoryStratum, MemoryTrustMetadata,
     MemoryValidationState,
 };
 
@@ -55,6 +56,7 @@ pub enum AcceptedEvidenceWriteError {
     EmptyPayload,
     Memory(MemoryError),
     Lineage(MemoryGraphError),
+    Provenance(MemoryProvenanceRegistryError),
     StalePreparation,
     Generation(ProviderGenerationError),
 }
@@ -68,6 +70,7 @@ impl std::fmt::Display for AcceptedEvidenceWriteError {
             Self::EmptyPayload => f.write_str("governed evidence payload must not be empty"),
             Self::Memory(error) => write!(f, "governed evidence input: {error}"),
             Self::Lineage(error) => write!(f, "governed evidence lineage: {error}"),
+            Self::Provenance(error) => write!(f, "governed evidence provenance: {error}"),
             Self::StalePreparation => f.write_str(
                 "prepared evidence generation no longer matches selected provider state",
             ),
@@ -81,6 +84,7 @@ impl std::error::Error for AcceptedEvidenceWriteError {
         match self {
             Self::Memory(error) => Some(error),
             Self::Lineage(error) => Some(error),
+            Self::Provenance(error) => Some(error),
             Self::Generation(error) => Some(error),
             _ => None,
         }
@@ -96,6 +100,12 @@ impl From<MemoryError> for AcceptedEvidenceWriteError {
 impl From<MemoryGraphError> for AcceptedEvidenceWriteError {
     fn from(value: MemoryGraphError) -> Self {
         Self::Lineage(value)
+    }
+}
+
+impl From<MemoryProvenanceRegistryError> for AcceptedEvidenceWriteError {
+    fn from(value: MemoryProvenanceRegistryError) -> Self {
+        Self::Provenance(value)
     }
 }
 
@@ -135,7 +145,18 @@ impl ProviderGenerationStore {
             MemoryStratum::Evidence,
             MemoryLineage::root([write.evidence])?,
         )?;
+        let mut provenance_rows = authority
+            .provenance
+            .entries()
+            .map(|(id, class)| (id.clone(), class))
+            .collect::<Vec<_>>();
         authority.graph.register(descriptor)?;
+        provenance_rows.push((
+            write.asset_id.clone(),
+            MemoryProvenanceClass::Observed,
+        ));
+        authority.provenance =
+            MemoryProvenanceRegistry::new(&authority.graph, provenance_rows)?;
         if authority
             .trust
             .insert(write.asset_id.clone(), MemoryTrustMetadata::unverified(1))
@@ -207,6 +228,11 @@ impl ProviderGenerationStore {
                 .trust
                 .get(&receipt.asset_id)
                 .is_some_and(|trust| trust.state() == MemoryValidationState::Unverified)
+            && self
+                .governance()
+                .provenance
+                .class(&receipt.asset_id)
+                == Some(MemoryProvenanceClass::Observed)
             && self
                 .recovered()
                 .source_records()

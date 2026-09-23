@@ -66,6 +66,9 @@ pub use promotion::{evaluate_memory_promotion, MemoryPromotionCandidate, MemoryP
 mod provenance_class;
 pub use provenance_class::{MemoryProvenanceClass, MemoryProvenanceError};
 
+mod provenance_registry;
+pub use provenance_registry::{MemoryProvenanceRegistry, MemoryProvenanceRegistryError};
+
 mod recall_budget;
 pub use recall_budget::{
     BudgetedMemoryRecall, MemoryRecallBudget, MemoryRecallBudgetError, SemanticMemoryProviderExt,

@@ -63,6 +63,9 @@ pub use loadout_policy::{
 mod promotion;
 pub use promotion::{evaluate_memory_promotion, MemoryPromotionCandidate, MemoryPromotionError};
 
+mod provenance_class;
+pub use provenance_class::{MemoryProvenanceClass, MemoryProvenanceError};
+
 mod recall_budget;
 pub use recall_budget::{
     BudgetedMemoryRecall, MemoryRecallBudget, MemoryRecallBudgetError, SemanticMemoryProviderExt,

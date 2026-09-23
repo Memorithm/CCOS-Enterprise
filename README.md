@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="./assets/ccos-enterprise-hero.svg" width="100%" alt="CCOS Enterprise — stylized human and robotic brain surrounded by governed-memory artifacts" />
+<!-- Intentionally not wrapped in a link: the hero is decorative and must remain non-clickable. -->
+<picture>
+  <img src="./assets/ccos-enterprise-hero.svg" width="100%" draggable="false" alt="CCOS Enterprise — futuristic biomimetic human/robotic brain surrounded by governed-memory, provenance, temporal and policy artifacts" />
+</picture>
 
 # CCOS Enterprise
 
@@ -268,6 +271,8 @@ CI definitions live in [`.github/workflows`](.github/workflows).
 ## Licensing and governance
 
 Required Notice: **Copyright 2026 Tarek Zekriti** — [Memorithm](https://github.com/Memorithm/).
+
+Sole active human contributor identity: **CHECKUPAUTO / MEMOPERF**. These are two accepted aliases for the same human contributor; automated systems are tools, not contributors.
 
 The repository is distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). Commercial use is handled separately; see [LICENSING.md](LICENSING.md). Governance and contribution requirements are documented in [GOVERNANCE.md](GOVERNANCE.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 

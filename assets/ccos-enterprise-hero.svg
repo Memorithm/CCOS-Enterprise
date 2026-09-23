@@ -1,73 +1,239 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Required Notice: Copyright 2026 Tarek Zekriti (https://github.com/Memorithm/) -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 720" role="img" aria-labelledby="title desc">
-  <title id="title">CCOS Enterprise — governed memory infrastructure for AI systems</title>
-  <desc id="desc">A stylized human brain fused with robotic circuitry, surrounded by artifacts for provenance, temporal knowledge, verified citations, tenant isolation, policy and crash recovery.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2400 1320" role="img" aria-labelledby="title desc">
+  <title id="title">CCOS Enterprise — governed memory for AI systems</title>
+  <desc id="desc">A large futuristic biomimetic brain, half organic neural tissue and half robotic crystalline circuitry, surrounded by holographic provenance, temporal memory, policy, tenant isolation, verified evidence and crash-recovery artifacts.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#fbfdff"/><stop offset=".52" stop-color="#f2f7ff"/><stop offset="1" stop-color="#eef8f5"/>
+      <stop offset="0" stop-color="#f8fbff"/>
+      <stop offset=".36" stop-color="#edf5ff"/>
+      <stop offset=".72" stop-color="#f4f0ff"/>
+      <stop offset="1" stop-color="#edfdfa"/>
     </linearGradient>
-    <radialGradient id="halo"><stop offset="0" stop-color="#4fcdf1" stop-opacity=".26"/><stop offset=".48" stop-color="#766cf5" stop-opacity=".10"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
-    <linearGradient id="organic" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f2fbff"/><stop offset=".6" stop-color="#cfe8fb"/><stop offset="1" stop-color="#d8eef0"/></linearGradient>
-    <linearGradient id="robot" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#e5edf6"/><stop offset=".4" stop-color="#98afc8"/><stop offset=".75" stop-color="#526f90"/><stop offset="1" stop-color="#253f5c"/></linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#1fb9dc"/><stop offset=".5" stop-color="#6477f2"/><stop offset="1" stop-color="#8b65e7"/></linearGradient>
-    <pattern id="grid" width="44" height="44" patternUnits="userSpaceOnUse"><path d="M44 0H0V44" fill="none" stroke="#8fa7bf" stroke-width="1" opacity=".10"/></pattern>
-    <filter id="shadow" x="-25%" y="-25%" width="150%" height="150%"><feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#173651" flood-opacity=".14"/></filter>
+    <radialGradient id="coreHalo">
+      <stop offset="0" stop-color="#38d8ff" stop-opacity=".46"/>
+      <stop offset=".34" stop-color="#6f6cff" stop-opacity=".25"/>
+      <stop offset=".68" stop-color="#a66cff" stop-opacity=".11"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cyanGlow">
+      <stop offset="0" stop-color="#6ce8ff" stop-opacity=".85"/>
+      <stop offset="1" stop-color="#6ce8ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="organic" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".28" stop-color="#e3f7ff"/>
+      <stop offset=".7" stop-color="#b4daf2"/>
+      <stop offset="1" stop-color="#7ea8c8"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e9f5ff"/>
+      <stop offset=".22" stop-color="#9db7d2"/>
+      <stop offset=".5" stop-color="#536e91"/>
+      <stop offset=".78" stop-color="#243b61"/>
+      <stop offset="1" stop-color="#101b38"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".88"/>
+      <stop offset="1" stop-color="#dfeaff" stop-opacity=".48"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#18c8ef"/>
+      <stop offset=".45" stop-color="#5f79ff"/>
+      <stop offset=".75" stop-color="#9c64ef"/>
+      <stop offset="1" stop-color="#32d5aa"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c74ff"/>
+      <stop offset="1" stop-color="#b568ec"/>
+    </linearGradient>
+    <pattern id="microgrid" width="52" height="52" patternUnits="userSpaceOnUse">
+      <path d="M52 0H0V52" fill="none" stroke="#7590ae" stroke-width="1" opacity=".08"/>
+      <circle cx="0" cy="0" r="1.6" fill="#6284a8" opacity=".11"/>
+    </pattern>
+    <pattern id="scan" width="9" height="9" patternUnits="userSpaceOnUse">
+      <path d="M0 8.5H9" stroke="#8aa1ba" stroke-width=".55" opacity=".08"/>
+    </pattern>
+    <filter id="shadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="28" stdDeviation="34" flood-color="#173456" flood-opacity=".18"/>
+    </filter>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="13" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="softGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="28"/>
+    </filter>
+    <clipPath id="brainClip">
+      <path d="M1200 288C1118 232 1016 242 956 309C880 295 809 337 787 410C714 432 675 505 691 575C636 632 646 724 704 774C686 854 737 932 819 950C845 1026 934 1063 1003 1025C1062 1085 1158 1078 1200 1013C1242 1078 1338 1085 1397 1025C1466 1063 1555 1026 1581 950C1663 932 1714 854 1696 774C1754 724 1764 632 1709 575C1725 505 1686 432 1613 410C1591 337 1520 295 1444 309C1384 242 1282 232 1200 288Z"/>
+    </clipPath>
   </defs>
 
-  <rect width="1600" height="720" rx="28" fill="url(#bg)"/>
-  <rect width="1600" height="720" rx="28" fill="url(#grid)"/>
-  <ellipse cx="800" cy="360" rx="430" ry="335" fill="url(#halo)"/>
+  <rect width="2400" height="1320" rx="42" fill="url(#bg)"/>
+  <rect width="2400" height="1320" rx="42" fill="url(#microgrid)"/>
+  <rect width="2400" height="1320" rx="42" fill="url(#scan)"/>
+  <ellipse cx="1200" cy="665" rx="780" ry="610" fill="url(#coreHalo)"/>
+  <ellipse cx="1200" cy="1084" rx="570" ry="72" fill="#315174" opacity=".09" filter="url(#softGlow)"/>
 
-  <g fill="none" stroke-linecap="round">
-    <circle cx="800" cy="360" r="252" stroke="#5a83b0" stroke-width="1.4" stroke-dasharray="5 14" opacity=".35"/>
-    <circle cx="800" cy="360" r="292" stroke="#6f8cab" stroke-width="1" stroke-dasharray="2 18" opacity=".22"/>
-    <path d="M800 62v65M800 593v65M502 360h-64M1162 360h-64" stroke="#6887a8" stroke-width="1.4" opacity=".30"/>
+  <g opacity=".42" fill="none" stroke-linecap="round">
+    <ellipse cx="1200" cy="658" rx="650" ry="515" stroke="#537ca8" stroke-width="1.4" stroke-dasharray="5 17"/>
+    <ellipse cx="1200" cy="658" rx="748" ry="592" stroke="#7569cc" stroke-width="1" stroke-dasharray="2 21"/>
+    <path d="M1200 74v123M1200 1118v126M433 658H257M2143 658h-176" stroke="#52779c" stroke-width="1.5"/>
+    <path d="M660 195l80 112M1740 195l-80 112M637 1099l92-102M1763 1099l-92-102" stroke="#7890a8" stroke-width="1"/>
   </g>
 
-  <g transform="translate(78 60)" filter="url(#shadow)">
-    <rect width="370" height="76" rx="20" fill="#fff" fill-opacity=".92" stroke="#d5e2ee"/>
-    <circle cx="36" cy="38" r="8" fill="#20b9dc"/><circle cx="61" cy="38" r="8" fill="#6579f2"/><circle cx="86" cy="38" r="8" fill="#38c29a"/>
-    <text x="118" y="34" font-family="Segoe UI,Arial,sans-serif" font-size="17" font-weight="700" letter-spacing="2.2" fill="#16334f">CCOS ENTERPRISE</text>
-    <text x="118" y="55" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="600" letter-spacing="1.5" fill="#6b8095">GOVERNED MEMORY INFRASTRUCTURE</text>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif" transform="translate(104 90)">
+    <rect width="550" height="110" rx="28" fill="#ffffff" fill-opacity=".64" stroke="#c8d9eb" filter="url(#shadow)"/>
+    <circle cx="48" cy="55" r="15" fill="#1ed0ee"/>
+    <circle cx="86" cy="55" r="15" fill="#6579ff"/>
+    <circle cx="124" cy="55" r="15" fill="#9a67ef"/>
+    <text x="174" y="50" font-size="28" font-weight="800" letter-spacing="4" fill="#132f52">CCOS ENTERPRISE</text>
+    <text x="174" y="79" font-size="14" font-weight="650" letter-spacing="3" fill="#657d98">GOVERNED COGNITIVE MEMORY</text>
   </g>
 
-  <g fill="none" stroke="#8196ad" stroke-width="1.5" opacity=".34">
-    <path d="M392 222C500 222 534 268 615 304"/><path d="M392 363C495 363 530 371 565 382"/><path d="M398 520C510 520 551 476 620 447"/>
-    <path d="M1208 198C1111 198 1081 257 990 297"/><path d="M1208 352C1113 352 1073 358 1034 370"/><path d="M1208 518C1100 518 1061 472 990 445"/>
+  <g fill="none" stroke="#6d89a6" stroke-width="1.5" opacity=".36">
+    <path d="M578 361C758 361 814 420 902 478"/>
+    <path d="M548 657C730 657 792 650 863 650"/>
+    <path d="M578 944C748 944 812 876 904 821"/>
+    <path d="M1822 361C1642 361 1586 420 1498 478"/>
+    <path d="M1852 657C1670 657 1608 650 1537 650"/>
+    <path d="M1822 944C1652 944 1588 876 1496 821"/>
   </g>
 
-  <g font-family="Segoe UI,Arial,sans-serif" filter="url(#shadow)">
-    <g transform="translate(78 177)"><rect width="314" height="90" rx="18" fill="#fff" fill-opacity=".94" stroke="#d7e3ee"/><rect width="5" height="90" rx="3" fill="#25b8dc"/><circle cx="34" cy="31" r="10" fill="#e4f8fd" stroke="#25b8dc"/><path d="M29 31l4 4 7-9" fill="none" stroke="#168aa7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><text x="58" y="35" font-size="15" font-weight="700" fill="#18344f">PROVENANCE</text><text x="28" y="63" font-size="12" fill="#667c92">evidence lineage · source identity</text></g>
-    <g transform="translate(78 320)"><rect width="314" height="90" rx="18" fill="#fff" fill-opacity=".94" stroke="#d7e3ee"/><rect width="5" height="90" rx="3" fill="#6579f2"/><circle cx="34" cy="31" r="10" fill="#efefff" stroke="#6579f2"/><path d="M34 24v8l5 3" fill="none" stroke="#5369dc" stroke-width="2" stroke-linecap="round"/><text x="58" y="35" font-size="15" font-weight="700" fill="#18344f">TEMPORAL MEMORY</text><text x="28" y="63" font-size="12" fill="#667c92">bi-temporal facts · preserved conflict</text></g>
-    <g transform="translate(78 463)"><rect width="320" height="90" rx="18" fill="#fff" fill-opacity=".94" stroke="#d7e3ee"/><rect width="5" height="90" rx="3" fill="#38c29a"/><circle cx="34" cy="31" r="10" fill="#e9fbf5" stroke="#38c29a"/><path d="M29 31l4 4 7-9" fill="none" stroke="#269b7d" stroke-width="2"/><text x="58" y="35" font-size="15" font-weight="700" fill="#18344f">VERIFIED CITATIONS</text><text x="28" y="63" font-size="12" fill="#667c92">content hash · exact byte span</text></g>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif" filter="url(#shadow)">
+    <g transform="translate(105 293)">
+      <rect width="475" height="150" rx="28" fill="url(#glass)" stroke="#c9d9e9"/>
+      <rect width="7" height="150" rx="4" fill="#22ccef"/>
+      <circle cx="58" cy="56" r="23" fill="#dff9ff" stroke="#28cbea"/>
+      <path d="M46 57l9 9 18-23" fill="none" stroke="#1393ac" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="101" y="54" font-size="22" font-weight="800" letter-spacing="2.6" fill="#173555">PROVENANCE</text>
+      <text x="39" y="101" font-size="16" fill="#607b95">source identity · evidence lineage</text>
+      <text x="39" y="126" font-size="14" fill="#8497aa">hashes / byte spans / citations</text>
+    </g>
+    <g transform="translate(74 582)">
+      <rect width="474" height="150" rx="28" fill="url(#glass)" stroke="#c9d9e9"/>
+      <rect width="7" height="150" rx="4" fill="#6c78ff"/>
+      <circle cx="58" cy="56" r="23" fill="#eeefff" stroke="#6c78ff"/>
+      <path d="M58 42v17l12 8" fill="none" stroke="#5665d8" stroke-width="4" stroke-linecap="round"/>
+      <text x="101" y="54" font-size="22" font-weight="800" letter-spacing="2.2" fill="#173555">TEMPORAL MEMORY</text>
+      <text x="39" y="101" font-size="16" fill="#607b95">bi-temporal facts · revisions</text>
+      <text x="39" y="126" font-size="14" fill="#8497aa">contradictions remain explicit</text>
+    </g>
+    <g transform="translate(105 870)">
+      <rect width="475" height="150" rx="28" fill="url(#glass)" stroke="#c9d9e9"/>
+      <rect width="7" height="150" rx="4" fill="#35d6aa"/>
+      <circle cx="58" cy="56" r="23" fill="#e3fbf4" stroke="#35d6aa"/>
+      <path d="M45 58l10 9 18-24" fill="none" stroke="#249c7d" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="101" y="54" font-size="22" font-weight="800" letter-spacing="2.2" fill="#173555">VERIFIED EVIDENCE</text>
+      <text x="39" y="101" font-size="16" fill="#607b95">content hash · exact source bytes</text>
+      <text x="39" y="126" font-size="14" fill="#8497aa">integrity without claiming truth</text>
+    </g>
 
-    <g transform="translate(1208 154)"><rect width="314" height="90" rx="18" fill="#fff" fill-opacity=".94" stroke="#d7e3ee"/><rect x="309" width="5" height="90" rx="3" fill="#8a66e7"/><circle cx="34" cy="31" r="10" fill="#f1ecff" stroke="#8a66e7"/><path d="M29 31h10v7H29zM31 30v-4c0-5 6-5 6 0v4" fill="none" stroke="#7451d2" stroke-width="1.6"/><text x="58" y="35" font-size="15" font-weight="700" fill="#18344f">TENANT ISOLATION</text><text x="28" y="63" font-size="12" fill="#667c92">scoped memory · explicit boundaries</text></g>
-    <g transform="translate(1208 308)"><rect width="314" height="90" rx="18" fill="#fff" fill-opacity=".94" stroke="#d7e3ee"/><rect x="309" width="5" height="90" rx="3" fill="#2db5d5"/><circle cx="34" cy="31" r="10" fill="#e8f8fc" stroke="#2db5d5"/><path d="M29 31h10M34 26v10" fill="none" stroke="#218aa3" stroke-width="2"/><text x="58" y="35" font-size="15" font-weight="700" fill="#18344f">POLICY GATE</text><text x="28" y="63" font-size="12" fill="#667c92">identity · RBAC · quotas · audit</text></g>
-    <g transform="translate(1208 462)"><rect width="314" height="90" rx="18" fill="#fff" fill-opacity=".94" stroke="#d7e3ee"/><rect x="309" width="5" height="90" rx="3" fill="#38c29a"/><circle cx="34" cy="31" r="10" fill="#e9fbf5" stroke="#38c29a"/><path d="M29 33a7 7 0 1 0 2-7M29 24v7h7" fill="none" stroke="#269b7d" stroke-width="1.8" stroke-linecap="round"/><text x="58" y="35" font-size="15" font-weight="700" fill="#18344f">CRASH RECOVERY</text><text x="28" y="63" font-size="12" fill="#667c92">durable transitions · non-resurrection</text></g>
+    <g transform="translate(1820 293)">
+      <rect width="475" height="150" rx="28" fill="url(#glass)" stroke="#c9d9e9"/>
+      <rect x="468" width="7" height="150" rx="4" fill="#a167eb"/>
+      <circle cx="58" cy="56" r="23" fill="#f3eaff" stroke="#a167eb"/>
+      <path d="M46 58h24v17H46zM50 56v-9c0-12 16-12 16 0v9" fill="none" stroke="#8050c8" stroke-width="3.2"/>
+      <text x="101" y="54" font-size="22" font-weight="800" letter-spacing="2.2" fill="#173555">TENANT ISOLATION</text>
+      <text x="39" y="101" font-size="16" fill="#607b95">identity · scope · explicit authority</text>
+      <text x="39" y="126" font-size="14" fill="#8497aa">no cross-tenant fallback</text>
+    </g>
+    <g transform="translate(1852 582)">
+      <rect width="474" height="150" rx="28" fill="url(#glass)" stroke="#c9d9e9"/>
+      <rect x="467" width="7" height="150" rx="4" fill="#23c4e6"/>
+      <circle cx="58" cy="56" r="23" fill="#e1f9fd" stroke="#23c4e6"/>
+      <path d="M45 56h26M58 43v26" fill="none" stroke="#168ca5" stroke-width="4" stroke-linecap="round"/>
+      <text x="101" y="54" font-size="22" font-weight="800" letter-spacing="2.4" fill="#173555">POLICY GATE</text>
+      <text x="39" y="101" font-size="16" fill="#607b95">RBAC · quotas · audit · admission</text>
+      <text x="39" y="126" font-size="14" fill="#8497aa">authority precedes similarity</text>
+    </g>
+    <g transform="translate(1820 870)">
+      <rect width="475" height="150" rx="28" fill="url(#glass)" stroke="#c9d9e9"/>
+      <rect x="468" width="7" height="150" rx="4" fill="#35d6aa"/>
+      <circle cx="58" cy="56" r="23" fill="#e3fbf4" stroke="#35d6aa"/>
+      <path d="M46 61a17 17 0 1 0 4-17M45 38v17h17" fill="none" stroke="#249c7d" stroke-width="3.5" stroke-linecap="round"/>
+      <text x="101" y="54" font-size="22" font-weight="800" letter-spacing="2.3" fill="#173555">CRASH RECOVERY</text>
+      <text x="39" y="101" font-size="16" fill="#607b95">durable transition · physical purge</text>
+      <text x="39" y="126" font-size="14" fill="#8497aa">bounded non-resurrection proof</text>
+    </g>
   </g>
+
+  <g clip-path="url(#brainClip)">
+    <rect x="655" y="218" width="545" height="900" fill="url(#organic)"/>
+    <rect x="1200" y="218" width="545" height="900" fill="url(#metal)"/>
+    <ellipse cx="1040" cy="640" rx="350" ry="420" fill="#ffffff" opacity=".18"/>
+    <ellipse cx="1455" cy="650" rx="370" ry="430" fill="#101c3d" opacity=".18"/>
+
+    <g fill="none" stroke="#467ea3" stroke-width="6" stroke-linecap="round" opacity=".68">
+      <path d="M1126 326C1039 332 1007 389 1036 447C1058 493 1017 536 963 529"/>
+      <path d="M957 351C890 381 879 454 925 493C958 521 942 577 886 596"/>
+      <path d="M826 456C770 500 782 577 833 606C875 630 865 685 821 720"/>
+      <path d="M992 595C1059 552 1134 585 1143 647C1151 700 1108 735 1050 726"/>
+      <path d="M1126 500C1170 527 1180 585 1148 623"/>
+      <path d="M886 760C936 719 1011 742 1027 805C1039 853 1082 876 1132 854"/>
+      <path d="M817 846C888 817 943 855 948 914"/>
+      <path d="M1000 965C1068 988 1132 947 1137 889"/>
+    </g>
+    <g fill="#faffff" stroke="#24bfe0" stroke-width="3">
+      <circle cx="1036" cy="447" r="10"/><circle cx="925" cy="493" r="10"/>
+      <circle cx="833" cy="606" r="10"/><circle cx="1143" cy="647" r="10"/>
+      <circle cx="1027" cy="805" r="10"/><circle cx="948" cy="914" r="10"/>
+      <circle cx="1137" cy="889" r="10"/>
+    </g>
+
+    <g stroke="#a8bfd6" stroke-width="2">
+      <path d="M1233 317l117-31 82 47-25 112-119 22-72-62z" fill="#829bb7"/>
+      <path d="M1448 329l105 29 48 89-53 74-102-31-39-75z" fill="#617c9d"/>
+      <path d="M1222 487l128-25 92 57-20 113-130 25-78-63z" fill="#587697"/>
+      <path d="M1456 542l128-37 78 77-31 111-127 22-78-71z" fill="#3d5d83"/>
+      <path d="M1218 677l122-30 104 58-16 128-126 25-90-65z" fill="#4d6a91"/>
+      <path d="M1450 733l137-31 77 73-44 112-126 18-73-75z" fill="#2c486d"/>
+      <path d="M1229 875l120-39 97 53-7 110-106 51-104-54z" fill="#3a577e"/>
+      <path d="M1463 924l100-28 69 62-27 83-104 22-58-65z" fill="#223b61"/>
+    </g>
+    <g fill="none" stroke="#6deaff" stroke-width="4" stroke-linecap="round" filter="url(#glow)">
+      <path d="M1265 369h67v-42h62"/>
+      <path d="M1290 548h82v-41h60"/>
+      <path d="M1490 612h75v-50h57"/>
+      <path d="M1270 752h72v-49h72"/>
+      <path d="M1497 814h76v-48h54"/>
+      <path d="M1281 943h78v-49h64"/>
+      <path d="M1502 977h70v-42h50"/>
+    </g>
+    <g fill="#e6fdff" stroke="#50d8ef" stroke-width="2">
+      <circle cx="1394" cy="327" r="8"/><circle cx="1432" cy="507" r="8"/>
+      <circle cx="1622" cy="562" r="8"/><circle cx="1414" cy="703" r="8"/>
+      <circle cx="1627" cy="766" r="8"/><circle cx="1423" cy="894" r="8"/>
+      <circle cx="1622" cy="935" r="8"/>
+    </g>
+  </g>
+
+  <path d="M1200 288C1118 232 1016 242 956 309C880 295 809 337 787 410C714 432 675 505 691 575C636 632 646 724 704 774C686 854 737 932 819 950C845 1026 934 1063 1003 1025C1062 1085 1158 1078 1200 1013C1242 1078 1338 1085 1397 1025C1466 1063 1555 1026 1581 950C1663 932 1714 854 1696 774C1754 724 1764 632 1709 575C1725 505 1686 432 1613 410C1591 337 1520 295 1444 309C1384 242 1282 232 1200 288Z"
+        fill="none" stroke="#355878" stroke-width="5" filter="url(#shadow)"/>
+  <path d="M1200 302C1170 370 1217 425 1185 490C1158 546 1216 606 1187 670C1157 735 1215 801 1185 868C1164 915 1206 968 1200 1012"
+        fill="none" stroke="url(#accent)" stroke-width="8" stroke-linecap="round" filter="url(#glow)"/>
 
   <g filter="url(#shadow)">
-    <path d="M800 206C756 179 709 187 681 222C645 218 613 244 602 281C568 294 548 327 552 363C528 390 530 429 552 456C547 493 570 529 607 543C613 580 649 607 689 600C719 628 764 625 800 598Z" fill="url(#organic)" stroke="#6387aa" stroke-width="2.2"/>
-    <path d="M800 206C844 179 891 187 919 222C955 218 987 244 998 281C1032 294 1052 327 1048 363C1072 390 1070 429 1048 456C1053 493 1030 529 993 543C987 580 951 607 911 600C881 628 836 625 800 598Z" fill="url(#robot)" stroke="#3d5d7d" stroke-width="2.2"/>
-    <path d="M800 214C785 253 810 280 794 317C783 343 811 370 798 399C784 431 808 463 796 494C786 520 806 552 800 592" fill="none" stroke="#224969" stroke-width="3"/>
-
-    <g fill="none" stroke="#3e7ea4" stroke-width="4" stroke-linecap="round" opacity=".64">
-      <path d="M742 234C703 243 689 276 704 303C716 324 702 347 678 350"/><path d="M658 267C631 284 628 318 647 337C664 354 658 379 632 391"/><path d="M614 329C590 352 593 386 616 401C635 413 633 438 618 451"/><path d="M676 379C700 365 729 376 735 401C740 422 722 442 700 440"/><path d="M748 332C774 342 783 370 769 392C753 416 762 449 785 461"/><path d="M652 467C678 449 711 459 719 487C725 507 744 518 766 511"/><path d="M707 552C736 565 771 547 773 520"/>
-    </g>
-    <g fill="#fff" stroke="#2bafd1" stroke-width="2"><circle cx="704" cy="303" r="5"/><circle cx="647" cy="337" r="5"/><circle cx="616" cy="401" r="5"/><circle cx="735" cy="401" r="5"/><circle cx="769" cy="392" r="5"/><circle cx="719" cy="487" r="5"/><circle cx="773" cy="520" r="5"/></g>
-
-    <g stroke="#bdcee0" stroke-width="1.2">
-      <path d="M823 232l56-15 38 22-17 53-57 10-31-30z" fill="#90a9c6"/><path d="M925 248l44 15 18 42-27 31-43-16-15-29z" fill="#718eac"/><path d="M818 319l58-12 40 27-9 50-59 12-35-30z" fill="#6e8cab"/><path d="M932 350l61-17 35 36-13 50-59 10-35-32z" fill="#537091"/><path d="M813 415l53-14 47 26-6 57-56 12-36-29z" fill="#6885a5"/><path d="M928 445l62-13 36 32-20 50-56 8-32-33z" fill="#416080"/><path d="M822 515l55-18 44 23-3 50-48 23-46-24z" fill="#4f6e8f"/>
-    </g>
-    <g fill="none" stroke="#72e2f4" stroke-width="2.2" stroke-linecap="round"><path d="M832 260h30v-19h28"/><path d="M842 351h36v-17h26"/><path d="M946 382h32v-21h22"/><path d="M838 452h31v-21h26"/><path d="M951 483h31v-22h24"/><path d="M842 550h36v-23h25"/></g>
-    <g fill="#e4fcff" stroke="#43c6df" stroke-width="1.5"><circle cx="890" cy="241" r="4.5"/><circle cx="904" cy="334" r="4.5"/><circle cx="1000" cy="361" r="4.5"/><circle cx="895" cy="431" r="4.5"/><circle cx="1006" cy="461" r="4.5"/><circle cx="903" cy="527" r="4.5"/></g>
-
-    <circle cx="800" cy="407" r="37" fill="#f9fbff" stroke="#2f6088" stroke-width="3"/><circle cx="800" cy="407" r="23" fill="url(#accent)"/><circle cx="800" cy="407" r="8" fill="#fff"/>
-    <path d="M800 370v-27M800 444v27M763 407h-27M837 407h27" stroke="#2f6088" stroke-width="2.6" stroke-linecap="round"/>
+    <circle cx="1200" cy="660" r="94" fill="#f9fcff" fill-opacity=".94" stroke="#41698e" stroke-width="4"/>
+    <circle cx="1200" cy="660" r="68" fill="#162d53"/>
+    <circle cx="1200" cy="660" r="47" fill="url(#accent)" filter="url(#glow)"/>
+    <circle cx="1200" cy="660" r="18" fill="#ffffff"/>
+    <path d="M1200 565v-58M1200 813v-58M1105 660h-58M1353 660h-58" stroke="#3b6287" stroke-width="5" stroke-linecap="round"/>
   </g>
 
-  <g font-family="Segoe UI,Arial,sans-serif">
-    <text x="800" y="675" text-anchor="middle" font-size="13" font-weight="600" letter-spacing="2.1" fill="#587188">MEMORY THAT PRESERVES AUTHORITY, TIME, PROVENANCE AND POLICY</text>
+  <g opacity=".86">
+    <g fill="#ffffff" stroke="#547aa0" stroke-width="2">
+      <circle cx="1200" cy="143" r="10"/><circle cx="715" cy="269" r="9"/><circle cx="1685" cy="269" r="9"/>
+      <circle cx="545" cy="657" r="9"/><circle cx="1855" cy="657" r="9"/><circle cx="735" cy="1071" r="9"/><circle cx="1665" cy="1071" r="9"/>
+    </g>
+    <g fill="url(#accent)">
+      <circle cx="1200" cy="143" r="5"/><circle cx="715" cy="269" r="4.5"/><circle cx="1685" cy="269" r="4.5"/>
+      <circle cx="545" cy="657" r="4.5"/><circle cx="1855" cy="657" r="4.5"/><circle cx="735" cy="1071" r="4.5"/><circle cx="1665" cy="1071" r="4.5"/>
+    </g>
+  </g>
+
+  <g font-family="Inter,Segoe UI,Arial,sans-serif" text-anchor="middle">
+    <text x="1200" y="1188" font-size="18" font-weight="800" letter-spacing="5" fill="#365774">MEMORY WITH AUTHORITY</text>
+    <text x="1200" y="1228" font-size="14" font-weight="650" letter-spacing="3.2" fill="#71869c">TIME · PROVENANCE · POLICY · RECOVERY</text>
   </g>
 </svg>

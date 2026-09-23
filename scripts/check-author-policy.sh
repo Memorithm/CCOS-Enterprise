@@ -6,9 +6,13 @@
 # tool used to create a commit. Those aliases are normalized to one logical
 # human identity before the policy is evaluated.
 #
-# Authorized aliases for the same human contributor:
-#   - ZEKRITI Tarek
+# Active aliases for the same sole human contributor:
+#   - CHECKUPAUTO
 #   - MEMOPERF
+#
+# Historical-only alias:
+#   - ZEKRITI Tarek (accepted only for commits already reachable from the
+#     explicit 2026-09-23 cutover commit; never accepted for new commits)
 #
 # What is forbidden:
 #   - any author/committer identity that does not normalize to the authorized
@@ -51,7 +55,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RANGE="${1:-HEAD}"
-CANONICAL_HUMAN_ID="zekriti-tarek"
+CANONICAL_HUMAN_ID="checkupauto-memoperf"
+IDENTITY_CUTOVER_SHA="dae66874533fa9f09fde1251cda781aa46b080ec"
 # The committer stamp GitHub's web UI writes and no contributor can set. It
 # is accepted only when the author already normalized to the human above.
 WEB_STAMP_CN="GitHub"
@@ -61,9 +66,19 @@ WEB_STAMP_CE="noreply@github.com"
 # stable logical ID. New aliases must be added explicitly here; unknown names
 # continue to fail closed.
 canonical_human_id() {
-  case "$1" in
-    "ZEKRITI Tarek"|"MEMOPERF")
+  local display_name="$1"
+  local commit_sha="$2"
+  case "$display_name" in
+    "CHECKUPAUTO"|"MEMOPERF")
       printf '%s\n' "$CANONICAL_HUMAN_ID"
+      ;;
+    "ZEKRITI Tarek")
+      # Preserve immutable history without keeping this as a current alias.
+      if git merge-base --is-ancestor "$commit_sha" "$IDENTITY_CUTOVER_SHA" 2>/dev/null; then
+        printf '%s\n' "$CANONICAL_HUMAN_ID"
+      else
+        return 1
+      fi
       ;;
     *)
       return 1
@@ -109,14 +124,14 @@ while IFS=$'\t' read -r h an ae cn ce parents; do
     *) is_merge=0 ;;
   esac
   if [ "$is_merge" -eq 0 ]; then
-    author_id="$(canonical_human_id "$an" 2>/dev/null || true)"
+    author_id="$(canonical_human_id "$an" "$h" 2>/dev/null || true)"
     if [ "$author_id" != "$CANONICAL_HUMAN_ID" ]; then
       echo "::error::$h author is '$an'; it does not normalize to the authorized human identity"
       fail=1
     elif [ "$cn" = "$WEB_STAMP_CN" ] && [ "$ce" = "$WEB_STAMP_CE" ]; then
       : # web-UI squash stamp: the author is proved, the committer is GitHub's own
     else
-      committer_id="$(canonical_human_id "$cn" 2>/dev/null || true)"
+      committer_id="$(canonical_human_id "$cn" "$h" 2>/dev/null || true)"
       if [ "$committer_id" != "$CANONICAL_HUMAN_ID" ]; then
         echo "::error::$h committer is '$cn'; it does not normalize to the authorized human identity"
         fail=1

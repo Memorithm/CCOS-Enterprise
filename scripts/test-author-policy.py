@@ -37,6 +37,14 @@ with tempfile.TemporaryDirectory(prefix="author-policy-") as tmp:
 
     base = commit("policy: authorized baseline")
     check("HEAD", True)
+    checkup = commit("policy: CHECKUPAUTO alias",
+                     GIT_AUTHOR_NAME="CHECKUPAUTO",
+                     GIT_COMMITTER_NAME="CHECKUPAUTO")
+    check(f"{checkup}^..{checkup}", True)
+    legacy_new = commit("policy: legacy display name is no longer active",
+                        GIT_AUTHOR_NAME="ZEKRITI Tarek",
+                        GIT_COMMITTER_NAME="ZEKRITI Tarek")
+    check(f"{legacy_new}^..{legacy_new}", False)
     check("does-not-exist", False)
     check("HEAD..HEAD", False)
     for msg, identity in [

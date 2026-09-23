@@ -151,12 +151,8 @@ impl ProviderGenerationStore {
             .map(|(id, class)| (id.clone(), class))
             .collect::<Vec<_>>();
         authority.graph.register(descriptor)?;
-        provenance_rows.push((
-            write.asset_id.clone(),
-            MemoryProvenanceClass::Observed,
-        ));
-        authority.provenance =
-            MemoryProvenanceRegistry::new(&authority.graph, provenance_rows)?;
+        provenance_rows.push((write.asset_id.clone(), MemoryProvenanceClass::Observed));
+        authority.provenance = MemoryProvenanceRegistry::new(&authority.graph, provenance_rows)?;
         if authority
             .trust
             .insert(write.asset_id.clone(), MemoryTrustMetadata::unverified(1))
@@ -228,10 +224,7 @@ impl ProviderGenerationStore {
                 .trust
                 .get(&receipt.asset_id)
                 .is_some_and(|trust| trust.state() == MemoryValidationState::Unverified)
-            && self
-                .governance()
-                .provenance
-                .class(&receipt.asset_id)
+            && self.governance().provenance.class(&receipt.asset_id)
                 == Some(MemoryProvenanceClass::Observed)
             && self
                 .recovered()

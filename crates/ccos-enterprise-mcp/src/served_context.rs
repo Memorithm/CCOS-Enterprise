@@ -9,10 +9,10 @@ use std::fmt;
 
 use ccos_enterprise_memory::{
     admit_governed_recall, assemble_governed_bootstrap_context, attest_governed_context,
-    BudgetedMemoryRecall, GovernedMemoryContextAssembly, GovernedMemoryProjection,
-    GovernedMemoryStore, GovernedMemoryStoreError, GovernedRecallGate, GovernedRecallGateError,
-    GovernedRecallTrustPolicy, GovernedSemanticMemoryProvider, GovernedSemanticMemoryProviderExt,
-    validate_admitted_provenance, MemoryContextAttestation, MemoryContextBudget,
+    validate_admitted_provenance, BudgetedMemoryRecall, GovernedMemoryContextAssembly,
+    GovernedMemoryProjection, GovernedMemoryStore, GovernedMemoryStoreError, GovernedRecallGate,
+    GovernedRecallGateError, GovernedRecallTrustPolicy, GovernedSemanticMemoryProvider,
+    GovernedSemanticMemoryProviderExt, MemoryContextAttestation, MemoryContextBudget,
     MemoryContextError, MemoryError, MemoryLoadoutPlanError, MemoryRecallBudget,
     MemoryRecallBudgetError, ProvenanceRecallError, ProvenanceRecallPolicy,
 };

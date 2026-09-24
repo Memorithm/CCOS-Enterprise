@@ -159,10 +159,7 @@ fn accepted_evidence_advances_generation_but_stays_out_of_verified_context() {
         MemoryValidationState::Unverified
     );
     assert_eq!(
-        store
-            .governance()
-            .provenance
-            .class(&id("fresh-unverified")),
+        store.governance().provenance.class(&id("fresh-unverified")),
         Some(MemoryProvenanceClass::Observed)
     );
 

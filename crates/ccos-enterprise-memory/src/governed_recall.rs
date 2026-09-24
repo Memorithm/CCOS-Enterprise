@@ -240,9 +240,7 @@ pub(crate) fn admit_bound(
             .provenance
             .class(&observation.asset_id)
             .ok_or_else(|| {
-                GovernedRecallGateError::MissingProvenanceMetadata(
-                    observation.asset_id.clone(),
-                )
+                GovernedRecallGateError::MissingProvenanceMetadata(observation.asset_id.clone())
             })?;
         let payload_sha256 = Sha256::digest(&observation.payload).into();
         admitted.push(AdmittedGovernedMemoryObservation {

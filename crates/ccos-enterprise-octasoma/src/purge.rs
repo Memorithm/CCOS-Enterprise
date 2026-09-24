@@ -171,8 +171,7 @@ impl ProviderGenerationStore {
                     authority.graph.state(&id),
                     Some(MemoryAssetState::Stale | MemoryAssetState::Invalidated)
                 ) || authority.graph.descriptor(&id) != self.governance().graph.descriptor(&id)
-                    || authority.provenance.class(&id)
-                        != self.governance().provenance.class(&id)
+                    || authority.provenance.class(&id) != self.governance().provenance.class(&id)
             })
         {
             return Err(ProviderGenerationError::Invalid(

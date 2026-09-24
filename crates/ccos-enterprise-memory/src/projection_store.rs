@@ -292,8 +292,8 @@ fn validate_candidate(
     candidate: &GovernedMemoryProjection,
 ) -> Result<GovernedMemoryProjection, GovernedMemoryProjectionError> {
     check_tenant(expected, &candidate.tenant)?;
-    let checked = GovernedMemoryProjection::from_wire(Some(expected), candidate.to_wire())?;
-    let encoded = serde_json::to_vec_pretty(&checked.to_wire())
+    let checked = GovernedMemoryProjection::from_wire(Some(expected), candidate.to_wire()?)?;
+    let encoded = serde_json::to_vec_pretty(&checked.to_wire()?)
         .map_err(|error| projection_corrupt(&error.to_string()))?;
     if encoded.len() > MAX_GOVERNED_MEMORY_PROJECTION_BYTES {
         return Err(projection_corrupt(
@@ -593,7 +593,7 @@ mod tests {
         candidate.graph.invalidate(&id("root")).unwrap();
         let result = store.replace_with(candidate.clone(), |root, projection| {
             let path = root.join(GOVERNED_MEMORY_PROJECTION_FILE);
-            let bytes = serde_json::to_vec_pretty(&projection.to_wire()).unwrap();
+            let bytes = serde_json::to_vec_pretty(&projection.to_wire().unwrap()).unwrap();
             super::super::publish_projection(root, &path, &bytes, |_| {
                 Err(io::Error::other("injected directory sync failure"))
             })?;

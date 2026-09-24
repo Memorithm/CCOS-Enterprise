@@ -25,10 +25,12 @@ use serde::{Deserialize, Serialize};
 use crate::{
     MemoryAssetDescriptor, MemoryAssetId, MemoryAssetState, MemoryEvidenceRef, MemoryLineage,
     MemoryLineageGraph, MemoryLoadoutBinding, MemoryLoadoutPlan, MemoryLoadoutPlanError,
-    MemorySpace, MemoryStratum, MemoryTrustMetadata, MemoryUsageMode, MemoryValidationState,
+    MemoryProvenanceClass, MemoryProvenanceRegistry, MemoryProvenanceRegistryError, MemorySpace,
+    MemoryStratum, MemoryTrustMetadata, MemoryUsageMode, MemoryValidationState,
 };
 
-pub const GOVERNED_MEMORY_PROJECTION_VERSION: u32 = 1;
+pub const GOVERNED_MEMORY_PROJECTION_VERSION: u32 = 2;
+const LEGACY_GOVERNED_MEMORY_PROJECTION_VERSION: u32 = 1;
 pub const GOVERNED_MEMORY_PROJECTION_FILE: &str = "governed-memory.json";
 /// Hard byte bound on one encoded governance projection, excluding embeddings.
 pub const MAX_GOVERNED_MEMORY_PROJECTION_BYTES: usize = 64 * 1024 * 1024;
@@ -39,6 +41,7 @@ pub struct GovernedMemoryProjection {
     pub tenant: TenantId,
     pub graph: MemoryLineageGraph,
     pub trust: BTreeMap<MemoryAssetId, MemoryTrustMetadata>,
+    pub provenance: MemoryProvenanceRegistry,
     pub loadout: MemoryLoadoutPlan,
 }
 
@@ -57,6 +60,7 @@ pub enum GovernedMemoryProjectionError {
     Trust(crate::MemoryTrustError),
     Memory(crate::MemoryError),
     Loadout(MemoryLoadoutPlanError),
+    Provenance(MemoryProvenanceRegistryError),
 }
 
 impl std::fmt::Display for GovernedMemoryProjectionError {
@@ -88,6 +92,7 @@ impl std::fmt::Display for GovernedMemoryProjectionError {
             Self::Trust(error) => write!(f, "governed memory trust: {error}"),
             Self::Memory(error) => write!(f, "governed memory: {error}"),
             Self::Loadout(error) => write!(f, "governed memory loadout: {error}"),
+            Self::Provenance(error) => write!(f, "governed memory provenance: {error}"),
         }
     }
 }
@@ -114,6 +119,11 @@ impl From<MemoryLoadoutPlanError> for GovernedMemoryProjectionError {
         Self::Loadout(value)
     }
 }
+impl From<MemoryProvenanceRegistryError> for GovernedMemoryProjectionError {
+    fn from(value: MemoryProvenanceRegistryError) -> Self {
+        Self::Provenance(value)
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +144,8 @@ struct WireAsset {
     parents: Vec<String>,
     evidence: Vec<String>,
     state: String,
+    #[serde(default)]
+    provenance: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -162,6 +174,17 @@ impl GovernedMemoryProjection {
         trust: BTreeMap<MemoryAssetId, MemoryTrustMetadata>,
         loadout: MemoryLoadoutPlan,
     ) -> Result<Self, GovernedMemoryProjectionError> {
+        let provenance = MemoryProvenanceRegistry::inferred(&graph);
+        Self::new_with_provenance(tenant, graph, trust, provenance, loadout)
+    }
+
+    pub fn new_with_provenance(
+        tenant: TenantId,
+        graph: MemoryLineageGraph,
+        trust: BTreeMap<MemoryAssetId, MemoryTrustMetadata>,
+        provenance: MemoryProvenanceRegistry,
+        loadout: MemoryLoadoutPlan,
+    ) -> Result<Self, GovernedMemoryProjectionError> {
         for id in trust.keys() {
             if graph.descriptor(id).is_none() {
                 return Err(GovernedMemoryProjectionError::UnknownTrustAsset(
@@ -169,34 +192,51 @@ impl GovernedMemoryProjection {
                 ));
             }
         }
+        let provenance = MemoryProvenanceRegistry::new(
+            &graph,
+            provenance.entries().map(|(id, class)| (id.clone(), class)),
+        )?;
         Ok(Self {
             tenant,
             graph,
             trust,
+            provenance,
             loadout,
         })
     }
 
-    fn to_wire(&self) -> WireDocument {
+    fn to_wire(&self) -> Result<WireDocument, GovernedMemoryProjectionError> {
+        let provenance = MemoryProvenanceRegistry::new(
+            &self.graph,
+            self.provenance
+                .entries()
+                .map(|(id, class)| (id.clone(), class)),
+        )?;
         let mut assets: Vec<WireAsset> = self
             .graph
             .entries()
             .into_iter()
-            .map(|(descriptor, state)| WireAsset {
-                id: descriptor.id.as_str().to_string(),
-                space: encode_space(&descriptor.space),
-                stratum: encode_stratum(descriptor.stratum).to_string(),
-                parents: descriptor
-                    .lineage
-                    .parents()
-                    .map(|id| id.as_str().to_string())
-                    .collect(),
-                evidence: descriptor
-                    .lineage
-                    .evidence()
-                    .map(|id| id.as_str().to_string())
-                    .collect(),
-                state: encode_asset_state(state).to_string(),
+            .map(|(descriptor, state)| {
+                let class = provenance
+                    .class(&descriptor.id)
+                    .expect("validated exhaustive provenance registry");
+                WireAsset {
+                    id: descriptor.id.as_str().to_string(),
+                    space: encode_space(&descriptor.space),
+                    stratum: encode_stratum(descriptor.stratum).to_string(),
+                    parents: descriptor
+                        .lineage
+                        .parents()
+                        .map(|id| id.as_str().to_string())
+                        .collect(),
+                    evidence: descriptor
+                        .lineage
+                        .evidence()
+                        .map(|id| id.as_str().to_string())
+                        .collect(),
+                    state: encode_asset_state(state).to_string(),
+                    provenance: Some(encode_provenance(class).to_string()),
+                }
             })
             .collect();
         assets.sort_by(|a, b| a.id.cmp(&b.id));
@@ -222,24 +262,27 @@ impl GovernedMemoryProjection {
                 usage: encode_usage(binding.usage).to_string(),
             })
             .collect();
-        WireDocument {
+        Ok(WireDocument {
             version: GOVERNED_MEMORY_PROJECTION_VERSION,
             tenant: self.tenant.as_str().to_string(),
             assets,
             trust,
             loadout,
-        }
+        })
     }
 
     fn from_wire(
         expected_tenant: Option<&TenantId>,
         doc: WireDocument,
     ) -> Result<Self, GovernedMemoryProjectionError> {
-        if doc.version != GOVERNED_MEMORY_PROJECTION_VERSION {
+        if doc.version != LEGACY_GOVERNED_MEMORY_PROJECTION_VERSION
+            && doc.version != GOVERNED_MEMORY_PROJECTION_VERSION
+        {
             return Err(GovernedMemoryProjectionError::UnsupportedVersion(
                 doc.version,
             ));
         }
+        let wire_version = doc.version;
         let tenant = TenantId::validated(&doc.tenant)
             .ok_or_else(|| GovernedMemoryProjectionError::TenantInvalid(doc.tenant.clone()))?;
         if let Some(expected) = expected_tenant {
@@ -253,6 +296,7 @@ impl GovernedMemoryProjection {
         let mut seen_assets = BTreeSet::new();
         let mut descriptors = Vec::new();
         let mut states = Vec::new();
+        let mut provenance_rows = Vec::new();
         for asset in doc.assets {
             if !seen_assets.insert(asset.id.clone()) {
                 return Err(GovernedMemoryProjectionError::DuplicateAsset(asset.id));
@@ -283,6 +327,24 @@ impl GovernedMemoryProjection {
                 MemoryLineage::derived(parents, evidence)?
             };
             let descriptor = MemoryAssetDescriptor::new(id.clone(), space, stratum, lineage)?;
+            let provenance = match (wire_version, asset.provenance.as_deref()) {
+                (LEGACY_GOVERNED_MEMORY_PROJECTION_VERSION, None) => {
+                    MemoryProvenanceClass::inferred(&descriptor)
+                }
+                (LEGACY_GOVERNED_MEMORY_PROJECTION_VERSION, Some(_)) => {
+                    return Err(projection_corrupt(
+                        "legacy projection must not carry provenance class",
+                    ));
+                }
+                (GOVERNED_MEMORY_PROJECTION_VERSION, Some(value)) => decode_provenance(value)?,
+                (GOVERNED_MEMORY_PROJECTION_VERSION, None) => {
+                    return Err(projection_corrupt(
+                        "projection v2 asset is missing provenance class",
+                    ));
+                }
+                _ => unreachable!("projection version validated above"),
+            };
+            provenance_rows.push((id.clone(), provenance));
             states.push((id, decode_asset_state(&asset.state)?));
             descriptors.push(descriptor);
         }
@@ -323,7 +385,14 @@ impl GovernedMemoryProjection {
                 decode_usage(&row.usage)?,
             )?);
         }
-        Self::new(tenant, graph, trust, MemoryLoadoutPlan::new(bindings)?)
+        let provenance = MemoryProvenanceRegistry::new(&graph, provenance_rows)?;
+        Self::new_with_provenance(
+            tenant,
+            graph,
+            trust,
+            provenance,
+            MemoryLoadoutPlan::new(bindings)?,
+        )
     }
 }
 
@@ -524,6 +593,22 @@ fn decode_stratum(value: &str) -> Result<MemoryStratum, crate::MemoryError> {
         )),
     }
 }
+fn encode_provenance(class: MemoryProvenanceClass) -> &'static str {
+    match class {
+        MemoryProvenanceClass::Observed => "observed",
+        MemoryProvenanceClass::Derived => "derived",
+        MemoryProvenanceClass::Hypothetical => "hypothetical",
+    }
+}
+fn decode_provenance(value: &str) -> Result<MemoryProvenanceClass, GovernedMemoryProjectionError> {
+    match value {
+        "observed" => Ok(MemoryProvenanceClass::Observed),
+        "derived" => Ok(MemoryProvenanceClass::Derived),
+        "hypothetical" => Ok(MemoryProvenanceClass::Hypothetical),
+        _ => Err(projection_corrupt("unknown memory provenance class")),
+    }
+}
+
 fn encode_asset_state(state: MemoryAssetState) -> &'static str {
     match state {
         MemoryAssetState::Active => "active",
@@ -657,6 +742,76 @@ mod tests {
     }
 
     #[test]
+    fn v2_round_trip_preserves_explicit_hypothetical_class() {
+        let mut base = projection();
+        let root = MemoryAssetId::new("root").unwrap();
+        let descriptor = base.graph.descriptor(&root).unwrap().clone();
+        assert_eq!(descriptor.stratum, MemoryStratum::Evidence);
+
+        let child = MemoryAssetDescriptor::new(
+            MemoryAssetId::new("proposal").unwrap(),
+            MemorySpace::Tenant,
+            MemoryStratum::Episode,
+            MemoryLineage::derived([root.clone()], []).unwrap(),
+        )
+        .unwrap();
+        base.graph.register(child).unwrap();
+        base.trust.insert(
+            MemoryAssetId::new("proposal").unwrap(),
+            MemoryTrustMetadata::unverified(1),
+        );
+        let provenance = MemoryProvenanceRegistry::new(
+            &base.graph,
+            [
+                (root, MemoryProvenanceClass::Observed),
+                (
+                    MemoryAssetId::new("proposal").unwrap(),
+                    MemoryProvenanceClass::Hypothetical,
+                ),
+            ],
+        )
+        .unwrap();
+        let classified = GovernedMemoryProjection::new_with_provenance(
+            base.tenant.clone(),
+            base.graph,
+            base.trust,
+            provenance,
+            base.loadout,
+        )
+        .unwrap();
+        let bytes = encode_governed_memory_projection(&classified).unwrap();
+        let restored = decode_governed_memory_projection(&bytes, &classified.tenant).unwrap();
+        assert_eq!(
+            restored
+                .provenance
+                .class(&MemoryAssetId::new("proposal").unwrap()),
+            Some(MemoryProvenanceClass::Hypothetical)
+        );
+    }
+
+    #[test]
+    fn legacy_v1_projection_is_readable_and_never_infers_hypothetical() {
+        let current = projection();
+        let mut value = serde_json::to_value(current.to_wire().unwrap()).unwrap();
+        value["version"] = serde_json::json!(LEGACY_GOVERNED_MEMORY_PROJECTION_VERSION);
+        for asset in value["assets"].as_array_mut().unwrap() {
+            asset.as_object_mut().unwrap().remove("provenance");
+        }
+        let bytes = serde_json::to_vec_pretty(&value).unwrap();
+        let restored = decode_governed_memory_projection(&bytes, &current.tenant).unwrap();
+        assert_eq!(
+            restored
+                .provenance
+                .class(&MemoryAssetId::new("root").unwrap()),
+            Some(MemoryProvenanceClass::Observed)
+        );
+        assert!(restored
+            .provenance
+            .entries()
+            .all(|(_, class)| class != MemoryProvenanceClass::Hypothetical));
+    }
+
+    #[test]
     fn mutated_projection_cannot_replace_a_valid_snapshot() {
         let dir = TestDirectory::new();
         let mut original = projection();
@@ -715,10 +870,10 @@ mod tests {
 
     #[test]
     fn unknown_fields_and_duplicate_lineage_are_rejected() {
-        let mut value = serde_json::to_value(projection().to_wire()).unwrap();
+        let mut value = serde_json::to_value(projection().to_wire().unwrap()).unwrap();
         value["unexpected_authority"] = serde_json::json!(true);
         assert!(serde_json::from_value::<WireDocument>(value).is_err());
-        let mut wire = projection().to_wire();
+        let mut wire = projection().to_wire().unwrap();
         wire.assets[0].evidence.push("audit:root".to_string());
         assert!(GovernedMemoryProjection::from_wire(None, wire).is_err());
     }

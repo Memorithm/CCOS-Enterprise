@@ -3,7 +3,10 @@ use std::fmt;
 
 use ccos_enterprise_tenancy::TenantId;
 
-use crate::{MemoryAssetDescriptor, MemoryAssetId, MemoryGraphError, MemoryLineageGraph};
+use crate::{
+    MemoryAssetDescriptor, MemoryAssetId, MemoryGraphError, MemoryLineageGraph,
+    MemoryProvenanceClass, MemoryProvenanceError,
+};
 
 /// Version of the backend-neutral governed-memory bundle manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +79,7 @@ impl MemoryProviderReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryBundleEntry {
     descriptor: MemoryAssetDescriptor,
+    provenance: MemoryProvenanceClass,
     content_digest: MemoryContentDigest,
     payload_bytes: u64,
     provider: MemoryProviderReference,
@@ -88,16 +92,43 @@ impl MemoryBundleEntry {
         payload_bytes: u64,
         provider: MemoryProviderReference,
     ) -> Self {
+        let provenance = MemoryProvenanceClass::inferred(&descriptor);
         Self {
             descriptor,
+            provenance,
             content_digest,
             payload_bytes,
             provider,
         }
     }
 
+    /// Construct an entry with an explicit provenance class.
+    ///
+    /// Existing callers remain conservative: they infer only Observed/Derived.
+    /// Hypothetical state therefore requires an explicit classified export.
+    pub fn new_classified(
+        descriptor: MemoryAssetDescriptor,
+        provenance: MemoryProvenanceClass,
+        content_digest: MemoryContentDigest,
+        payload_bytes: u64,
+        provider: MemoryProviderReference,
+    ) -> Result<Self, MemoryProvenanceError> {
+        provenance.validate_for(&descriptor)?;
+        Ok(Self {
+            descriptor,
+            provenance,
+            content_digest,
+            payload_bytes,
+            provider,
+        })
+    }
+
     pub fn descriptor(&self) -> &MemoryAssetDescriptor {
         &self.descriptor
+    }
+
+    pub const fn provenance(&self) -> MemoryProvenanceClass {
+        self.provenance
     }
 
     pub fn content_digest(&self) -> &MemoryContentDigest {
@@ -342,6 +373,42 @@ mod tests {
             "mem:root"
         );
         assert_eq!(manifest.active_lineage_graph().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn explicit_hypothetical_class_is_preserved_without_trust_promotion() {
+        let descriptor = derived(
+            "mem:proposal",
+            MemorySpace::Tenant,
+            MemoryStratum::Episode,
+            [id("mem:root")],
+        );
+        let entry = MemoryBundleEntry::new_classified(
+            descriptor,
+            MemoryProvenanceClass::Hypothetical,
+            MemoryContentDigest::new("sha256:deadbeef").unwrap(),
+            4,
+            MemoryProviderReference::new("octasoma", "item:hyp").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entry.provenance(), MemoryProvenanceClass::Hypothetical);
+    }
+
+    #[test]
+    fn inferred_bundle_provenance_never_invents_hypothetical_state() {
+        let observed = entry(root("mem:root", MemorySpace::Tenant), "item:root");
+        assert_eq!(observed.provenance(), MemoryProvenanceClass::Observed);
+
+        let derived = entry(
+            derived(
+                "mem:episode",
+                MemorySpace::Tenant,
+                MemoryStratum::Episode,
+                [id("mem:root")],
+            ),
+            "item:episode",
+        );
+        assert_eq!(derived.provenance(), MemoryProvenanceClass::Derived);
     }
 
     #[test]

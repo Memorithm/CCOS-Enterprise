@@ -304,6 +304,10 @@ fn recovery_preserves_filtering_and_can_build_an_attested_context() {
     let attested = attest_governed_context(&context);
     assert_eq!(context.len(), 1);
     assert_eq!(attested[0].asset_id, id("a-live"));
+    assert_eq!(
+        attested[0].provenance_class,
+        ccos_enterprise_memory::MemoryProvenanceClass::Observed
+    );
     let permissive = recovered
         .recall(
             &authority,

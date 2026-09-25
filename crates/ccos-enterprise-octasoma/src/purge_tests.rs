@@ -2,8 +2,8 @@ use super::*;
 use crate::accepted_write::AcceptedEvidenceWrite;
 use ccos_enterprise_memory::{
     MemoryAssetDescriptor, MemoryEvidenceRef, MemoryLineage, MemoryLineageGraph,
-    MemoryLoadoutBinding, MemoryLoadoutPlan, MemorySpace, MemoryStratum, MemoryTrustMetadata,
-    MemoryUsageMode,
+    MemoryLoadoutBinding, MemoryLoadoutPlan, MemoryProvenanceClass, MemorySpace, MemoryStratum,
+    MemoryTrustMetadata, MemoryUsageMode,
 };
 use std::collections::BTreeMap;
 
@@ -107,6 +107,18 @@ fn assert_purged(store: &ProviderGenerationStore) {
             );
         }
     }
+    assert_eq!(
+        store.governance().provenance.class(&id("root")),
+        Some(MemoryProvenanceClass::Observed)
+    );
+    assert_eq!(
+        store.governance().provenance.class(&id("child")),
+        Some(MemoryProvenanceClass::Derived)
+    );
+    assert_eq!(
+        store.governance().provenance.class(&id("survivor")),
+        Some(MemoryProvenanceClass::Observed)
+    );
     for dir in [PROVIDER_GENERATIONS_DIR, GOVERNANCE_GENERATIONS_DIR] {
         assert_eq!(fs::read_dir(store.root.join(dir)).unwrap().count(), 1);
     }

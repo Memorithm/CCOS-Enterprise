@@ -5,8 +5,8 @@
 //! digest that crossed admission.
 
 use crate::{
-    GovernedMemoryContextAssembly, MemoryAssetId, MemoryAssetState, MemorySpace,
-    MemoryValidationState,
+    GovernedMemoryContextAssembly, MemoryAssetId, MemoryAssetState, MemoryProvenanceClass,
+    MemorySpace, MemoryValidationState,
 };
 
 /// Categorical reason a chunk survived admission. Never a similarity score.
@@ -25,6 +25,7 @@ pub struct MemoryContextAttestation {
     pub space: MemorySpace,
     pub asset_state: MemoryAssetState,
     pub trust_state: MemoryValidationState,
+    pub provenance_class: MemoryProvenanceClass,
     pub payload_sha256: String,
     pub parents: Vec<MemoryAssetId>,
     pub evidence: Vec<crate::MemoryEvidenceRef>,
@@ -47,6 +48,7 @@ pub fn attest_governed_context(
             space: chunk.space.clone(),
             asset_state: chunk.asset_state(),
             trust_state: chunk.trust_state(),
+            provenance_class: chunk.provenance_class(),
             payload_sha256: chunk.payload_sha256_hex(),
             parents: chunk.parents().to_vec(),
             evidence: chunk.evidence().to_vec(),
@@ -127,5 +129,6 @@ mod tests {
             assembly.chunks()[0].payload_sha256_hex()
         );
         assert_eq!(out[0].trust_state, MemoryValidationState::Unverified);
+        assert_eq!(out[0].provenance_class, MemoryProvenanceClass::Observed);
     }
 }

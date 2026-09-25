@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     encode_governed_memory_projection, GovernedMemoryObservation, GovernedMemoryProjection,
-    MemoryAssetId, MemoryAssetState, MemorySpace, MemoryValidationState,
+    MemoryAssetId, MemoryAssetState, MemoryProvenanceClass, MemorySpace, MemoryValidationState,
     GOVERNED_MEMORY_PROJECTION_VERSION,
 };
 
@@ -39,6 +39,7 @@ pub enum GovernedRecallGateError {
         observed: MemorySpace,
     },
     MissingTrustMetadata(MemoryAssetId),
+    MissingProvenanceMetadata(MemoryAssetId),
 }
 
 impl fmt::Display for GovernedRecallGateError {
@@ -72,6 +73,11 @@ impl fmt::Display for GovernedRecallGateError {
                 "governed memory asset {} has no trust metadata",
                 id.as_str()
             ),
+            Self::MissingProvenanceMetadata(id) => write!(
+                f,
+                "governed memory asset {} has no provenance metadata",
+                id.as_str()
+            ),
         }
     }
 }
@@ -85,6 +91,7 @@ pub struct AdmittedGovernedMemoryObservation {
     observation: GovernedMemoryObservation,
     asset_state: MemoryAssetState,
     trust_state: MemoryValidationState,
+    provenance_class: MemoryProvenanceClass,
     payload_sha256: [u8; 32],
     parents: Vec<MemoryAssetId>,
     evidence: Vec<crate::MemoryEvidenceRef>,
@@ -96,6 +103,9 @@ impl AdmittedGovernedMemoryObservation {
     }
     pub const fn trust_state(&self) -> MemoryValidationState {
         self.trust_state
+    }
+    pub const fn provenance_class(&self) -> MemoryProvenanceClass {
+        self.provenance_class
     }
     pub const fn payload_sha256(&self) -> &[u8; 32] {
         &self.payload_sha256
@@ -225,11 +235,19 @@ pub(crate) fn admit_bound(
         if !trust.recall_eligible() || !policy_allows(gate.policy, trust.state()) {
             continue;
         }
+        let provenance_class = gate
+            .projection
+            .provenance
+            .class(&observation.asset_id)
+            .ok_or_else(|| {
+                GovernedRecallGateError::MissingProvenanceMetadata(observation.asset_id.clone())
+            })?;
         let payload_sha256 = Sha256::digest(&observation.payload).into();
         admitted.push(AdmittedGovernedMemoryObservation {
             observation,
             asset_state,
             trust_state: trust.state(),
+            provenance_class,
             payload_sha256,
             parents: descriptor.lineage.parents().cloned().collect(),
             evidence: descriptor.lineage.evidence().cloned().collect(),
@@ -437,6 +455,10 @@ mod tests {
         assert_eq!(
             a.observations()[0].trust_state(),
             MemoryValidationState::Verified
+        );
+        assert_eq!(
+            a.observations()[0].provenance_class(),
+            MemoryProvenanceClass::Observed
         );
     }
     #[test]

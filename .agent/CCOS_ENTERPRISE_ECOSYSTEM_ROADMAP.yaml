@@ -783,3 +783,24 @@ semantic_quality_batch_2026_09_23:
     - no_entity_resolution_claim_from_relation_mentions_alone
     - no_answer_truth_claim_from_verified_citation_bytes_alone
     - measure_exact_search_before_ANN_when_evaluating_an_encoder
+
+
+ax_governed_task_evidence_program:
+  source_review_date: "2026-09-27"
+  external_reference: google_ax_architecture_only
+  role: governed_task_evidence_consumer
+  objective: >-
+    Admit selected Hub task trajectory and execution evidence through existing
+    tenant, policy, provenance and content-integrity controls without turning
+    CCOS Enterprise into the authoritative execution journal.
+  phases:
+    - AXC1_define_versioned_task_evidence_reference_contract
+    - AXC2_bind_task_identity_workspace_digest_and_artifact_lineage
+    - AXC3_admit_selected_trajectory_evidence_under_tenant_policy
+    - AXC4_preserve_source_hash_and_exact_evidence_links
+    - AXC5_reject_raw_log_or_telemetry_auto_promotion_to_knowledge
+  invariants:
+    - Hub_remains_authoritative_for_task_execution_lifecycle
+    - TaskIdentity_is_context_not_automatic_trust
+    - similarity_does_not_create_authority
+    - telemetry_is_not_knowledge_without_governed_admission

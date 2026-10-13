@@ -16,6 +16,7 @@ use crate::event_log::EventLog;
 use crate::memory::MemoryGraph;
 use crate::persist::KernelSnapshot;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const PERSIST_MAGIC: &[u8; 4] = b"CCPS";
@@ -138,7 +139,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), PersistenceErr
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, PersistenceError> {
-    let data = std::fs::read(path)?;
+    let data = read_persistence_bytes(path, MAX_PERSIST_PAYLOAD)?;
     if data.len() >= 46 && &data[..4] == PERSIST_MAGIC {
         let version = u16::from_le_bytes([data[4], data[5]]);
         if version != PERSIST_VERSION {
@@ -146,8 +147,10 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, Persistence
                 "unsupported persistence version {version}"
             )));
         }
-        let len = u64::from_le_bytes(data[6..14].try_into().unwrap()) as usize;
-        if len > MAX_PERSIST_PAYLOAD || data.len() != 46 + len {
+        let len = u64::from_le_bytes(data[6..14].try_into().unwrap());
+        if len > MAX_PERSIST_PAYLOAD as u64
+            || data.len() != 46 + usize::try_from(len).unwrap_or(usize::MAX)
+        {
             return Err(PersistenceError::Integrity(
                 "invalid persistence payload length".into(),
             ));
@@ -169,6 +172,39 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, Persistence
         ));
     }
     Ok(serde_json::from_slice(&data)?)
+}
+
+/// Read either a legacy JSON payload or a CCPS envelope without allocating or
+/// reading past its format-specific limit. The four-byte discriminator and the
+/// bounded body are read from the same no-follow descriptor.
+fn read_persistence_bytes(path: &Path, payload_limit: usize) -> Result<Vec<u8>, PersistenceError> {
+    let mut file = crate::bounded_file::open_regular_nofollow(path)?;
+    let metadata_len = file.metadata()?.len();
+    let mut data = Vec::with_capacity(4);
+    (&mut file).take(4).read_to_end(&mut data)?;
+    let file_limit = if data.as_slice() == PERSIST_MAGIC {
+        payload_limit
+            .checked_add(46)
+            .ok_or_else(|| PersistenceError::Serde("persistence limit overflow".into()))?
+    } else {
+        payload_limit
+    };
+    if metadata_len > file_limit as u64 {
+        return Err(PersistenceError::Serde(
+            "persistence payload exceeds limit".into(),
+        ));
+    }
+    let read_limit = file_limit
+        .checked_add(1)
+        .and_then(|limit| limit.checked_sub(data.len()))
+        .ok_or_else(|| PersistenceError::Serde("persistence limit overflow".into()))?;
+    (&mut file).take(read_limit as u64).read_to_end(&mut data)?;
+    if data.len() > file_limit {
+        return Err(PersistenceError::Serde(
+            "persistence payload exceeds limit".into(),
+        ));
+    }
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -221,6 +257,28 @@ mod tests {
         }
 
         RuntimeState::new(graph, event_log, dist_log)
+    }
+
+    #[test]
+    fn format_specific_read_limits_apply_before_parsing() {
+        let dir = temp_dir("read_limits");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("payload");
+
+        std::fs::write(&path, b"12345678").unwrap();
+        assert_eq!(read_persistence_bytes(&path, 8).unwrap(), b"12345678");
+        std::fs::write(&path, b"123456789").unwrap();
+        assert!(read_persistence_bytes(&path, 8).is_err());
+
+        let mut envelope = vec![0_u8; 46 + 8];
+        envelope[..4].copy_from_slice(PERSIST_MAGIC);
+        std::fs::write(&path, &envelope).unwrap();
+        assert_eq!(read_persistence_bytes(&path, 8).unwrap(), envelope);
+        envelope.push(0);
+        std::fs::write(&path, &envelope).unwrap();
+        assert!(read_persistence_bytes(&path, 8).is_err());
+
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

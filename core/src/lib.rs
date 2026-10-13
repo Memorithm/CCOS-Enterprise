@@ -124,7 +124,20 @@ pub mod llm;
 pub mod lsa;
 pub mod lzss;
 pub mod mcp;
-pub mod memory;
+// Keep the large causal-memory implementation physically stable while exposing
+// the v0.5 hexagonal ports at `ccos_core::memory::ports`. The private module is
+// an implementation detail; public memory types remain available through the
+// canonical `memory` namespace.
+#[path = "memory.rs"]
+mod memory_impl;
+
+/// CCOS causal memory and backend-neutral extension ports.
+pub mod memory {
+    pub use crate::memory_impl::*;
+
+    /// Ports implemented by optional external semantic/episodic adapters.
+    pub mod ports;
+}
 pub mod migrate;
 // Quarantined neural embedder (off-by-default `neural-embed` feature): an
 // `retrieval::Encoder` over a LOCAL Ollama-style /api/embeddings endpoint. The
@@ -154,6 +167,7 @@ pub mod util;
 // ── CCOS v0.3 — Autonomous Context Runtime ──────────────────────────
 pub mod agents;
 pub mod benchmark;
+mod bounded_file;
 pub mod causal_flash;
 pub mod persistence;
 pub mod scheduler;

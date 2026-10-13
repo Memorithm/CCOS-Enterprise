@@ -10,6 +10,8 @@ use crate::event_log::EventLog;
 use crate::memory::MemoryGraph;
 use serde::{Deserialize, Serialize};
 
+const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KernelSnapshot {
     /// Crate version that wrote the snapshot (for forward-compat checks).
@@ -37,18 +39,25 @@ impl KernelSnapshot {
         serde_json::from_str(json)
     }
 
-    /// Persist the snapshot to `path` as pretty JSON.
+    /// Persist the snapshot to `path` as pretty JSON through the kernel's
+    /// durable publication primitive: a private, exclusively-created sibling is
+    /// synced, atomically renamed into place, then its parent directory is synced.
     pub fn save(&self, path: &str) -> std::io::Result<()> {
         let json = self
             .to_json()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)
+        enforce_snapshot_size(json.len(), MAX_SNAPSHOT_BYTES)?;
+        crate::util::write_durable(std::path::Path::new(path), json.as_bytes())
     }
 
     /// Load a snapshot previously written by [`KernelSnapshot::save`].
     pub fn load(path: &str) -> std::io::Result<Self> {
-        let data = std::fs::read_to_string(path)?;
-        Self::from_json(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        let data = crate::bounded_file::read_regular_bounded(
+            std::path::Path::new(path),
+            MAX_SNAPSHOT_BYTES,
+        )?;
+        serde_json::from_slice(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// Verify the snapshot's integrity without mutating it: both hash chains
@@ -88,11 +97,77 @@ impl KernelSnapshot {
     }
 }
 
+fn enforce_snapshot_size(size: usize, limit: usize) -> std::io::Result<()> {
+    if size > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("snapshot exceeds {limit} byte limit"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event_log::{EventPayload, EventType};
     use crate::memory::NodeType;
+
+    fn empty_snapshot(version: &str) -> KernelSnapshot {
+        let mut snapshot = KernelSnapshot::new(
+            MemoryGraph::default(),
+            EventLog::new("persist-test".into()),
+            DistributedEventLog::new(),
+        );
+        snapshot.version = version.into();
+        snapshot
+    }
+
+    #[test]
+    fn writer_and_loader_share_the_snapshot_size_limit() {
+        assert!(enforce_snapshot_size(8, 8).is_ok());
+        let error = enforce_snapshot_size(9, 8).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_save_is_private_atomic_and_survives_crash_debris() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ccos-snapshot-durable-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("snapshot.json");
+        let path_str = path.to_str().unwrap();
+
+        empty_snapshot("before").save(path_str).unwrap();
+
+        // Model SIGKILL after the private sibling was written but before rename:
+        // the published snapshot remains authoritative and loadable, while a
+        // later save must ignore the orphan rather than exposing partial JSON.
+        let orphan = dir.join("snapshot.json.tmp.crash-fragment");
+        std::fs::write(&orphan, br#"{"version":"torn""#).unwrap();
+        assert_eq!(KernelSnapshot::load(path_str).unwrap().version, "before");
+
+        // Replacing a too-permissive target publishes a fresh private inode.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        empty_snapshot("after").save(path_str).unwrap();
+        assert_eq!(KernelSnapshot::load(path_str).unwrap().version, "after");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read(&orphan).unwrap(), br#"{"version":"torn""#);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn snapshot_json_roundtrip_preserves_state() {

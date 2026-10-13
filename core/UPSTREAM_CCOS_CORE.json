@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/Memorithm/CCOS-Core",
+  "sync_mode": "reviewed-slices",
+  "initial_import": {
+    "commit": "e4f249602af3474e87408a6776417be805d17ce7",
+    "tree": "fb93b81585ff5d56adceb9ed35a10f9292bf9f98"
+  },
+  "metadata_sync": {
+    "commit": "b0c6c1a51fc16e822eebf16a8891992379d03c9f",
+    "tree": "f958a8b8900d5430ee39e413e2476822409290fc"
+  },
+  "reviewed_upstream": {
+    "commit": "b8c03fbf0edfdf672a2950811c5abeecf10327db",
+    "tree": "a9a893233522129d96d004aa38701d86c2c8bd65"
+  },
+  "imported_slices": [
+    {
+      "ids": ["MEM-02", "MEM-03"],
+      "description": "Durable atomic snapshots and bounded no-follow persistence reads",
+      "paths": ["src/bounded_file.rs", "src/persist.rs", "src/persistence.rs", "src/util.rs"]
+    },
+    {
+      "ids": ["MEM-04"],
+      "description": "Descriptor-confined workspace traversal and bounded source reads",
+      "paths": ["src/workspace.rs"]
+    },
+    {
+      "ids": ["CORE-PORTS"],
+      "description": "Backend-neutral memory port contract present in the recorded upstream tree",
+      "paths": ["src/memory/ports.rs"]
+    }
+  ],
+  "exact_files": {
+    "src/bounded_file.rs": "504520a82b4cf9a40ee04bf7dd2dd8173349f7b28d566ce587c8c560de37022d",
+    "src/memory/ports.rs": "16a7df4ccd5252a07b680eb6bb6441cd9848e4d7e5d528b5953972138ed149da",
+    "src/persist.rs": "69217831de22add7aedf6ea36c4396e21a9703786eb1337452481f271e71748c",
+    "src/persistence.rs": "965064ef79a7698b7a5da12f8479b57ab96c2ec891853ee0d6e441229095844b",
+    "src/util.rs": "fd835a09b0305b9ca3101e0a7270d0a0ad5d5bb67895839504fa508318cdd720",
+    "src/workspace.rs": "f293bbbef6992157849f6c586f4e8e6a90db2b635b277d644ccd2f8a15d2fb00"
+  },
+  "enterprise_overlays": {
+    "Cargo.toml": ["rustix = { version = \"1.1.4\", features = [\"fs\"] }"],
+    "src/lib.rs": ["#[path = \"memory.rs\"]", "pub mod ports;", "mod bounded_file;"],
+    "../Cargo.lock": ["\"rustix\",", "name = \"rustix\"", "version = \"1.1.4\""]
+  },
+  "security_diff": {
+    "range": "b0c6c1a51fc16e822eebf16a8891992379d03c9f..b8c03fbf0edfdf672a2950811c5abeecf10327db",
+    "changed_paths": [
+      ".github/workflows/beir-import.yml",
+      ".github/workflows/ci.yml",
+      ".github/workflows/security.yml",
+      "Cargo.lock",
+      "Cargo.toml",
+      "README.md",
+      "THIRD_PARTY_NOTICES.md",
+      "crates/ccos-memory-runtime/INTEGRATION.md",
+      "crates/ccos-memory-runtime/MEMORY_ACCOUNTING.md",
+      "crates/ccos-memory-runtime/README.md",
+      "crates/ccos-memory-runtime/examples/slha_backend.rs",
+      "crates/ccos-memory-runtime/src/backend/slha_adapter.rs",
+      "crates/ccos-memory-runtime/src/telemetry.rs",
+      "crates/ccos-memory-runtime/tests/test_slha_adapter.rs",
+      "docs/ARCHITECTURE.md",
+      "docs/BEIR_IMPORT_CONTRACT.md",
+      "docs/CORE_CAPABILITIES.md",
+      "docs/DEPLOYMENT.md",
+      "docs/MEMORY_INTERFACE.md",
+      "docs/SUPPLY_CHAIN_SECURITY.md",
+      "examples/beir_eval.rs",
+      "examples/support/beir_import.rs",
+      "fuzz/Cargo.toml",
+      "scripts/check-author-policy.sh",
+      "scripts/test-author-push-range.sh",
+      "src/bounded_file.rs",
+      "src/lib.rs",
+      "src/persist.rs",
+      "src/persistence.rs",
+      "src/util.rs",
+      "src/workspace.rs",
+      "tests/capability_matrix_contract.rs"
+    ],
+    "dispositions": {
+      "imported_exact": ["src/bounded_file.rs", "src/persist.rs", "src/persistence.rs", "src/util.rs", "src/workspace.rs"],
+      "enterprise_overlay": ["Cargo.lock", "Cargo.toml", "src/lib.rs"],
+      "already_separately_imported": ["docs/BEIR_IMPORT_CONTRACT.md", "examples/beir_eval.rs", "examples/support/beir_import.rs"],
+      "reviewed_not_imported": [
+        ".github/workflows/beir-import.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/security.yml",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+        "crates/ccos-memory-runtime/INTEGRATION.md",
+        "crates/ccos-memory-runtime/MEMORY_ACCOUNTING.md",
+        "crates/ccos-memory-runtime/README.md",
+        "crates/ccos-memory-runtime/examples/slha_backend.rs",
+        "crates/ccos-memory-runtime/src/backend/slha_adapter.rs",
+        "crates/ccos-memory-runtime/src/telemetry.rs",
+        "crates/ccos-memory-runtime/tests/test_slha_adapter.rs",
+        "docs/ARCHITECTURE.md",
+        "docs/CORE_CAPABILITIES.md",
+        "docs/DEPLOYMENT.md",
+        "docs/MEMORY_INTERFACE.md",
+        "docs/SUPPLY_CHAIN_SECURITY.md",
+        "fuzz/Cargo.toml",
+        "scripts/check-author-policy.sh",
+        "scripts/test-author-push-range.sh",
+        "tests/capability_matrix_contract.rs"
+      ]
+    },
+    "review_note": "Core persistence and scanner security changes are imported. Core-only workflows, product-boundary documentation, memory-accounting work, fuzz metadata and Core author-policy changes remain owned by Core; Enterprise validates its own equivalents."
+  }
+}

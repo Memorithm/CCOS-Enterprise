@@ -15,6 +15,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Embedded Core lineage and security-diff contract
+        run: |
+          python3 scripts/test_core_sync.py
+          python3 scripts/core_sync.py verify
       # Core is a workspace member under core/. cargo-deny resolves that
       # path dependency from this checkout; no sibling repository is required.
       - uses: dtolnay/rust-toolchain@stable

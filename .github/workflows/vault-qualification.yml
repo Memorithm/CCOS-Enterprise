@@ -71,12 +71,13 @@ jobs:
           echo "$install_dir" >> "$GITHUB_PATH"
       - name: Start isolated real Vault
         shell: bash
-        env:
-          VAULT_DEV_ROOT_TOKEN_ID: qualification-root-token
         run: |
           set -euo pipefail
+          root_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$root_token"
+          printf 'VAULT_TOKEN=%s\n' "$root_token" >> "$GITHUB_ENV"
           vault server -dev \
-            -dev-root-token-id="$VAULT_DEV_ROOT_TOKEN_ID" \
+            -dev-root-token-id="$root_token" \
             -dev-listen-address="127.0.0.1:18200" \
             >"$RUNNER_TEMP/vault-server.log" 2>&1 &
           echo "$!" > "$RUNNER_TEMP/vault-server.pid"
@@ -94,7 +95,6 @@ jobs:
           CCOS_VAULT_QUALIFICATION: '1'
           CCOS_VAULT_VERSION: ${{ env.VAULT_VERSION }}
           CCOS_VAULT_ACTIVE_RESULT: ${{ runner.temp }}/vault-active.json
-          VAULT_TOKEN: qualification-root-token
         run: |
           set -euo pipefail
           cargo test -p ccos-enterprise-envelope \

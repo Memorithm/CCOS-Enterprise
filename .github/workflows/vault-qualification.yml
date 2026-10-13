@@ -34,6 +34,7 @@ env:
   VAULT_VERSION: 2.1.2
   VAULT_ZIP_SHA256: 873bbdac35ca4b0c3e2886c41991ca1272fc452826208d5499f32d12cd2e76e1
   VAULT_ADDR: http://127.0.0.1:18200
+  QUALIFICATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
@@ -45,6 +46,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+          ref: ${{ env.QUALIFICATION_SHA }}
       - name: Install exact Rust toolchain
         run: |
           rustup toolchain install 1.89.0 --profile minimal --no-self-update
@@ -124,7 +126,7 @@ jobs:
             --output "$evidence" \
             --vault-version "$VAULT_VERSION" \
             --vault-binary-sha256 "$VAULT_ZIP_SHA256" \
-            --commit-sha "$GITHUB_SHA" \
+            --commit-sha "$QUALIFICATION_SHA" \
             --run-id "$GITHUB_RUN_ID"
           sha256sum "$evidence" > "$RUNNER_TEMP/vault-qualification.sha256"
           openssl genpkey -algorithm ED25519 -out "$RUNNER_TEMP/evidence-private.pem"
@@ -142,7 +144,7 @@ jobs:
       - name: Upload qualification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: vault-qualification-${{ github.sha }}
+          name: vault-qualification-${{ env.QUALIFICATION_SHA }}
           path: |
             ${{ runner.temp }}/vault-active.json
             ${{ runner.temp }}/vault-outage.json

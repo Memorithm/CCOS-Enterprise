@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory(prefix="ccos-vault-evidence-") as raw:
         raise AssertionError("a false qualification result must fail closed")
 
     leaked = active()
-    leaked["token"] = "must-not-be-recorded"
+    leaked["token"] = 1
     active_path.write_text(json.dumps(leaked), encoding="utf-8")
     try:
         MODULE.combine(

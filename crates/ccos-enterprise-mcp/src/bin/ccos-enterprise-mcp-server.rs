@@ -215,18 +215,15 @@ fn validate_data_at_rest_profile(
             if std::env::var_os("CCOS_ENTERPRISE_DATA_AT_REST_POLICY").is_some()
                 || std::env::var_os("CCOS_ENTERPRISE_BACKUP_ROOTS_JSON").is_some()
             {
-                return Err(
-                    "data-at-rest policy inputs require the production profile".into(),
-                );
+        return Err("data-at-rest policy inputs require the production profile".into());
             }
             Ok(())
         }
         "production" => {
             let path = PathBuf::from(required_env("CCOS_ENTERPRISE_DATA_AT_REST_POLICY")?);
             let policy = read_data_at_rest_policy(&path)?;
-            let backup_roots: Vec<PathBuf> = serde_json::from_str(&required_env(
-                "CCOS_ENTERPRISE_BACKUP_ROOTS_JSON",
-            )?)
+    let backup_roots: Vec<PathBuf> =
+        serde_json::from_str(&required_env("CCOS_ENTERPRISE_BACKUP_ROOTS_JSON")?)
             .map_err(|_| "CCOS_ENTERPRISE_BACKUP_ROOTS_JSON must be a JSON path array")?;
             validate_production_data_at_rest_policy(
                 &policy,

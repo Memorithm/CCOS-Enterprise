@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "key_policy_ref": "kms-policy:tenant/acme/2026-10",
+  "state": {
+    "root": "/srv/ccos/acme/state",
+    "protection": "operator_managed_encrypted_volume",
+    "key_scope": "state/acme"
+  },
+  "governed_provider": {
+    "root": "/srv/ccos/acme/provider",
+    "protection": "application_envelope",
+    "key_scope": "provider/acme-v2"
+  },
+  "evidence_knowledge": {
+    "root": "/srv/ccos/acme/knowledge",
+    "protection": "operator_managed_encrypted_volume",
+    "key_scope": "knowledge/acme"
+  },
+  "source_blobs": {
+    "root": "/srv/ccos/acme/sources",
+    "protection": "operator_managed_encrypted_volume",
+    "key_scope": "sources/acme"
+  },
+  "backup_roots": [
+    {
+      "root": "/srv/ccos-backup/acme",
+      "protection": "operator_managed_encrypted_volume",
+      "key_scope": "backup/acme"
+    }
+  ],
+  "restore": {
+    "purge_floor": "retain_and_verify_before_restore",
+    "old_key_retirement": "after_backup_reconciliation"
+  }
+}
+

@@ -106,7 +106,7 @@ See [Verified memory citations](docs/VERIFIED_MEMORY_CITATIONS.md).
 
 The governed provider can operate with envelope encryption using per-artifact random data keys and explicit tenant/key bindings. The current connector includes a Vault Transit integration and a governed key-rotation/recovery protocol.
 
-This does not claim FIPS certification, production Vault deployment, or encryption of every external source and backup in an operator's environment. See [Tenant envelope encryption, rotation and recovery](docs/TENANT_ENVELOPE_KMS.md).
+Production-labelled stdio deployments can additionally enable the fail-closed [production data-at-rest profile](docs/DATA_AT_REST_PRODUCTION.md). It requires the provider envelope plus an exact inventory of encrypted state, evidence, source and backup roots, purge-floor preservation and backup reconciliation before old-key retirement. Operator-managed volume declarations remain operational evidence rather than cryptographic proof. This does not claim FIPS certification or production Vault/HSM/IAM qualification. See [Tenant envelope encryption, rotation and recovery](docs/TENANT_ENVELOPE_KMS.md).
 
 ---
 

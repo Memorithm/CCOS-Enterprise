@@ -119,12 +119,17 @@ permission denial, rotation, Succeeded settlement, context after restart, KMS
 outage and missing-encryption configuration. Production Vault/HSM/IAM integration
 is **not** established by the local protocol/key-service fixtures.
 
-This covers the governed provider root, not Core workspaces, original sources,
-Enterprise audit/effect journals or external backups. Tenant/key labels, relative
-filenames, sizes and generation counts remain visible. Envelope JSON increases
-disk size and transient memory; A09's plaintext measurement is not an encrypted
-performance result. AEAD protection does not authorize raw OctaSoma access, change
-Core semantics or promote observations into canonical truth.
+This envelope covers the governed provider root. The
+[production data-at-rest profile](DATA_AT_REST_PRODUCTION.md) separately requires
+operator-managed encrypted roots for Core workspaces, original sources,
+Enterprise audit/effect journals and independent backups, and binds restore to
+purge-floor retention and backup reconciliation before old-key retirement. That
+operator declaration is fail-closed configuration, not cryptographic proof of
+the underlying volume or backup service. Tenant/key labels, relative filenames,
+sizes and generation counts remain visible. Envelope JSON increases disk size
+and transient memory; A09's plaintext measurement is not an encrypted performance
+result. AEAD protection does not authorize raw OctaSoma access, change Core
+semantics or promote observations into canonical truth.
 
 ```sh
 cargo test -p ccos-enterprise-envelope --locked

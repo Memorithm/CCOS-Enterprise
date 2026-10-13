@@ -31,7 +31,7 @@ mod skill_projection;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -78,6 +78,44 @@ const MAX_HOST_META_BYTES: usize = 256;
 /// snapshot write plus a rename) but not free, so it runs only here, on the
 /// durability boundary, never mid-request.
 const COMPACTION_THRESHOLD_BYTES: u64 = 128 * 1024 * 1024;
+const DATA_AT_REST_POLICY_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AtRestProtection {
+    ApplicationEnvelope,
+    OperatorManagedEncryptedVolume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AtRestRoot {
+    root: PathBuf,
+    protection: AtRestProtection,
+    key_scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreAtRestPolicy {
+    purge_floor: String,
+    old_key_retirement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DataAtRestPolicy {
+    schema_version: u32,
+    key_policy_ref: String,
+    state: AtRestRoot,
+    governed_provider: AtRestRoot,
+    #[serde(default)]
+    evidence_knowledge: Option<AtRestRoot>,
+    #[serde(default)]
+    source_blobs: Option<AtRestRoot>,
+    backup_roots: Vec<AtRestRoot>,
+    restore: RestoreAtRestPolicy,
+}
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -131,6 +169,13 @@ impl Config {
             (Some(knowledge), Some(blobs)) if !knowledge.is_empty() && !blobs.is_empty() && governed_memory_root.is_some() => Some((knowledge.into(), blobs.into())),
             _ => return Err("evidence resolution requires both knowledge and source roots and a governed provider".into()),
         };
+        let state_dir = PathBuf::from(required_env("CCOS_ENTERPRISE_STATE_DIR")?);
+        validate_data_at_rest_profile(
+            &state_dir,
+            governed_memory_root.as_deref(),
+            evidence_roots.as_ref(),
+            envelope.is_some(),
+        )?;
         Ok(Self {
             audience: required_env("CCOS_ENTERPRISE_AUDIENCE")?,
             issuer_kid: required_env("CCOS_ENTERPRISE_ISSUER_KID")?,
@@ -149,12 +194,188 @@ impl Config {
                 .map(|v| positive_u64("CCOS_ENTERPRISE_CALL_COST_TOKENS", &v))
                 .transpose()?
                 .unwrap_or(1),
-            state_dir: PathBuf::from(required_env("CCOS_ENTERPRISE_STATE_DIR")?),
+            state_dir,
             governed_memory_root,
             envelope,
             evidence_roots,
         })
     }
+}
+
+fn validate_data_at_rest_profile(
+    state_dir: &Path,
+    governed_memory_root: Option<&Path>,
+    evidence_roots: Option<&(PathBuf, PathBuf)>,
+    envelope_configured: bool,
+) -> Result<(), String> {
+    let profile = std::env::var("CCOS_ENTERPRISE_DATA_AT_REST_PROFILE")
+        .unwrap_or_else(|_| "development".into());
+    match profile.as_str() {
+        "development" => {
+            if std::env::var_os("CCOS_ENTERPRISE_DATA_AT_REST_POLICY").is_some() {
+                return Err(
+                    "CCOS_ENTERPRISE_DATA_AT_REST_POLICY requires the production profile"
+                        .into(),
+                );
+            }
+            Ok(())
+        }
+        "production" => {
+            let path = PathBuf::from(required_env("CCOS_ENTERPRISE_DATA_AT_REST_POLICY")?);
+            let policy = read_data_at_rest_policy(&path)?;
+            validate_production_data_at_rest_policy(
+                &policy,
+                state_dir,
+                governed_memory_root,
+                evidence_roots,
+                envelope_configured,
+            )
+        }
+        _ => Err(
+            "CCOS_ENTERPRISE_DATA_AT_REST_PROFILE must be development or production".into(),
+        ),
+    }
+}
+
+fn read_data_at_rest_policy(path: &Path) -> Result<DataAtRestPolicy, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| "data-at-rest policy is unavailable".to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("data-at-rest policy must be a regular non-symlink file".into());
+    }
+    let file = fs::File::open(path)
+        .map_err(|_| "data-at-rest policy is unavailable".to_string())?;
+    let mut bytes = Vec::new();
+    file.take((DATA_AT_REST_POLICY_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "data-at-rest policy cannot be read".to_string())?;
+    if bytes.len() > DATA_AT_REST_POLICY_MAX_BYTES {
+        return Err("data-at-rest policy exceeds 64 KiB".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "data-at-rest policy is invalid JSON".into())
+}
+
+fn canonical_trusted_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("{label} must be an absolute path"));
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| format!("{label} is unavailable"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(format!("{label} must be a trusted non-symlink directory"));
+    }
+    fs::canonicalize(path).map_err(|_| format!("{label} cannot be canonicalized"))
+}
+
+fn validate_policy_root(
+    configured: &Path,
+    declared: &AtRestRoot,
+    expected_protection: AtRestProtection,
+    label: &str,
+) -> Result<PathBuf, String> {
+    if declared.protection != expected_protection {
+        return Err(format!("{label} has the wrong at-rest protection class"));
+    }
+    if declared.key_scope.is_empty()
+        || declared.key_scope.len() > 256
+        || declared.key_scope.chars().any(char::is_whitespace)
+    {
+        return Err(format!("{label} key_scope must be a bounded opaque reference"));
+    }
+    let configured = canonical_trusted_directory(configured, label)?;
+    let declared_root = canonical_trusted_directory(&declared.root, label)?;
+    if configured != declared_root {
+        return Err(format!("{label} does not match the configured root"));
+    }
+    Ok(configured)
+}
+
+fn validate_production_data_at_rest_policy(
+    policy: &DataAtRestPolicy,
+    state_dir: &Path,
+    governed_memory_root: Option<&Path>,
+    evidence_roots: Option<&(PathBuf, PathBuf)>,
+    envelope_configured: bool,
+) -> Result<(), String> {
+    if policy.schema_version != 1 {
+        return Err("unsupported data-at-rest policy schema".into());
+    }
+    if policy.key_policy_ref.is_empty()
+        || policy.key_policy_ref.len() > 512
+        || policy.key_policy_ref.chars().any(char::is_whitespace)
+    {
+        return Err("key_policy_ref must be a bounded opaque reference".into());
+    }
+    if !envelope_configured {
+        return Err("production data-at-rest profile requires the provider envelope".into());
+    }
+    let provider = governed_memory_root
+        .ok_or("production data-at-rest profile requires a governed provider root")?;
+
+    let mut roots = std::collections::BTreeSet::new();
+    let state = validate_policy_root(
+        state_dir,
+        &policy.state,
+        AtRestProtection::OperatorManagedEncryptedVolume,
+        "state root",
+    )?;
+    roots.insert(state);
+    let provider = validate_policy_root(
+        provider,
+        &policy.governed_provider,
+        AtRestProtection::ApplicationEnvelope,
+        "governed provider root",
+    )?;
+    if !roots.insert(provider) {
+        return Err("durable roots must not alias each other".into());
+    }
+
+    match (evidence_roots, &policy.evidence_knowledge, &policy.source_blobs) {
+        (None, None, None) => {}
+        (Some((knowledge, blobs)), Some(declared_knowledge), Some(declared_blobs)) => {
+            for (configured, declared, label) in [
+                (knowledge.as_path(), declared_knowledge, "evidence knowledge root"),
+                (blobs.as_path(), declared_blobs, "source blobs root"),
+            ] {
+                let root = validate_policy_root(
+                    configured,
+                    declared,
+                    AtRestProtection::OperatorManagedEncryptedVolume,
+                    label,
+                )?;
+                if !roots.insert(root) {
+                    return Err("durable roots must not alias each other".into());
+                }
+            }
+        }
+        _ => {
+            return Err(
+                "production evidence roots and their at-rest declarations must be complete"
+                    .into(),
+            );
+        }
+    }
+
+    if policy.backup_roots.is_empty() {
+        return Err("production data-at-rest policy requires at least one backup root".into());
+    }
+    for backup in &policy.backup_roots {
+        let root = validate_policy_root(
+            &backup.root,
+            backup,
+            AtRestProtection::OperatorManagedEncryptedVolume,
+            "backup root",
+        )?;
+        if !roots.insert(root) {
+            return Err("durable roots must not alias each other".into());
+        }
+    }
+    if policy.restore.purge_floor != "retain_and_verify_before_restore" {
+        return Err("production restore policy must retain and verify the purge floor".into());
+    }
+    if policy.restore.old_key_retirement != "after_backup_reconciliation" {
+        return Err("old keys may retire only after backup reconciliation".into());
+    }
+    Ok(())
 }
 
 fn required_env(name: &str) -> Result<String, String> {
@@ -2004,6 +2225,66 @@ mod tests {
     use ccos_enterprise_auth::{issue_identity_token, IdentityClaims, IDENTITY_TOKEN_VERSION};
     use ed25519_dalek::SigningKey;
 
+    fn at_rest_root(root: PathBuf, protection: AtRestProtection, key_scope: &str) -> AtRestRoot {
+        AtRestRoot {
+            root,
+            protection,
+            key_scope: key_scope.into(),
+        }
+    }
+
+    fn production_at_rest_fixture(
+        label: &str,
+    ) -> (PathBuf, PathBuf, (PathBuf, PathBuf), DataAtRestPolicy) {
+        let base = std::env::temp_dir().join(format!(
+            "ccos-enterprise-at-rest-{label}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let state = base.join("state");
+        let provider = base.join("provider");
+        let knowledge = base.join("knowledge");
+        let sources = base.join("sources");
+        let backups = base.join("backups");
+        for root in [&state, &provider, &knowledge, &sources, &backups] {
+            fs::create_dir_all(root).unwrap();
+        }
+        let policy = DataAtRestPolicy {
+            schema_version: 1,
+            key_policy_ref: "kms-policy:tenant/acme/v2".into(),
+            state: at_rest_root(
+                state.clone(),
+                AtRestProtection::OperatorManagedEncryptedVolume,
+                "state/acme",
+            ),
+            governed_provider: at_rest_root(
+                provider.clone(),
+                AtRestProtection::ApplicationEnvelope,
+                "provider/acme-v2",
+            ),
+            evidence_knowledge: Some(at_rest_root(
+                knowledge.clone(),
+                AtRestProtection::OperatorManagedEncryptedVolume,
+                "evidence/acme",
+            )),
+            source_blobs: Some(at_rest_root(
+                sources.clone(),
+                AtRestProtection::OperatorManagedEncryptedVolume,
+                "sources/acme",
+            )),
+            backup_roots: vec![at_rest_root(
+                backups,
+                AtRestProtection::OperatorManagedEncryptedVolume,
+                "backups/acme",
+            )],
+            restore: RestoreAtRestPolicy {
+                purge_floor: "retain_and_verify_before_restore".into(),
+                old_key_retirement: "after_backup_reconciliation".into(),
+            },
+        };
+        (base, provider, (knowledge, sources), policy)
+    }
+
     pub(super) fn test_config(label: &str) -> Config {
         let seed = [7u8; 32];
         let signing = SigningKey::from_bytes(&seed);
@@ -2035,6 +2316,68 @@ mod tests {
             envelope: None,
             evidence_roots: None,
         }
+    }
+
+    #[test]
+    fn production_at_rest_policy_covers_every_durable_class() {
+        let (base, provider, evidence, policy) = production_at_rest_fixture("complete");
+        validate_production_data_at_rest_policy(
+            &policy,
+            &base.join("state"),
+            Some(&provider),
+            Some(&evidence),
+            true,
+        )
+        .unwrap();
+        cleanup(&base);
+    }
+
+    #[test]
+    fn production_at_rest_policy_rejects_missing_backup_encryption() {
+        let (base, provider, evidence, mut policy) = production_at_rest_fixture("backup");
+        policy.backup_roots.clear();
+        let error = validate_production_data_at_rest_policy(
+            &policy,
+            &base.join("state"),
+            Some(&provider),
+            Some(&evidence),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("backup root"));
+        cleanup(&base);
+    }
+
+    #[test]
+    fn production_at_rest_policy_rejects_plaintext_state() {
+        let (base, provider, evidence, mut policy) = production_at_rest_fixture("state");
+        policy.state.protection = AtRestProtection::ApplicationEnvelope;
+        let error = validate_production_data_at_rest_policy(
+            &policy,
+            &base.join("state"),
+            Some(&provider),
+            Some(&evidence),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("state root"));
+        cleanup(&base);
+    }
+
+    #[test]
+    fn production_at_rest_policy_rejects_aliasing_lifecycle_roots() {
+        let (base, provider, evidence, mut policy) = production_at_rest_fixture("alias");
+        policy.backup_roots[0].root = base.join("state");
+        let error = validate_production_data_at_rest_policy(
+            &policy,
+            &base.join("state"),
+            Some(&provider),
+            Some(&evidence),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("must not alias"));
+        cleanup(&base);
     }
 
     pub(super) fn call(

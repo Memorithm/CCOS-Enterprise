@@ -13,19 +13,43 @@ use crate::memory::MemoryGraph;
 use crate::util::sha256_hex as hash;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
+
+/// Hard limits for one workspace scan. They keep an untrusted tree from
+/// turning discovery into an unbounded allocation or read.
+pub const MAX_WORKSPACE_RUST_FILES: usize = 10_000;
+pub const MAX_RUST_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_WORKSPACE_RUST_BYTES: u64 = 512 * 1024 * 1024;
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct WorkspaceRoot {
+    canonical: PathBuf,
+    dir: rustix::fd::OwnedFd,
+}
+
+#[cfg(not(unix))]
+#[derive(Debug)]
+struct WorkspaceRoot {
+    canonical: PathBuf,
+}
 
 /// Typed error for workspace operations.
 #[derive(Debug)]
 pub enum WorkspaceError {
     Io(String),
+    UnsafePath(String),
+    LimitExceeded(String),
 }
 
 impl std::fmt::Display for WorkspaceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WorkspaceError::Io(e) => write!(f, "workspace I/O error: {e}"),
+            WorkspaceError::UnsafePath(e) => write!(f, "unsafe workspace path: {e}"),
+            WorkspaceError::LimitExceeded(e) => write!(f, "workspace limit exceeded: {e}"),
         }
     }
 }
@@ -139,16 +163,348 @@ impl WorkspaceScanner {
     /// Files that vanish mid-scan are skipped (and thus appear as removed).
     async fn read_current(&self) -> Result<HashMap<String, (String, String)>, WorkspaceError> {
         let mut current = HashMap::new();
-        for path in Self::collect_rs(&self.root).await? {
+        let Some(root) = Self::open_root(&self.root).await? else {
+            return Ok(current);
+        };
+        #[cfg(unix)]
+        let paths = {
+            let directory = root.dir.try_clone().map_err(|e| {
+                WorkspaceError::Io(format!("cannot clone workspace root descriptor: {e}"))
+            })?;
+            tokio::task::spawn_blocking(move || Self::collect_rs_unix(directory))
+                .await
+                .map_err(|e| WorkspaceError::Io(format!("workspace scan worker failed: {e}")))??
+        };
+        #[cfg(not(unix))]
+        let paths: Vec<PathBuf> = Vec::new();
+        let mut total_bytes = 0u64;
+        for relative in paths {
+            let path = root.canonical.join(&relative);
             let key = path.to_string_lossy().to_string();
-            match tokio::fs::read_to_string(&path).await {
-                Ok(content) => {
-                    current.insert(key, (hash(&content), content));
-                }
-                Err(_) => continue, // disappeared mid-scan: treat as absent
-            }
+            let Some(content) =
+                Self::read_regular_file(&root, &relative, &path, &mut total_bytes).await?
+            else {
+                continue; // disappeared mid-scan: treat as absent
+            };
+            current.insert(key, (hash(&content), content));
         }
         Ok(current)
+    }
+
+    async fn open_root(root: &str) -> Result<Option<WorkspaceRoot>, WorkspaceError> {
+        let root_path = PathBuf::from(root);
+        let metadata = match tokio::fs::symlink_metadata(&root_path).await {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(WorkspaceError::UnsafePath(format!(
+                "workspace root must be a real directory: {}",
+                root_path.display()
+            )));
+        }
+        let canonical = tokio::fs::canonicalize(&root_path).await?;
+        let canonical_metadata = tokio::fs::symlink_metadata(&canonical).await?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let dir = rustix::fs::open(
+                &root_path,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|e| {
+                WorkspaceError::UnsafePath(format!(
+                    "cannot pin workspace root {}: {e}",
+                    canonical.display()
+                ))
+            })?;
+            let root_file = std::fs::File::from(dir);
+            let descriptor_metadata = root_file.metadata()?;
+            if descriptor_metadata.dev() != metadata.dev()
+                || descriptor_metadata.ino() != metadata.ino()
+                || descriptor_metadata.dev() != canonical_metadata.dev()
+                || descriptor_metadata.ino() != canonical_metadata.ino()
+            {
+                return Err(WorkspaceError::UnsafePath(format!(
+                    "workspace root changed while it was being pinned: {}",
+                    canonical.display()
+                )));
+            }
+            let dir = rustix::fd::OwnedFd::from(root_file);
+            Ok(Some(WorkspaceRoot { canonical, dir }))
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _root = WorkspaceRoot { canonical };
+            Err(WorkspaceError::UnsafePath(
+                "secure workspace scanning requires descriptor-relative path resolution, which is not available on this platform"
+                    .into(),
+            ))
+        }
+    }
+
+    /// Open one file without following its final symlink, revalidate that it is
+    /// a regular file confined to `root`, and read at most the configured
+    /// per-file and aggregate budgets. `None` means the file vanished during
+    /// the scan.
+    async fn read_regular_file(
+        root: &WorkspaceRoot,
+        relative: &Path,
+        display_path: &Path,
+        total_bytes: &mut u64,
+    ) -> Result<Option<String>, WorkspaceError> {
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(WorkspaceError::UnsafePath(format!(
+                "invalid relative Rust source path: {}",
+                display_path.display()
+            )));
+        }
+
+        #[cfg(unix)]
+        let file = match Self::open_relative_unix(&root.dir, relative, display_path)? {
+            Some(file) => tokio::fs::File::from_std(file),
+            None => return Ok(None),
+        };
+
+        #[cfg(not(unix))]
+        let file: tokio::fs::File = return Err(WorkspaceError::UnsafePath(
+            "secure descriptor-relative workspace reads are unavailable on this platform".into(),
+        ));
+        let metadata = file.metadata().await?;
+        if !metadata.file_type().is_file() {
+            return Err(WorkspaceError::UnsafePath(format!(
+                "refusing non-regular Rust source {}",
+                display_path.display()
+            )));
+        }
+        if metadata.len() > MAX_RUST_FILE_BYTES {
+            return Err(WorkspaceError::LimitExceeded(format!(
+                "{} is {} bytes (maximum {})",
+                display_path.display(),
+                metadata.len(),
+                MAX_RUST_FILE_BYTES
+            )));
+        }
+        let remaining = MAX_WORKSPACE_RUST_BYTES
+            .checked_sub(*total_bytes)
+            .ok_or_else(|| WorkspaceError::LimitExceeded("byte budget overflow".into()))?;
+        if metadata.len() > remaining {
+            return Err(WorkspaceError::LimitExceeded(format!(
+                "Rust sources exceed {} bytes",
+                MAX_WORKSPACE_RUST_BYTES
+            )));
+        }
+
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(MAX_RUST_FILE_BYTES.min(remaining) + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() as u64 > MAX_RUST_FILE_BYTES {
+            return Err(WorkspaceError::LimitExceeded(format!(
+                "{} grew beyond {} bytes while being read",
+                display_path.display(),
+                MAX_RUST_FILE_BYTES
+            )));
+        }
+        *total_bytes = total_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| WorkspaceError::LimitExceeded("byte budget overflow".into()))?;
+        if *total_bytes > MAX_WORKSPACE_RUST_BYTES {
+            return Err(WorkspaceError::LimitExceeded(format!(
+                "Rust sources exceed {} bytes",
+                MAX_WORKSPACE_RUST_BYTES
+            )));
+        }
+        let content = String::from_utf8(bytes).map_err(|e| {
+            WorkspaceError::Io(format!(
+                "{} is not valid UTF-8: {e}",
+                display_path.display()
+            ))
+        })?;
+        Ok(Some(content))
+    }
+
+    #[cfg(unix)]
+    fn open_relative_unix(
+        root: &rustix::fd::OwnedFd,
+        relative: &Path,
+        display_path: &Path,
+    ) -> Result<Option<std::fs::File>, WorkspaceError> {
+        let flags = rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NONBLOCK;
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let opened = rustix::fs::openat2(
+            root,
+            relative,
+            flags,
+            rustix::fs::Mode::empty(),
+            rustix::fs::ResolveFlags::BENEATH
+                | rustix::fs::ResolveFlags::NO_SYMLINKS
+                | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+        );
+
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let opened = {
+            let mut directory = rustix::fs::openat(
+                root,
+                ".",
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            );
+            let components: Vec<_> = relative.components().collect();
+            for (index, component) in components.iter().enumerate() {
+                let Component::Normal(name) = component else {
+                    return Err(WorkspaceError::UnsafePath(format!(
+                        "invalid relative Rust source path: {}",
+                        display_path.display()
+                    )));
+                };
+                let current = match directory {
+                    Ok(ref current) => current,
+                    Err(error) => return Self::map_anchored_open_error(error, display_path),
+                };
+                let component_flags = if index + 1 == components.len() {
+                    flags
+                } else {
+                    flags | rustix::fs::OFlags::DIRECTORY
+                };
+                directory =
+                    rustix::fs::openat(current, name, component_flags, rustix::fs::Mode::empty());
+            }
+            directory
+        };
+
+        match opened {
+            Ok(fd) => Ok(Some(std::fs::File::from(fd))),
+            Err(error) => Self::map_anchored_open_error(error, display_path),
+        }
+    }
+
+    #[cfg(unix)]
+    fn collect_rs_unix(root: rustix::fd::OwnedFd) -> Result<Vec<PathBuf>, WorkspaceError> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut out = Vec::new();
+        let mut stack = vec![(root, PathBuf::new())];
+        while let Some((directory, relative_dir)) = stack.pop() {
+            let entries = rustix::fs::Dir::read_from(&directory).map_err(|e| {
+                WorkspaceError::Io(format!(
+                    "cannot enumerate workspace directory {}: {e}",
+                    relative_dir.display()
+                ))
+            })?;
+            for entry in entries {
+                let entry = entry.map_err(|e| {
+                    WorkspaceError::Io(format!(
+                        "cannot enumerate workspace directory {}: {e}",
+                        relative_dir.display()
+                    ))
+                })?;
+                let name_bytes = entry.file_name().to_bytes();
+                if name_bytes == b"." || name_bytes == b".." {
+                    continue;
+                }
+                let name = std::ffi::OsStr::from_bytes(name_bytes);
+                if name_bytes.first() == Some(&b'.') || name_bytes == b"target" {
+                    continue;
+                }
+                let relative = relative_dir.join(name);
+                let file_type = entry.file_type();
+                if file_type.is_symlink() {
+                    if relative.extension().and_then(|e| e.to_str()) == Some("rs") {
+                        return Err(WorkspaceError::UnsafePath(format!(
+                            "refusing symbolic-link Rust source {}",
+                            relative.display()
+                        )));
+                    }
+                    continue;
+                }
+                let probe_unknown = Self::dirent_type_requires_directory_probe(file_type);
+                if file_type.is_dir() || probe_unknown {
+                    match rustix::fs::openat(
+                        &directory,
+                        name,
+                        rustix::fs::OFlags::RDONLY
+                            | rustix::fs::OFlags::DIRECTORY
+                            | rustix::fs::OFlags::NOFOLLOW
+                            | rustix::fs::OFlags::CLOEXEC
+                            | rustix::fs::OFlags::NONBLOCK,
+                        rustix::fs::Mode::empty(),
+                    ) {
+                        Ok(child) => {
+                            stack.push((child, relative));
+                            continue;
+                        }
+                        // Directory entries may disappear between readdir and
+                        // openat. Treat that race like a vanished file.
+                        Err(error) if Self::directory_disappeared(error) => continue,
+                        // DT_UNKNOWN requires a descriptor-relative directory
+                        // probe. NOTDIR proves that this entry can be handled by
+                        // the regular-file path below.
+                        Err(error) if probe_unknown && error == rustix::io::Errno::NOTDIR => {}
+                        Err(error) => {
+                            return Err(WorkspaceError::UnsafePath(format!(
+                                "cannot safely enter workspace directory {}: {e}",
+                                relative.display(),
+                                e = error
+                            )))
+                        }
+                    }
+                }
+                if relative.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    if out.len() == MAX_WORKSPACE_RUST_FILES {
+                        return Err(WorkspaceError::LimitExceeded(format!(
+                            "more than {MAX_WORKSPACE_RUST_FILES} Rust sources"
+                        )));
+                    }
+                    out.push(relative);
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    #[cfg(unix)]
+    fn dirent_type_requires_directory_probe(file_type: rustix::fs::FileType) -> bool {
+        matches!(file_type, rustix::fs::FileType::Unknown)
+    }
+
+    #[cfg(unix)]
+    fn directory_disappeared(error: rustix::io::Errno) -> bool {
+        error == rustix::io::Errno::NOENT
+    }
+
+    #[cfg(unix)]
+    fn map_anchored_open_error(
+        error: rustix::io::Errno,
+        path: &Path,
+    ) -> Result<Option<std::fs::File>, WorkspaceError> {
+        if error == rustix::io::Errno::NOENT {
+            Ok(None)
+        } else {
+            Err(WorkspaceError::UnsafePath(format!(
+                "cannot open {} beneath pinned workspace root: {error}",
+                path.display()
+            )))
+        }
     }
 
     fn diff(
@@ -173,43 +529,25 @@ impl WorkspaceScanner {
         delta.removed.sort();
         delta
     }
-
-    /// Iteratively (no async recursion) collect `.rs` files, skipping
-    /// `target/`, VCS and hidden directories.
-    async fn collect_rs(root: &str) -> Result<Vec<PathBuf>, WorkspaceError> {
-        let mut out = Vec::new();
-        let mut stack = vec![PathBuf::from(root)];
-        while let Some(dir) = stack.pop() {
-            let mut rd = match tokio::fs::read_dir(&dir).await {
-                Ok(rd) => rd,
-                Err(_) => continue, // directory vanished: skip
-            };
-            while let Some(entry) = rd.next_entry().await? {
-                let path = entry.path();
-                let file_type = match entry.file_type().await {
-                    Ok(ft) => ft,
-                    Err(_) => continue,
-                };
-                if file_type.is_dir() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name == "target" || name == ".git" || name.starts_with('.') {
-                        continue;
-                    }
-                    stack.push(path);
-                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                    out.push(path);
-                }
-            }
-        }
-        out.sort();
-        Ok(out)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_dirent_types_are_probed_and_vanished_directories_are_absent() {
+        assert!(WorkspaceScanner::dirent_type_requires_directory_probe(
+            rustix::fs::FileType::Unknown
+        ));
+        assert!(WorkspaceScanner::directory_disappeared(
+            rustix::io::Errno::NOENT
+        ));
+        assert!(!WorkspaceScanner::directory_disappeared(
+            rustix::io::Errno::LOOP
+        ));
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
@@ -341,6 +679,77 @@ mod tests {
             graph.prune_dangling_edges(),
             0,
             "no dangling edges after removal"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_rust_symlink_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("symlink_root");
+        let outside = temp_dir("symlink_outside");
+        let sentinel = outside.join("sentinel.rs");
+        std::fs::write(&sentinel, "pub const OUTSIDE: bool = true;").unwrap();
+        symlink(&sentinel, dir.join("escaped.rs")).unwrap();
+
+        let mut scanner = WorkspaceScanner::new(dir.to_string_lossy().to_string());
+        let error = scanner.scan_workspace().await.unwrap_err();
+        assert!(matches!(error, WorkspaceError::UnsafePath(_)));
+        assert!(
+            scanner.files.is_empty(),
+            "outside source must not be indexed"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn anchored_open_rejects_symlinked_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("ancestor_root");
+        let outside = temp_dir("ancestor_outside");
+        std::fs::write(
+            outside.join("sentinel.rs"),
+            "pub const OUTSIDE: bool = true;",
+        )
+        .unwrap();
+        symlink(&outside, dir.join("swapped")).unwrap();
+
+        let root = WorkspaceScanner::open_root(dir.to_string_lossy().as_ref())
+            .await
+            .unwrap()
+            .unwrap();
+        let relative = Path::new("swapped/sentinel.rs");
+        let escaped = root.canonical.join(relative);
+        let mut total = 0;
+        let error = WorkspaceScanner::read_regular_file(&root, relative, &escaped, &mut total)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WorkspaceError::UnsafePath(_)));
+        assert_eq!(total, 0, "rejected source must not consume a read budget");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_rust_source_before_reading_it() {
+        let dir = temp_dir("oversized");
+        let file = std::fs::File::create(dir.join("large.rs")).unwrap();
+        file.set_len(MAX_RUST_FILE_BYTES + 1).unwrap();
+
+        let mut scanner = WorkspaceScanner::new(dir.to_string_lossy().to_string());
+        let error = scanner.scan_workspace().await.unwrap_err();
+        assert!(matches!(error, WorkspaceError::LimitExceeded(_)));
+        assert!(
+            scanner.files.is_empty(),
+            "oversized source must not be indexed"
         );
 
         std::fs::remove_dir_all(&dir).ok();

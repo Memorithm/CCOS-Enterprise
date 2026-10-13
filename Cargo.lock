@@ -140,6 +140,7 @@ dependencies = [
  "proptest",
  "rand 0.8.7",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

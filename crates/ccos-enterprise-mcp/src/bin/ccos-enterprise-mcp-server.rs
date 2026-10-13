@@ -134,6 +134,12 @@ struct DataAtRestPolicy {
     backup_roots: Vec<AtRestRoot>,
 }
 
+struct RestoreEvidence<'a> {
+    tenant: &'a str,
+    purge_floor_receipt_path: &'a Path,
+    backup_receipt_paths: &'a [PathBuf],
+}
+
 #[derive(Debug, Clone)]
 struct Config {
     audience: String,
@@ -255,13 +261,15 @@ fn validate_data_at_rest_profile(
             })?;
             validate_production_data_at_rest_policy(
                 &policy,
-                tenant,
                 state_dir,
                 governed_memory_root,
                 evidence_roots,
                 &backup_roots,
-                &purge_floor_receipt,
-                &backup_receipts,
+                RestoreEvidence {
+                    tenant,
+                    purge_floor_receipt_path: &purge_floor_receipt,
+                    backup_receipt_paths: &backup_receipts,
+                },
                 envelope_configured,
             )
         }
@@ -410,13 +418,11 @@ fn validate_policy_root(
 
 fn validate_production_data_at_rest_policy(
     policy: &DataAtRestPolicy,
-    tenant: &str,
     state_dir: &Path,
     governed_memory_root: Option<&Path>,
     evidence_roots: Option<&(PathBuf, PathBuf)>,
     configured_backup_roots: &[PathBuf],
-    purge_floor_receipt_path: &Path,
-    backup_receipt_paths: &[PathBuf],
+    restore_evidence: RestoreEvidence<'_>,
     envelope_configured: bool,
 ) -> Result<(), String> {
     if policy.schema_version != 1 {
@@ -510,10 +516,10 @@ fn validate_production_data_at_rest_policy(
     }
 
     let floor_receipt: PurgeFloorReceipt =
-        read_bounded_json(purge_floor_receipt_path, "purge-floor receipt")?;
-    ensure_external_receipt(purge_floor_receipt_path, &roots)?;
+        read_bounded_json(restore_evidence.purge_floor_receipt_path, "purge-floor receipt")?;
+    ensure_external_receipt(restore_evidence.purge_floor_receipt_path, &roots)?;
     if floor_receipt.schema_version != 1
-        || floor_receipt.tenant != tenant
+        || floor_receipt.tenant != restore_evidence.tenant
         || !valid_sha256(&floor_receipt.floor_sha256)
     {
         return Err("purge-floor receipt is invalid".into());
@@ -533,10 +539,12 @@ fn validate_production_data_at_rest_policy(
         return Err("live provider purge floor does not match retained external evidence".into());
     }
 
-    if backup_receipt_paths.len() != canonical_backups.len() {
+    if restore_evidence.backup_receipt_paths.len() != canonical_backups.len() {
         return Err("every backup root requires one reconciliation receipt".into());
     }
-    for ((backup_root, backup), receipt_path) in canonical_backups.iter().zip(backup_receipt_paths)
+    for ((backup_root, backup), receipt_path) in canonical_backups
+        .iter()
+        .zip(restore_evidence.backup_receipt_paths)
     {
         let receipt: BackupReconciliationReceipt =
             read_bounded_json(receipt_path, "backup reconciliation receipt")?;
@@ -2431,6 +2439,16 @@ mod tests {
         backup_receipts: Vec<PathBuf>,
     }
 
+    impl AtRestFixture {
+        fn restore_evidence(&self) -> RestoreEvidence<'_> {
+            RestoreEvidence {
+                tenant: "acme",
+                purge_floor_receipt_path: &self.floor_receipt,
+                backup_receipt_paths: &self.backup_receipts,
+            }
+        }
+    }
+
     fn production_at_rest_fixture(label: &str) -> AtRestFixture {
         let base = std::env::temp_dir().join(format!(
             "ccos-enterprise-at-rest-{label}-{}",
@@ -2567,13 +2585,11 @@ mod tests {
         let fixture = production_at_rest_fixture("complete");
         validate_production_data_at_rest_policy(
             &fixture.policy,
-            "acme",
             &fixture.base.join("state"),
             Some(&fixture.provider),
             Some(&fixture.evidence),
             &[fixture.base.join("backups")],
-            &fixture.floor_receipt,
-            &fixture.backup_receipts,
+            fixture.restore_evidence(),
             true,
         )
         .unwrap();
@@ -2586,13 +2602,11 @@ mod tests {
         fixture.policy.backup_roots.clear();
         let error = validate_production_data_at_rest_policy(
             &fixture.policy,
-            "acme",
             &fixture.base.join("state"),
             Some(&fixture.provider),
             Some(&fixture.evidence),
             &[],
-            &fixture.floor_receipt,
-            &fixture.backup_receipts,
+            fixture.restore_evidence(),
             true,
         )
         .unwrap_err();
@@ -2606,13 +2620,11 @@ mod tests {
         fixture.policy.state.protection = AtRestProtection::ApplicationEnvelope;
         let error = validate_production_data_at_rest_policy(
             &fixture.policy,
-            "acme",
             &fixture.base.join("state"),
             Some(&fixture.provider),
             Some(&fixture.evidence),
             &[fixture.base.join("backups")],
-            &fixture.floor_receipt,
-            &fixture.backup_receipts,
+            fixture.restore_evidence(),
             true,
         )
         .unwrap_err();
@@ -2626,13 +2638,11 @@ mod tests {
         fixture.policy.backup_roots[0].root = fixture.base.join("state");
         let error = validate_production_data_at_rest_policy(
             &fixture.policy,
-            "acme",
             &fixture.base.join("state"),
             Some(&fixture.provider),
             Some(&fixture.evidence),
             &[fixture.base.join("state")],
-            &fixture.floor_receipt,
-            &fixture.backup_receipts,
+            fixture.restore_evidence(),
             true,
         )
         .unwrap_err();
@@ -2650,13 +2660,11 @@ mod tests {
         .unwrap();
         let error = validate_production_data_at_rest_policy(
             &fixture.policy,
-            "acme",
             &fixture.base.join("state"),
             Some(&fixture.provider),
             Some(&fixture.evidence),
             &[fixture.base.join("backups")],
-            &fixture.floor_receipt,
-            &fixture.backup_receipts,
+            fixture.restore_evidence(),
             true,
         )
         .unwrap_err();
@@ -2674,13 +2682,11 @@ mod tests {
         .unwrap();
         let error = validate_production_data_at_rest_policy(
             &fixture.policy,
-            "acme",
             &fixture.base.join("state"),
             Some(&fixture.provider),
             Some(&fixture.evidence),
             &[fixture.base.join("backups")],
-            &fixture.floor_receipt,
-            &fixture.backup_receipts,
+            fixture.restore_evidence(),
             true,
         )
         .unwrap_err();
@@ -2698,13 +2704,11 @@ mod tests {
         symlink(fixture.base.join("state"), &alias).unwrap();
         let error = validate_production_data_at_rest_policy(
             &fixture.policy,
-            "acme",
             &alias,
             Some(&fixture.provider),
             Some(&fixture.evidence),
             &[fixture.base.join("backups")],
-            &fixture.floor_receipt,
-            &fixture.backup_receipts,
+            fixture.restore_evidence(),
             true,
         )
         .unwrap_err();

@@ -838,3 +838,59 @@ audit_global_remediation_2026_10_13:
     - operator_managed_encrypted_volume_is_attestation_not_cryptographic_proof
     - no_FIPS_or_production_Vault_HSM_IAM_qualification_claim
     - copies_outside_declared_roots_remain_out_of_scope
+
+audit_global_remediation_mem08_2026_10_13:
+  finding: MEM-08
+  status: merged_integrated_validated
+  default_branch: main
+  pull_request: 194
+  candidate_head: 64f15f6cc82b75a8073708782d1fc8b6ceacdaf9
+  merge_sha: 4c71b3e6ca7cb9078b876c3451ed1f085994cecb
+  integrated_tree: 9233e6ea250bdfd8e25b336b3d4f0c2d97a116eb
+  upstream_owner_fix:
+    repository: Memorithm/CCOS-Core
+    pull_request: 36
+    candidate_head: 423798237c21aab1251c6844c7c340ce09849bd2
+    merge_sha: 99ce3012426717907d150bc1df2ed0c14b3388e1
+    tree_sha: 53a88656bd111fa936a96bf05cc870c526da96a5
+  lineage:
+    initial_import_commit: e4f249602af3474e87408a6776417be805d17ce7
+    initial_import_tree: fb93b81585ff5d56adceb9ed35a10f9292bf9f98
+    metadata_sync_commit: b0c6c1a51fc16e822eebf16a8891992379d03c9f
+    metadata_sync_tree: f958a8b8900d5430ee39e413e2476822409290fc
+    reviewed_upstream_commit: 99ce3012426717907d150bc1df2ed0c14b3388e1
+    reviewed_upstream_tree: 53a88656bd111fa936a96bf05cc870c526da96a5
+    manifest: core/UPSTREAM_CCOS_CORE.json
+  contract:
+    - validate_all_commit_tree_anchors_and_security_range_endpoints
+    - record_one_disposition_for_every_changed_upstream_path
+    - import_reviewed_security_files_byte_identically
+    - preserve_explicit_Enterprise_product_overlays
+    - verify_offline_and_require_explicit_local_checkout_for_audit_or_sync
+    - correct_general_Core_defects_at_the_owner_first
+  candidate_validation_runs:
+    - 38365804527
+    - 38365804480
+    - 38365804584
+    - 38365804538
+    - 38365804524
+    - 38365804681
+    - 38365804639
+  integrated_validation_runs:
+    - 38367320966
+    - 38367321115
+    - 38367321044
+    - 38367320996
+    - 38367321031
+    - 38367321095
+  review:
+    threads: 3
+    resolved_threads: 3
+    corrected:
+      - unknown_dirent_type_directory_skip
+      - concurrent_directory_disappearance
+      - incomplete_lineage_anchor_and_range_endpoint_validation
+  limits:
+    - selective_sync_is_not_whole_tree_identity
+    - Linux_rustix_scanner_contract_remains_platform_scoped
+    - no_hardware_or_production_environment_qualification_claim

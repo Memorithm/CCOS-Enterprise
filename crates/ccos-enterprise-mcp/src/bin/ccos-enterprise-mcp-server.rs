@@ -212,9 +212,11 @@ fn validate_data_at_rest_profile(
         .unwrap_or_else(|_| "development".into());
     match profile.as_str() {
         "development" => {
-            if std::env::var_os("CCOS_ENTERPRISE_DATA_AT_REST_POLICY").is_some() {
+            if std::env::var_os("CCOS_ENTERPRISE_DATA_AT_REST_POLICY").is_some()
+                || std::env::var_os("CCOS_ENTERPRISE_BACKUP_ROOTS_JSON").is_some()
+            {
                 return Err(
-                    "CCOS_ENTERPRISE_DATA_AT_REST_POLICY requires the production profile".into(),
+                    "data-at-rest policy inputs require the production profile".into(),
                 );
             }
             Ok(())
@@ -222,11 +224,16 @@ fn validate_data_at_rest_profile(
         "production" => {
             let path = PathBuf::from(required_env("CCOS_ENTERPRISE_DATA_AT_REST_POLICY")?);
             let policy = read_data_at_rest_policy(&path)?;
+            let backup_roots: Vec<PathBuf> = serde_json::from_str(&required_env(
+                "CCOS_ENTERPRISE_BACKUP_ROOTS_JSON",
+            )?)
+            .map_err(|_| "CCOS_ENTERPRISE_BACKUP_ROOTS_JSON must be a JSON path array")?;
             validate_production_data_at_rest_policy(
                 &policy,
                 state_dir,
                 governed_memory_root,
                 evidence_roots,
+                &backup_roots,
                 envelope_configured,
             )
         }
@@ -293,6 +300,7 @@ fn validate_production_data_at_rest_policy(
     state_dir: &Path,
     governed_memory_root: Option<&Path>,
     evidence_roots: Option<&(PathBuf, PathBuf)>,
+    configured_backup_roots: &[PathBuf],
     envelope_configured: bool,
 ) -> Result<(), String> {
     if policy.schema_version != 1 {
@@ -361,12 +369,15 @@ fn validate_production_data_at_rest_policy(
         }
     }
 
-    if policy.backup_roots.is_empty() {
+    if configured_backup_roots.is_empty() || policy.backup_roots.is_empty() {
         return Err("production data-at-rest policy requires at least one backup root".into());
     }
-    for backup in &policy.backup_roots {
+    if configured_backup_roots.len() != policy.backup_roots.len() {
+        return Err("configured backup roots do not match the policy inventory".into());
+    }
+    for (configured, backup) in configured_backup_roots.iter().zip(&policy.backup_roots) {
         let root = validate_policy_root(
-            &backup.root,
+            configured,
             backup,
             AtRestProtection::OperatorManagedEncryptedVolume,
             "backup root",
@@ -2332,6 +2343,7 @@ mod tests {
             &base.join("state"),
             Some(&provider),
             Some(&evidence),
+            &[base.join("backups")],
             true,
         )
         .unwrap();
@@ -2347,6 +2359,7 @@ mod tests {
             &base.join("state"),
             Some(&provider),
             Some(&evidence),
+            &[],
             true,
         )
         .unwrap_err();
@@ -2363,6 +2376,7 @@ mod tests {
             &base.join("state"),
             Some(&provider),
             Some(&evidence),
+            &[base.join("backups")],
             true,
         )
         .unwrap_err();
@@ -2379,6 +2393,7 @@ mod tests {
             &base.join("state"),
             Some(&provider),
             Some(&evidence),
+            &[base.join("state")],
             true,
         )
         .unwrap_err();

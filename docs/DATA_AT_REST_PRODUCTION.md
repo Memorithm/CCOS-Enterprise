@@ -5,6 +5,9 @@ fail closed unless every durable data class used by that process is covered by
 an explicit at-rest policy. Set `CCOS_ENTERPRISE_DATA_AT_REST_POLICY` to a
 bounded, regular, non-symlink JSON file such as
 [`data-at-rest-policy.example.json`](data-at-rest-policy.example.json).
+Set `CCOS_ENTERPRISE_BACKUP_ROOTS_JSON` to the ordered JSON array of local
+backup roots used by the deployment, for example
+`["/srv/ccos-backup/acme"]`; it must match `backup_roots` exactly.
 
 The profile inventories and checks these distinct durability boundaries:
 
@@ -19,7 +22,9 @@ The profile inventories and checks these distinct durability boundaries:
 All roots must already exist as absolute, non-symlink directories. Their
 canonical paths must match the process configuration, and no two lifecycle
 classes may alias the same directory. Evidence roots and declarations are
-all-or-nothing. At least one independently protected backup root is mandatory.
+all-or-nothing. At least one independently protected backup root is mandatory;
+the runtime backup-root array and policy inventory must have the same length
+and order.
 
 The provider envelope is enforced by the application. The other protection
 class is an operator assertion about the mounted storage boundary; CCOS cannot

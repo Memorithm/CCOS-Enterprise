@@ -11,8 +11,8 @@
     "tree": "f958a8b8900d5430ee39e413e2476822409290fc"
   },
   "reviewed_upstream": {
-    "commit": "b8c03fbf0edfdf672a2950811c5abeecf10327db",
-    "tree": "a9a893233522129d96d004aa38701d86c2c8bd65"
+    "commit": "99ce3012426717907d150bc1df2ed0c14b3388e1",
+    "tree": "53a88656bd111fa936a96bf05cc870c526da96a5"
   },
   "imported_slices": [
     {
@@ -37,7 +37,7 @@
     "src/persist.rs": "69217831de22add7aedf6ea36c4396e21a9703786eb1337452481f271e71748c",
     "src/persistence.rs": "965064ef79a7698b7a5da12f8479b57ab96c2ec891853ee0d6e441229095844b",
     "src/util.rs": "fd835a09b0305b9ca3101e0a7270d0a0ad5d5bb67895839504fa508318cdd720",
-    "src/workspace.rs": "f293bbbef6992157849f6c586f4e8e6a90db2b635b277d644ccd2f8a15d2fb00"
+    "src/workspace.rs": "6162b9a136b8a74fd13ab12d9df6da85707d7f6082554f9701a918c0f6fc9ec6"
   },
   "enterprise_overlays": {
     "Cargo.toml": ["rustix = { version = \"1.1.4\", features = [\"fs\"] }"],
@@ -45,7 +45,7 @@
     "../Cargo.lock": ["\"rustix\",", "name = \"rustix\"", "version = \"1.1.4\""]
   },
   "security_diff": {
-    "range": "b0c6c1a51fc16e822eebf16a8891992379d03c9f..b8c03fbf0edfdf672a2950811c5abeecf10327db",
+    "range": "b0c6c1a51fc16e822eebf16a8891992379d03c9f..99ce3012426717907d150bc1df2ed0c14b3388e1",
     "changed_paths": [
       ".github/workflows/beir-import.yml",
       ".github/workflows/ci.yml",

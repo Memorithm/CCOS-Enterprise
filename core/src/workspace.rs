@@ -436,8 +436,9 @@ impl WorkspaceScanner {
                     }
                     continue;
                 }
-                if file_type.is_dir() {
-                    let child = rustix::fs::openat(
+                let probe_unknown = Self::dirent_type_requires_directory_probe(file_type);
+                if file_type.is_dir() || probe_unknown {
+                    match rustix::fs::openat(
                         &directory,
                         name,
                         rustix::fs::OFlags::RDONLY
@@ -446,15 +447,28 @@ impl WorkspaceScanner {
                             | rustix::fs::OFlags::CLOEXEC
                             | rustix::fs::OFlags::NONBLOCK,
                         rustix::fs::Mode::empty(),
-                    )
-                    .map_err(|e| {
-                        WorkspaceError::UnsafePath(format!(
-                            "cannot safely enter workspace directory {}: {e}",
-                            relative.display()
-                        ))
-                    })?;
-                    stack.push((child, relative));
-                } else if relative.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    ) {
+                        Ok(child) => {
+                            stack.push((child, relative));
+                            continue;
+                        }
+                        // Directory entries may disappear between readdir and
+                        // openat. Treat that race like a vanished file.
+                        Err(error) if Self::directory_disappeared(error) => continue,
+                        // DT_UNKNOWN requires a descriptor-relative directory
+                        // probe. NOTDIR proves that this entry can be handled by
+                        // the regular-file path below.
+                        Err(error) if probe_unknown && error == rustix::io::Errno::NOTDIR => {}
+                        Err(error) => {
+                            return Err(WorkspaceError::UnsafePath(format!(
+                                "cannot safely enter workspace directory {}: {e}",
+                                relative.display(),
+                                e = error
+                            )))
+                        }
+                    }
+                }
+                if relative.extension().and_then(|e| e.to_str()) == Some("rs") {
                     if out.len() == MAX_WORKSPACE_RUST_FILES {
                         return Err(WorkspaceError::LimitExceeded(format!(
                             "more than {MAX_WORKSPACE_RUST_FILES} Rust sources"
@@ -466,6 +480,16 @@ impl WorkspaceScanner {
         }
         out.sort();
         Ok(out)
+    }
+
+    #[cfg(unix)]
+    fn dirent_type_requires_directory_probe(file_type: rustix::fs::FileType) -> bool {
+        matches!(file_type, rustix::fs::FileType::Unknown)
+    }
+
+    #[cfg(unix)]
+    fn directory_disappeared(error: rustix::io::Errno) -> bool {
+        error == rustix::io::Errno::NOENT
     }
 
     #[cfg(unix)]
@@ -510,6 +534,20 @@ impl WorkspaceScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_dirent_types_are_probed_and_vanished_directories_are_absent() {
+        assert!(WorkspaceScanner::dirent_type_requires_directory_probe(
+            rustix::fs::FileType::Unknown
+        ));
+        assert!(WorkspaceScanner::directory_disappeared(
+            rustix::io::Errno::NOENT
+        ));
+        assert!(!WorkspaceScanner::directory_disappeared(
+            rustix::io::Errno::LOOP
+        ));
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();

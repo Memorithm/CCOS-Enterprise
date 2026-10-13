@@ -45,6 +45,16 @@ class CoreSyncTests(unittest.TestCase):
         with self.assertRaises(core_sync.SyncError):
             core_sync.verify_local(core_sync.ROOT, manifest)
 
+    def test_security_range_must_bind_recorded_anchors(self):
+        manifest = copy.deepcopy(core_sync.load_manifest())
+        core_sync.validate_anchor_relationships(manifest)
+        manifest["security_diff"]["range"] = (
+            "0000000000000000000000000000000000000000.."
+            + manifest["reviewed_upstream"]["commit"]
+        )
+        with self.assertRaises(core_sync.SyncError):
+            core_sync.validate_anchor_relationships(manifest)
+
 
 if __name__ == "__main__":
     unittest.main()

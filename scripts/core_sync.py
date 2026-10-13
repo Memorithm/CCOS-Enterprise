@@ -105,23 +105,36 @@ def git(upstream: Path, *args: str, binary: bool = False) -> bytes | str:
     return result.stdout.decode("utf-8").strip()
 
 
+def validate_anchor_relationships(manifest: dict[str, Any]) -> None:
+    security_range = manifest.get("security_diff", {}).get("range", "")
+    endpoints = security_range.split("..", 1)
+    if endpoints != [
+        manifest["metadata_sync"]["commit"],
+        manifest["reviewed_upstream"]["commit"],
+    ]:
+        raise SyncError("security diff endpoints do not match the lineage anchors")
+
+
 def audit_upstream(upstream: Path, manifest: dict[str, Any]) -> None:
-    reviewed = manifest["reviewed_upstream"]
-    commit = reviewed["commit"]
-    actual_commit = git(upstream, "rev-parse", f"{commit}^{{commit}}")
-    actual_tree = git(upstream, "rev-parse", f"{commit}^{{tree}}")
-    if actual_commit != commit or actual_tree != reviewed["tree"]:
-        raise SyncError(
-            f"upstream identity mismatch: commit={actual_commit}, tree={actual_tree}"
-        )
+    validate_anchor_relationships(manifest)
+    for anchor_name in ("initial_import", "metadata_sync", "reviewed_upstream"):
+        anchor = manifest[anchor_name]
+        commit = anchor["commit"]
+        actual_commit = git(upstream, "rev-parse", f"{commit}^{{commit}}")
+        actual_tree = git(upstream, "rev-parse", f"{commit}^{{tree}}")
+        if actual_commit != commit or actual_tree != anchor["tree"]:
+            raise SyncError(
+                f"{anchor_name} identity mismatch: commit={actual_commit}, tree={actual_tree}"
+            )
 
     security = manifest["security_diff"]
     actual_paths = str(git(upstream, "diff", "--name-only", security["range"])).splitlines()
     if sorted(actual_paths) != sorted(security["changed_paths"]):
         raise SyncError("recorded security diff does not match the reviewed Git range")
 
+    reviewed_commit = manifest["reviewed_upstream"]["commit"]
     for relative, expected in sorted(manifest["exact_files"].items()):
-        upstream_data = git(upstream, "show", f"{commit}:{relative}", binary=True)
+        upstream_data = git(upstream, "show", f"{reviewed_commit}:{relative}", binary=True)
         assert isinstance(upstream_data, bytes)
         if digest(upstream_data) != expected:
             raise SyncError(f"upstream {relative} does not match the recorded digest")

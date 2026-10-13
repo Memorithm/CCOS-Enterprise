@@ -54,6 +54,8 @@ first; Enterprise dependencies must never flow back into Core.
 
 The current slice imports MEM-02/MEM-03 durable bounded persistence, MEM-04
 descriptor-confined bounded workspace scanning, and the backend-neutral memory
-port contract. Core-only CI, product documentation, memory-accounting changes,
+port contract. The recorded Core merge also handles unknown directory-entry
+types and directories that vanish during a scan. Core-only CI, product
+documentation, memory-accounting changes,
 fuzz metadata and author-policy changes remain owned and validated by Core.
 Enterprise preserves its separate OctaSoma feature and governed product gates.

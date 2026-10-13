@@ -323,6 +323,415 @@ fn bounded_file(path: &std::path::Path, limit: usize) -> Result<Zeroizing<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn qualification_enabled() -> bool {
+        std::env::var_os("CCOS_VAULT_QUALIFICATION").is_some()
+    }
+
+    fn qualification_value(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"))
+    }
+
+    fn admin_request(
+        client: &Client,
+        method: reqwest::Method,
+        address: &str,
+        root_token: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> reqwest::blocking::Response {
+        let request = client
+            .request(method, format!("{address}/v1/{path}"))
+            .header("X-Vault-Token", root_token);
+        let response = match body {
+            Some(body) => request.json(&body),
+            None => request,
+        }
+        .send()
+        .unwrap_or_else(|_| panic!("Vault request failed for {path}"));
+        response
+    }
+
+    fn successful_json(response: reqwest::blocking::Response) -> serde_json::Value {
+        assert!(
+            response.status().is_success(),
+            "Vault returned status {}",
+            response.status()
+        );
+        response.json().expect("bounded qualification response")
+    }
+
+    fn create_service_token(
+        client: &Client,
+        address: &str,
+        root_token: &str,
+        ttl: &str,
+        renewable: bool,
+        display_name: &str,
+    ) -> String {
+        let response = successful_json(admin_request(
+            client,
+            reqwest::Method::POST,
+            address,
+            root_token,
+            "auth/token/create-orphan",
+            Some(serde_json::json!({
+                "policies": ["ccos-acme-service"],
+                "ttl": ttl,
+                "explicit_max_ttl": if renewable { "120s" } else { ttl },
+                "renewable": renewable,
+                "no_default_policy": true,
+                "display_name": display_name,
+            })),
+        ));
+        response["auth"]["client_token"]
+            .as_str()
+            .expect("service token")
+            .to_owned()
+    }
+
+    fn qualification_kms(
+        address: &str,
+        token: String,
+        versions: &[(&str, u32)],
+    ) -> Arc<VaultTransitKms> {
+        let keys = versions
+            .iter()
+            .map(|(id, version)| {
+                (
+                    ("acme".into(), (*id).into()),
+                    VaultKey {
+                        name: "ccos-acme".into(),
+                        version: *version,
+                    },
+                )
+            })
+            .collect();
+        Arc::new(
+            VaultTransitKms::build(
+                address,
+                "transit".into(),
+                Zeroizing::new(token),
+                keys,
+                true,
+            )
+            .expect("loopback qualification client"),
+        )
+    }
+
+    fn qualification_cipher(
+        kms: Arc<VaultTransitKms>,
+        active: &str,
+        reads: &[&str],
+    ) -> EnvelopeCipher {
+        EnvelopeCipher::new(
+            TenantId::validated("acme").expect("tenant"),
+            active.into(),
+            reads.iter().map(|key| (*key).to_owned()).collect(),
+            kms,
+        )
+        .expect("qualification cipher")
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly provisioned, ephemeral real Vault server"]
+    fn live_vault_active_qualification() {
+        if !qualification_enabled() {
+            return;
+        }
+        let address = qualification_value("VAULT_ADDR")
+            .trim_end_matches('/')
+            .to_owned();
+        let root_token = qualification_value("VAULT_TOKEN");
+        let expected_version = qualification_value("CCOS_VAULT_VERSION");
+        let output = std::path::PathBuf::from(qualification_value(
+            "CCOS_VAULT_ACTIVE_RESULT",
+        ));
+        assert!(
+            address.starts_with("http://127.0.0.1:"),
+            "qualification Vault must be loopback-only"
+        );
+
+        let admin = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(Policy::none())
+            .no_proxy()
+            .build()
+            .expect("admin client");
+        let health = successful_json(admin_request(
+            &admin,
+            reqwest::Method::GET,
+            &address,
+            &root_token,
+            "sys/health",
+            None,
+        ));
+        assert_eq!(health["version"].as_str(), Some(expected_version.as_str()));
+
+        let enable = admin_request(
+            &admin,
+            reqwest::Method::POST,
+            &address,
+            &root_token,
+            "sys/mounts/transit",
+            Some(serde_json::json!({"type": "transit"})),
+        );
+        assert!(enable.status().is_success());
+        for key in ["ccos-acme", "ccos-other"] {
+            let response = admin_request(
+                &admin,
+                reqwest::Method::POST,
+                &address,
+                &root_token,
+                &format!("transit/keys/{key}"),
+                Some(serde_json::json!({
+                    "type": "aes256-gcm96",
+                    "derived": true,
+                    "exportable": false,
+                    "allow_plaintext_backup": false,
+                })),
+            );
+            assert!(response.status().is_success());
+        }
+        let policy = r#"
+path "transit/encrypt/ccos-acme" { capabilities = ["update"] }
+path "transit/decrypt/ccos-acme" { capabilities = ["update"] }
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self" { capabilities = ["update"] }
+"#;
+        let policy_response = admin_request(
+            &admin,
+            reqwest::Method::PUT,
+            &address,
+            &root_token,
+            "sys/policies/acl/ccos-acme-service",
+            Some(serde_json::json!({"policy": policy})),
+        );
+        assert!(policy_response.status().is_success());
+
+        let service_token = create_service_token(
+            &admin,
+            &address,
+            &root_token,
+            "30s",
+            true,
+            "ccos-qualification-renewable",
+        );
+        let service = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(Policy::none())
+            .no_proxy()
+            .build()
+            .expect("service client");
+        let renewal = successful_json(
+            service
+                .post(format!("{address}/v1/auth/token/renew-self"))
+                .header("X-Vault-Token", &service_token)
+                .json(&serde_json::json!({"increment": "45s"}))
+                .send()
+                .expect("renew self"),
+        );
+        assert_eq!(renewal["auth"]["renewable"].as_bool(), Some(true));
+        assert!(
+            renewal["auth"]["lease_duration"]
+                .as_u64()
+                .is_some_and(|ttl| ttl >= 30)
+        );
+
+        let denied_other = service
+            .post(format!("{address}/v1/transit/encrypt/ccos-other"))
+            .header("X-Vault-Token", &service_token)
+            .json(&serde_json::json!({
+                "plaintext": STANDARD.encode([0u8; 32]),
+                "context": STANDARD.encode([0u8; 32]),
+            }))
+            .send()
+            .expect("forbidden other-key request");
+        assert_eq!(denied_other.status(), reqwest::StatusCode::FORBIDDEN);
+        let denied_rotate = service
+            .post(format!("{address}/v1/transit/keys/ccos-acme/rotate"))
+            .header("X-Vault-Token", &service_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .expect("forbidden rotate request");
+        assert_eq!(denied_rotate.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let cipher_v1 = qualification_cipher(
+            qualification_kms(&address, service_token.clone(), &[("acme-v1", 1)]),
+            "acme-v1",
+            &["acme-v1"],
+        );
+        let backup_plaintext = b"qualified-backup-generation";
+        let backup_v1 = cipher_v1
+            .seal("backups/generation-1.json", backup_plaintext, 4096)
+            .expect("seal v1 backup");
+        assert_eq!(
+            cipher_v1
+                .open("backups/generation-1.json", &backup_v1, 4096)
+                .expect("restore v1 backup")
+                .as_slice(),
+            backup_plaintext
+        );
+
+        let rotated = admin_request(
+            &admin,
+            reqwest::Method::POST,
+            &address,
+            &root_token,
+            "transit/keys/ccos-acme/rotate",
+            Some(serde_json::json!({})),
+        );
+        assert!(rotated.status().is_success());
+        let key_state = successful_json(admin_request(
+            &admin,
+            reqwest::Method::GET,
+            &address,
+            &root_token,
+            "transit/keys/ccos-acme",
+            None,
+        ));
+        assert_eq!(key_state["data"]["latest_version"].as_u64(), Some(2));
+
+        let cipher_v2 = qualification_cipher(
+            qualification_kms(
+                &address,
+                service_token.clone(),
+                &[("acme-v1", 1), ("acme-v2", 2)],
+            ),
+            "acme-v2",
+            &["acme-v1", "acme-v2"],
+        );
+        assert_eq!(
+            cipher_v2
+                .open("backups/generation-1.json", &backup_v1, 4096)
+                .expect("old backup readable before retirement")
+                .as_slice(),
+            backup_plaintext
+        );
+        let backup_v2 = cipher_v2
+            .rewrap("backups/generation-1.json", &backup_v1, 4096)
+            .expect("rewrap backup to v2");
+        assert!(cipher_v2
+            .uses_active_key(&backup_v2, 4096)
+            .expect("active key marker"));
+        assert_eq!(
+            cipher_v2
+                .open("backups/generation-1.json", &backup_v2, 4096)
+                .expect("restored rewrapped backup")
+                .as_slice(),
+            backup_plaintext
+        );
+
+        let retired = admin_request(
+            &admin,
+            reqwest::Method::POST,
+            &address,
+            &root_token,
+            "transit/keys/ccos-acme/config",
+            Some(serde_json::json!({"min_decryption_version": 2})),
+        );
+        assert!(retired.status().is_success());
+        assert!(matches!(
+            cipher_v2.open("backups/generation-1.json", &backup_v1, 4096),
+            Err(EnvelopeError::KeyService)
+        ));
+        assert_eq!(
+            cipher_v2
+                .open("backups/generation-1.json", &backup_v2, 4096)
+                .expect("v2 remains restorable")
+                .as_slice(),
+            backup_plaintext
+        );
+
+        let short_token = create_service_token(
+            &admin,
+            &address,
+            &root_token,
+            "2s",
+            false,
+            "ccos-qualification-expiring",
+        );
+        let short_cipher = qualification_cipher(
+            qualification_kms(&address, short_token, &[("acme-v2", 2)]),
+            "acme-v2",
+            &["acme-v2"],
+        );
+        short_cipher
+            .seal("state/pre-expiry.json", b"before-expiry", 4096)
+            .expect("short token initially works");
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(matches!(
+            short_cipher.seal("state/post-expiry.json", b"after-expiry", 4096),
+            Err(EnvelopeError::KeyService)
+        ));
+
+        let result = serde_json::json!({
+            "schema": "ccos-vault-qualification-active.v1",
+            "vault_version": expected_version,
+            "vault_address_class": "http_loopback_ephemeral",
+            "transit_key_type": "aes256-gcm96-derived",
+            "checks": {
+                "real_vault_health": true,
+                "least_privilege_named_key_acl": true,
+                "cross_key_encrypt_denied": true,
+                "service_key_rotation_denied": true,
+                "renewable_token_renewed": true,
+                "nonrenewable_token_expired_fail_closed": true,
+                "transit_rotation_to_v2": true,
+                "old_backup_restored_before_retirement": true,
+                "backup_rewrapped_and_restored_after_rotation": true,
+                "v1_refused_after_min_decryption_version_2": true,
+                "v2_restored_after_retirement": true
+            },
+            "limits": [
+                "ephemeral single-node development server",
+                "loopback HTTP isolates Vault semantics from separately tested production TLS enforcement",
+                "no HSM, IAM, HA, seal, FIPS or production deployment qualification"
+            ]
+        });
+        std::fs::write(
+            output,
+            serde_json::to_vec_pretty(&result).expect("qualification result"),
+        )
+        .expect("write qualification result");
+    }
+
+    #[test]
+    #[ignore = "requires the qualification Vault process to have been stopped"]
+    fn live_vault_outage_fails_closed() {
+        if !qualification_enabled() {
+            return;
+        }
+        let address = qualification_value("VAULT_ADDR")
+            .trim_end_matches('/')
+            .to_owned();
+        let output = std::path::PathBuf::from(qualification_value(
+            "CCOS_VAULT_OUTAGE_RESULT",
+        ));
+        let cipher = qualification_cipher(
+            qualification_kms(
+                &address,
+                "expired-ephemeral-token".into(),
+                &[("acme-v2", 2)],
+            ),
+            "acme-v2",
+            &["acme-v2"],
+        );
+        assert!(matches!(
+            cipher.seal("state/outage.json", b"must-not-persist", 4096),
+            Err(EnvelopeError::KeyService)
+        ));
+        let result = serde_json::json!({
+            "schema": "ccos-vault-qualification-outage.v1",
+            "checks": {"stopped_real_vault_fails_closed": true}
+        });
+        std::fs::write(
+            output,
+            serde_json::to_vec_pretty(&result).expect("outage result"),
+        )
+        .expect("write outage result");
+    }
+
     #[test]
     fn network_configuration_rejects_http_paths_and_shared_tenant_keys() {
         let keys = BTreeMap::from([(

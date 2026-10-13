@@ -39,6 +39,7 @@ jobs:
           python3 scripts/test-ci-guards.py
           python3 scripts/test-author-policy.py
           python3 scripts/test_core_sync.py
+          python3 scripts/test-vault-qualification.py
           python3 scripts/core_sync.py verify
       - name: Author policy (single human contributor)
         env:

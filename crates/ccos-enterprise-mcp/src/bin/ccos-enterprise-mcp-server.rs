@@ -377,6 +377,37 @@ fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[cfg(unix)]
+type RootIdentity = (u64, u64);
+#[cfg(not(unix))]
+type RootIdentity = PathBuf;
+
+#[cfg(unix)]
+fn root_identity(path: &Path) -> Result<RootIdentity, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::metadata(path)
+        .map_err(|_| "durable root identity cannot be inspected".to_string())?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn root_identity(path: &Path) -> Result<RootIdentity, String> {
+    fs::canonicalize(path).map_err(|_| "durable root identity cannot be inspected".to_string())
+}
+
+fn insert_distinct_root(
+    roots: &mut std::collections::BTreeSet<PathBuf>,
+    identities: &mut std::collections::BTreeSet<RootIdentity>,
+    root: PathBuf,
+) -> Result<(), String> {
+    let identity = root_identity(&root)?;
+    if !roots.insert(root) || !identities.insert(identity) {
+        return Err("durable roots must not alias each other by path or filesystem identity".into());
+    }
+    Ok(())
+}
+
 fn ensure_external_receipt(
     path: &Path,
     roots: &std::collections::BTreeSet<PathBuf>,
@@ -441,22 +472,21 @@ fn validate_production_data_at_rest_policy(
         .ok_or("production data-at-rest profile requires a governed provider root")?;
 
     let mut roots = std::collections::BTreeSet::new();
+    let mut identities = std::collections::BTreeSet::new();
     let state = validate_policy_root(
         state_dir,
         &policy.state,
         AtRestProtection::OperatorManagedEncryptedVolume,
         "state root",
     )?;
-    roots.insert(state);
+    insert_distinct_root(&mut roots, &mut identities, state)?;
     let provider = validate_policy_root(
         provider,
         &policy.governed_provider,
         AtRestProtection::ApplicationEnvelope,
         "governed provider root",
     )?;
-    if !roots.insert(provider.clone()) {
-        return Err("durable roots must not alias each other".into());
-    }
+    insert_distinct_root(&mut roots, &mut identities, provider.clone())?;
 
     match (
         evidence_roots,
@@ -479,9 +509,7 @@ fn validate_production_data_at_rest_policy(
                     AtRestProtection::OperatorManagedEncryptedVolume,
                     label,
                 )?;
-                if !roots.insert(root) {
-                    return Err("durable roots must not alias each other".into());
-                }
+                insert_distinct_root(&mut roots, &mut identities, root)?;
             }
         }
         _ => {
@@ -505,9 +533,7 @@ fn validate_production_data_at_rest_policy(
             AtRestProtection::OperatorManagedEncryptedVolume,
             "backup root",
         )?;
-        if !roots.insert(root) {
-            return Err("durable roots must not alias each other".into());
-        }
+        insert_distinct_root(&mut roots, &mut identities, root)?;
         canonical_backups.push((
             fs::canonicalize(configured)
                 .map_err(|_| "backup root cannot be canonicalized".to_string())?,

@@ -27,10 +27,11 @@ The profile inventories and checks these distinct durability boundaries:
 
 All roots must already exist as absolute directories with no symlink in any
 path component. Their canonical paths must match the process configuration,
-and no two lifecycle classes may alias the same directory. Evidence roots and
-declarations are all-or-nothing. At least one independently protected backup
-root is mandatory; the runtime backup-root array and policy inventory must
-have the same length and order.
+and no two lifecycle classes may alias the same directory. On Unix, the gate
+also compares device/inode identity so distinct bind-mount paths cannot pretend
+to be independent roots. Evidence roots and declarations are all-or-nothing.
+At least one independently protected backup root is mandatory; the runtime
+backup-root array and policy inventory must have the same length and order.
 
 The provider envelope is enforced by the application. The other protection
 class is an operator assertion about the mounted storage boundary; CCOS cannot

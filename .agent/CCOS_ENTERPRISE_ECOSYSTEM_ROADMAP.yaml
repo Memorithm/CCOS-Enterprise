@@ -894,3 +894,59 @@ audit_global_remediation_mem08_2026_10_13:
     - selective_sync_is_not_whole_tree_identity
     - Linux_rustix_scanner_contract_remains_platform_scoped
     - no_hardware_or_production_environment_qualification_claim
+
+audit_global_remediation_mem09_2026_10_13:
+  finding: MEM-09
+  status: merged_integrated_validated
+  default_branch: main
+  implementation:
+    pull_request: 195
+    candidate_head: dc9d3f30c0d0445a113f8706bcfa8ea2ccb890af
+    merge_sha: 5332d760cafbb72e2e378a7e20de090b2270e279
+  evidence_portability_followup:
+    pull_request: 196
+    candidate_head: 86facafe6c7d611eed3a1f95f2a2ff618684d72b
+    final_merge_sha: ac3e64b57aec8120ab98922c76afae4df48d6336
+  contract:
+    - real_Vault_2_1_2_binary_is_pinned_by_SHA256
+    - least_privilege_named_key_ACL_and_cross_key_denial
+    - renewable_and_expiring_token_behaviour
+    - rotation_backup_restore_rewrap_and_old_version_retirement
+    - stopped_real_Vault_fails_closed
+    - evidence_is_bounded_secret_free_exact_head_and_run_linked
+    - downloaded_artifact_checksum_and_Ed25519_signature_verify
+  candidate_validation_runs:
+    - 38377781354
+    - 38377781562
+    - 38377781358
+    - 38377781629
+    - 38377781419
+    - 38377781313
+    - 38380035715
+    - 38380035706
+    - 38380035487
+    - 38380035608
+    - 38380035858
+  integrated_validation_runs:
+    - 38379455564
+    - 38379455549
+    - 38379455546
+    - 38379455554
+    - 38379455528
+    - 38379455524
+    - 38381784182
+    - 38381784159
+    - 38381784104
+    - 38381784097
+    - 38381784147
+  final_artifact:
+    id: 11803846127
+    digest: sha256:47a9c7b61d85d14fa9023870fa254507e55a37ad800807f2c29fcb11081e75d3
+    evidence_sha256: 55e7e418dc95a779007b7e77e66c7096b7552a1a27c364cfab227fb16110cbf8
+    checks: 12
+    checksum_verified_after_download: true
+    signature_verified_after_download: true
+  limits:
+    - ephemeral_single_node_dev_Vault_on_loopback
+    - no_production_TLS_IAM_HSM_seal_HA_storage_or_FIPS_qualification
+    - run_local_signature_proves_artifact_consistency_only

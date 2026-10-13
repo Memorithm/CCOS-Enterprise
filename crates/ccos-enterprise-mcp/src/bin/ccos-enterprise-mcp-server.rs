@@ -214,8 +214,7 @@ fn validate_data_at_rest_profile(
         "development" => {
             if std::env::var_os("CCOS_ENTERPRISE_DATA_AT_REST_POLICY").is_some() {
                 return Err(
-                    "CCOS_ENTERPRISE_DATA_AT_REST_POLICY requires the production profile"
-                        .into(),
+                    "CCOS_ENTERPRISE_DATA_AT_REST_POLICY requires the production profile".into(),
                 );
             }
             Ok(())
@@ -231,20 +230,18 @@ fn validate_data_at_rest_profile(
                 envelope_configured,
             )
         }
-        _ => Err(
-            "CCOS_ENTERPRISE_DATA_AT_REST_PROFILE must be development or production".into(),
-        ),
+        _ => Err("CCOS_ENTERPRISE_DATA_AT_REST_PROFILE must be development or production".into()),
     }
 }
 
 fn read_data_at_rest_policy(path: &Path) -> Result<DataAtRestPolicy, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| "data-at-rest policy is unavailable".to_string())?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| "data-at-rest policy is unavailable".to_string())?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err("data-at-rest policy must be a regular non-symlink file".into());
     }
-    let file = fs::File::open(path)
-        .map_err(|_| "data-at-rest policy is unavailable".to_string())?;
+    let file =
+        fs::File::open(path).map_err(|_| "data-at-rest policy is unavailable".to_string())?;
     let mut bytes = Vec::new();
     file.take((DATA_AT_REST_POLICY_MAX_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
@@ -279,7 +276,9 @@ fn validate_policy_root(
         || declared.key_scope.len() > 256
         || declared.key_scope.chars().any(char::is_whitespace)
     {
-        return Err(format!("{label} key_scope must be a bounded opaque reference"));
+        return Err(format!(
+            "{label} key_scope must be a bounded opaque reference"
+        ));
     }
     let configured = canonical_trusted_directory(configured, label)?;
     let declared_root = canonical_trusted_directory(&declared.root, label)?;
@@ -329,11 +328,19 @@ fn validate_production_data_at_rest_policy(
         return Err("durable roots must not alias each other".into());
     }
 
-    match (evidence_roots, &policy.evidence_knowledge, &policy.source_blobs) {
+    match (
+        evidence_roots,
+        &policy.evidence_knowledge,
+        &policy.source_blobs,
+    ) {
         (None, None, None) => {}
         (Some((knowledge, blobs)), Some(declared_knowledge), Some(declared_blobs)) => {
             for (configured, declared, label) in [
-                (knowledge.as_path(), declared_knowledge, "evidence knowledge root"),
+                (
+                    knowledge.as_path(),
+                    declared_knowledge,
+                    "evidence knowledge root",
+                ),
                 (blobs.as_path(), declared_blobs, "source blobs root"),
             ] {
                 let root = validate_policy_root(
@@ -349,8 +356,7 @@ fn validate_production_data_at_rest_policy(
         }
         _ => {
             return Err(
-                "production evidence roots and their at-rest declarations must be complete"
-                    .into(),
+                "production evidence roots and their at-rest declarations must be complete".into(),
             );
         }
     }

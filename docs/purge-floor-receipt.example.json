@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "tenant": "acme",
+  "provider_root": "/srv/ccos/acme/provider",
+  "provider_generation": 42,
+  "floor_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}

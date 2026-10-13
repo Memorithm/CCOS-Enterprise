@@ -27,10 +27,6 @@
       "protection": "operator_managed_encrypted_volume",
       "key_scope": "backup/acme"
     }
-  ],
-  "restore": {
-    "purge_floor": "retain_and_verify_before_restore",
-    "old_key_retirement": "after_backup_reconciliation"
-  }
+  ]
 }
 

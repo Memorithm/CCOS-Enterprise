@@ -365,7 +365,10 @@ mod tests {
             .take((MAX_HEADER + 1) as u64)
             .read_to_end(&mut bytes)
             .expect("qualification response read");
-        assert!(bytes.len() <= MAX_HEADER, "qualification response too large");
+        assert!(
+            bytes.len() <= MAX_HEADER,
+            "qualification response too large"
+        );
         serde_json::from_slice(&bytes).expect("bounded qualification response")
     }
 
@@ -416,14 +419,8 @@ mod tests {
             })
             .collect();
         Arc::new(
-            VaultTransitKms::build(
-                address,
-                "transit".into(),
-                Zeroizing::new(token),
-                keys,
-                true,
-            )
-            .expect("loopback qualification client"),
+            VaultTransitKms::build(address, "transit".into(), Zeroizing::new(token), keys, true)
+                .expect("loopback qualification client"),
         )
     }
 
@@ -452,9 +449,7 @@ mod tests {
             .to_owned();
         let root_token = qualification_value("VAULT_TOKEN");
         let expected_version = qualification_value("CCOS_VAULT_VERSION");
-        let output = std::path::PathBuf::from(qualification_value(
-            "CCOS_VAULT_ACTIVE_RESULT",
-        ));
+        let output = std::path::PathBuf::from(qualification_value("CCOS_VAULT_ACTIVE_RESULT"));
         assert!(
             address.starts_with("http://127.0.0.1:"),
             "qualification Vault must be loopback-only"
@@ -544,11 +539,9 @@ path "auth/token/renew-self" { capabilities = ["update"] }
                 .expect("renew self"),
         );
         assert_eq!(renewal["auth"]["renewable"].as_bool(), Some(true));
-        assert!(
-            renewal["auth"]["lease_duration"]
-                .as_u64()
-                .is_some_and(|ttl| ttl >= 30)
-        );
+        assert!(renewal["auth"]["lease_duration"]
+            .as_u64()
+            .is_some_and(|ttl| ttl >= 30));
 
         let denied_other = service
             .post(format!("{address}/v1/transit/encrypt/ccos-other"))
@@ -722,9 +715,7 @@ path "auth/token/renew-self" { capabilities = ["update"] }
         let address = qualification_value("VAULT_ADDR")
             .trim_end_matches('/')
             .to_owned();
-        let output = std::path::PathBuf::from(qualification_value(
-            "CCOS_VAULT_OUTAGE_RESULT",
-        ));
+        let output = std::path::PathBuf::from(qualification_value("CCOS_VAULT_OUTAGE_RESULT"));
         let cipher = qualification_cipher(
             qualification_kms(
                 &address,

@@ -679,7 +679,7 @@ path "auth/token/renew-self" { capabilities = ["update"] }
             "schema": "ccos-vault-qualification-active.v1",
             "vault_version": expected_version,
             "vault_address_class": "http_loopback_ephemeral",
-            "transit_key_type": "aes256-gcm96-derived",
+            "transit_algorithm": "aes256-gcm96-derived",
             "checks": {
                 "real_vault_health": true,
                 "least_privilege_named_key_acl": true,

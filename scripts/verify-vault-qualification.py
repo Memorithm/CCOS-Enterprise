@@ -79,7 +79,7 @@ def combine(
         raise ValueError("Vault version differs from the pinned workflow version")
     if active.get("vault_address_class") != "http_loopback_ephemeral":
         raise ValueError("qualification server was not classified as loopback ephemeral")
-    if active.get("transit_key_type") != "aes256-gcm96-derived":
+    if active.get("transit_algorithm") != "aes256-gcm96-derived":
         raise ValueError("unexpected Transit key type")
     exact_true_checks(active.get("checks"), ACTIVE_CHECKS, "active")
     exact_true_checks(outage.get("checks"), OUTAGE_CHECKS, "outage")

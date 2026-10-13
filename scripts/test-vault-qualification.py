@@ -23,7 +23,7 @@ def active(checks: dict[str, bool] | None = None) -> dict:
         "schema": "ccos-vault-qualification-active.v1",
         "vault_version": "2.1.2",
         "vault_address_class": "http_loopback_ephemeral",
-        "transit_key_type": "aes256-gcm96-derived",
+        "transit_algorithm": "aes256-gcm96-derived",
         "checks": checks or {key: True for key in MODULE.ACTIVE_CHECKS},
         "limits": ["single node", "loopback HTTP", "no HSM"],
     }

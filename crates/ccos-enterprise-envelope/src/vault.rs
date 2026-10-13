@@ -344,7 +344,9 @@ mod tests {
             .request(method, format!("{address}/v1/{path}"))
             .header("X-Vault-Token", root_token);
         let response = match body {
-            Some(body) => request.json(&body),
+            Some(body) => request
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_vec(&body).expect("qualification request body")),
             None => request,
         }
         .send()
@@ -358,7 +360,13 @@ mod tests {
             "Vault returned status {}",
             response.status()
         );
-        response.json().expect("bounded qualification response")
+        let mut bytes = Vec::new();
+        response
+            .take((MAX_HEADER + 1) as u64)
+            .read_to_end(&mut bytes)
+            .expect("qualification response read");
+        assert!(bytes.len() <= MAX_HEADER, "qualification response too large");
+        serde_json::from_slice(&bytes).expect("bounded qualification response")
     }
 
     fn create_service_token(
@@ -527,7 +535,11 @@ path "auth/token/renew-self" { capabilities = ["update"] }
             service
                 .post(format!("{address}/v1/auth/token/renew-self"))
                 .header("X-Vault-Token", &service_token)
-                .json(&serde_json::json!({"increment": "45s"}))
+                .header("Content-Type", "application/json")
+                .body(
+                    serde_json::to_vec(&serde_json::json!({"increment": "45s"}))
+                        .expect("renewal body"),
+                )
                 .send()
                 .expect("renew self"),
         );
@@ -541,17 +553,22 @@ path "auth/token/renew-self" { capabilities = ["update"] }
         let denied_other = service
             .post(format!("{address}/v1/transit/encrypt/ccos-other"))
             .header("X-Vault-Token", &service_token)
-            .json(&serde_json::json!({
-                "plaintext": STANDARD.encode([0u8; 32]),
-                "context": STANDARD.encode([0u8; 32]),
-            }))
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::to_vec(&serde_json::json!({
+                    "plaintext": STANDARD.encode([0u8; 32]),
+                    "context": STANDARD.encode([0u8; 32]),
+                }))
+                .expect("cross-key body"),
+            )
             .send()
             .expect("forbidden other-key request");
         assert_eq!(denied_other.status(), reqwest::StatusCode::FORBIDDEN);
         let denied_rotate = service
             .post(format!("{address}/v1/transit/keys/ccos-acme/rotate"))
             .header("X-Vault-Token", &service_token)
-            .json(&serde_json::json!({}))
+            .header("Content-Type", "application/json")
+            .body(b"{}".to_vec())
             .send()
             .expect("forbidden rotate request");
         assert_eq!(denied_rotate.status(), reqwest::StatusCode::FORBIDDEN);

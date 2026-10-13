@@ -227,22 +227,15 @@ fn validate_data_at_rest_profile(
     evidence_roots: Option<&(PathBuf, PathBuf)>,
     envelope_configured: bool,
 ) -> Result<(), String> {
-    let profile = data_at_rest_profile_from(std::env::var(
-        "CCOS_ENTERPRISE_DATA_AT_REST_PROFILE",
-    ))?;
+    let profile = data_at_rest_profile_from(std::env::var("CCOS_ENTERPRISE_DATA_AT_REST_PROFILE"))?;
     match profile.as_str() {
         "development" => {
             if std::env::var_os("CCOS_ENTERPRISE_DATA_AT_REST_POLICY").is_some()
                 || std::env::var_os("CCOS_ENTERPRISE_BACKUP_ROOTS_JSON").is_some()
                 || std::env::var_os("CCOS_ENTERPRISE_PURGE_FLOOR_RECEIPT").is_some()
-                || std::env::var_os(
-                    "CCOS_ENTERPRISE_BACKUP_RECONCILIATION_RECEIPTS_JSON",
-                )
-                .is_some()
+                || std::env::var_os("CCOS_ENTERPRISE_BACKUP_RECONCILIATION_RECEIPTS_JSON").is_some()
             {
-                return Err(
-                    "data-at-rest policy inputs require the production profile".into(),
-                );
+                return Err("data-at-rest policy inputs require the production profile".into());
             }
             Ok(())
         }
@@ -251,12 +244,9 @@ fn validate_data_at_rest_profile(
             let policy = read_data_at_rest_policy(&path)?;
             let backup_roots: Vec<PathBuf> =
                 serde_json::from_str(&required_env("CCOS_ENTERPRISE_BACKUP_ROOTS_JSON")?)
-                    .map_err(|_| {
-                        "CCOS_ENTERPRISE_BACKUP_ROOTS_JSON must be a JSON path array"
-                    })?;
-            let purge_floor_receipt = PathBuf::from(required_env(
-                "CCOS_ENTERPRISE_PURGE_FLOOR_RECEIPT",
-            )?);
+                    .map_err(|_| "CCOS_ENTERPRISE_BACKUP_ROOTS_JSON must be a JSON path array")?;
+            let purge_floor_receipt =
+                PathBuf::from(required_env("CCOS_ENTERPRISE_PURGE_FLOOR_RECEIPT")?);
             let backup_receipts: Vec<PathBuf> = serde_json::from_str(&required_env(
                 "CCOS_ENTERPRISE_BACKUP_RECONCILIATION_RECEIPTS_JSON",
             )?)
@@ -279,14 +269,13 @@ fn validate_data_at_rest_profile(
     }
 }
 
-fn data_at_rest_profile_from(
-    value: Result<String, std::env::VarError>,
-) -> Result<String, String> {
+fn data_at_rest_profile_from(value: Result<String, std::env::VarError>) -> Result<String, String> {
     match value {
         Ok(value) => Ok(value),
         Err(std::env::VarError::NotPresent) => Ok("development".into()),
-        Err(std::env::VarError::NotUnicode(_)) =>
-            Err("CCOS_ENTERPRISE_DATA_AT_REST_PROFILE is not valid UTF-8".into()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("CCOS_ENTERPRISE_DATA_AT_REST_PROFILE is not valid UTF-8".into())
+        }
     }
 }
 
@@ -334,10 +323,7 @@ fn reject_symlink_components(path: &Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn read_bounded_json<T: for<'de> Deserialize<'de>>(
-    path: &Path,
-    label: &str,
-) -> Result<T, String> {
+fn read_bounded_json<T: for<'de> Deserialize<'de>>(path: &Path, label: &str) -> Result<T, String> {
     reject_symlink_components(path, label)?;
     let metadata = fs::symlink_metadata(path).map_err(|_| format!("{label} is unavailable"))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -383,11 +369,16 @@ fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn ensure_external_receipt(path: &Path, roots: &std::collections::BTreeSet<PathBuf>) -> Result<(), String> {
+fn ensure_external_receipt(
+    path: &Path,
+    roots: &std::collections::BTreeSet<PathBuf>,
+) -> Result<(), String> {
     let canonical = fs::canonicalize(path)
         .map_err(|_| "data-at-rest receipt cannot be canonicalized".to_string())?;
     if roots.iter().any(|root| canonical.starts_with(root)) {
-        return Err("data-at-rest receipts must be retained outside declared lifecycle roots".into());
+        return Err(
+            "data-at-rest receipts must be retained outside declared lifecycle roots".into(),
+        );
     }
     Ok(())
 }
@@ -511,9 +502,11 @@ fn validate_production_data_at_rest_policy(
         if !roots.insert(root) {
             return Err("durable roots must not alias each other".into());
         }
-        canonical_backups.push((fs::canonicalize(configured).map_err(|_| {
-            "backup root cannot be canonicalized".to_string()
-        })?, backup));
+        canonical_backups.push((
+            fs::canonicalize(configured)
+                .map_err(|_| "backup root cannot be canonicalized".to_string())?,
+            backup,
+        ));
     }
 
     let floor_receipt: PurgeFloorReceipt =
@@ -543,8 +536,7 @@ fn validate_production_data_at_rest_policy(
     if backup_receipt_paths.len() != canonical_backups.len() {
         return Err("every backup root requires one reconciliation receipt".into());
     }
-    for ((backup_root, backup), receipt_path) in
-        canonical_backups.iter().zip(backup_receipt_paths)
+    for ((backup_root, backup), receipt_path) in canonical_backups.iter().zip(backup_receipt_paths)
     {
         let receipt: BackupReconciliationReceipt =
             read_bounded_json(receipt_path, "backup reconciliation receipt")?;

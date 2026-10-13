@@ -716,14 +716,9 @@ path "auth/token/renew-self" { capabilities = ["update"] }
             .trim_end_matches('/')
             .to_owned();
         let output = std::path::PathBuf::from(qualification_value("CCOS_VAULT_OUTAGE_RESULT"));
-        let unavailable_credential =
-            String::from_utf8(vec![b'x'; 32]).expect("ASCII credential");
+        let unavailable_credential = String::from_utf8(vec![b'x'; 32]).expect("ASCII credential");
         let cipher = qualification_cipher(
-            qualification_kms(
-                &address,
-                unavailable_credential,
-                &[("acme-v2", 2)],
-            ),
+            qualification_kms(&address, unavailable_credential, &[("acme-v2", 2)]),
             "acme-v2",
             &["acme-v2"],
         );

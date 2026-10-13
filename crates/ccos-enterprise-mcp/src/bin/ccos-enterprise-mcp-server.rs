@@ -515,8 +515,10 @@ fn validate_production_data_at_rest_policy(
         ));
     }
 
-    let floor_receipt: PurgeFloorReceipt =
-        read_bounded_json(restore_evidence.purge_floor_receipt_path, "purge-floor receipt")?;
+    let floor_receipt: PurgeFloorReceipt = read_bounded_json(
+        restore_evidence.purge_floor_receipt_path,
+        "purge-floor receipt",
+    )?;
     ensure_external_receipt(restore_evidence.purge_floor_receipt_path, &roots)?;
     if floor_receipt.schema_version != 1
         || floor_receipt.tenant != restore_evidence.tenant

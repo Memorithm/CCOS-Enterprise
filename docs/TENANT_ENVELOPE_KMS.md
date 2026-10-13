@@ -116,8 +116,35 @@ recovery, and reads after simulated old-key retirement. Actual child processes
 are killed during rotation (intent, partial artifact set, completion) and at all
 five encrypted purge boundaries. The authenticated server test exercises distinct
 permission denial, rotation, Succeeded settlement, context after restart, KMS
-outage and missing-encryption configuration. Production Vault/HSM/IAM integration
-is **not** established by the local protocol/key-service fixtures.
+outage and missing-encryption configuration.
+
+The separate `Vault integration qualification` workflow downloads the exact
+Vault 2.1.2 Linux binary with its pinned SHA-256, starts a real single-node Vault
+on an isolated loopback address, and runs ignored tests that cannot silently pass
+in the ordinary fixture suite. It provisions a derived AES-256-GCM Transit key
+and a least-privilege orphan service token, then verifies:
+
+- the service can encrypt/decrypt only its named key and cannot rotate it;
+- a renewable token can renew itself while a non-renewable two-second token
+  expires and makes storage fail closed;
+- Transit rotation reaches version 2, a version-1 backup remains restorable
+  before retirement, and rewrapping preserves restore;
+- `min_decryption_version=2` refuses the old backup while the rewrapped backup
+  remains restorable; and
+- stopping that real Vault process makes a new envelope write fail closed.
+
+The run emits bounded secret-free JSON, its SHA-256, and a run-local Ed25519
+signature/public key as a retained artifact. The verifier rejects missing/false
+checks and secret-like fields. The signature proves only that the uploaded files
+were mutually consistent inside that run; the GitHub run identity and logs are
+the authority.
+
+This is a reproducible **isolated real-Vault integration qualification**, not a
+production certification. It uses Vault dev mode and loopback HTTP so actual
+Transit ACL, lease, rotation and retirement semantics can be tested without
+weakening the production connector's HTTPS-only constructor. It does not qualify
+TLS termination, external IAM, HSM/seal, HA/storage backends, FIPS mode,
+organizational key ceremonies, or a production deployment.
 
 This envelope covers the governed provider root. The
 [production data-at-rest profile](DATA_AT_REST_PRODUCTION.md) separately requires
@@ -135,6 +162,7 @@ semantics or promote observations into canonical truth.
 cargo test -p ccos-enterprise-envelope --locked
 cargo test -p ccos-enterprise-octasoma --lib generation::encrypted_artifacts --locked
 cargo test -p ccos-enterprise-mcp --bin ccos-enterprise-mcp-server kms_server_tests --locked
+python3 scripts/test-vault-qualification.py
 ```
 
 ## TLS dependency and redistribution

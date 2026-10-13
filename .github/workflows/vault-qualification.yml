@@ -1,0 +1,169 @@
+name: Vault integration qualification
+
+on:
+  pull_request:
+    paths:
+      - 'crates/ccos-enterprise-envelope/**'
+      - 'scripts/verify-vault-qualification.py'
+      - 'scripts/test-vault-qualification.py'
+      - 'docs/TENANT_ENVELOPE_KMS.md'
+      - '.github/workflows/vault-qualification.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/ccos-enterprise-envelope/**'
+      - 'scripts/verify-vault-qualification.py'
+      - 'scripts/test-vault-qualification.py'
+      - 'docs/TENANT_ENVELOPE_KMS.md'
+      - '.github/workflows/vault-qualification.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  schedule:
+    - cron: '30 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vault-qualification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VAULT_VERSION: 2.1.2
+  VAULT_ZIP_SHA256: 873bbdac35ca4b0c3e2886c41991ca1272fc452826208d5499f32d12cd2e76e1
+  VAULT_ADDR: http://127.0.0.1:18200
+  QUALIFICATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  real-vault:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          ref: ${{ env.QUALIFICATION_SHA }}
+      - name: Install exact Rust toolchain
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal --no-self-update
+          rustup override set 1.89.0
+          rustc --version --verbose
+          cargo --version
+          cargo metadata --locked --format-version 1 >/dev/null
+      - name: Download and verify the pinned Vault binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/vault_${VAULT_VERSION}_linux_amd64.zip"
+          curl --fail --silent --show-error --location \
+            --output "$archive" \
+            "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
+          printf '%s  %s\n' "$VAULT_ZIP_SHA256" "$archive" | sha256sum --check -
+          install_dir="$RUNNER_TEMP/vault-bin"
+          mkdir -p "$install_dir"
+          unzip -q "$archive" -d "$install_dir"
+          chmod 0755 "$install_dir/vault"
+          "$install_dir/vault" version | tee "$RUNNER_TEMP/vault-version.txt"
+          echo "$install_dir" >> "$GITHUB_PATH"
+      - name: Start isolated real Vault
+        shell: bash
+        run: |
+          set -euo pipefail
+          root_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$root_token"
+          printf 'VAULT_TOKEN=%s\n' "$root_token" >> "$GITHUB_ENV"
+          vault server -dev \
+            -dev-root-token-id="$root_token" \
+            -dev-listen-address="127.0.0.1:18200" \
+            >"$RUNNER_TEMP/vault-server.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/vault-server.pid"
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent "$VAULT_ADDR/v1/sys/health" > /dev/null; then
+              exit 0
+            fi
+            sleep 0.25
+          done
+          echo "::error::ephemeral Vault did not become healthy"
+          exit 1
+      - name: Exercise ACL, lease, rotation, restore and retirement
+        shell: bash
+        env:
+          CCOS_VAULT_QUALIFICATION: '1'
+          CCOS_VAULT_VERSION: ${{ env.VAULT_VERSION }}
+          CCOS_VAULT_ACTIVE_RESULT: ${{ runner.temp }}/vault-active.json
+        run: |
+          set -euo pipefail
+          cargo test -p ccos-enterprise-envelope \
+            vault::tests::live_vault_active_qualification \
+            --locked -- --ignored --exact --nocapture
+      - name: Stop Vault and prove outage refusal
+        if: success()
+        shell: bash
+        env:
+          CCOS_VAULT_QUALIFICATION: '1'
+          CCOS_VAULT_OUTAGE_RESULT: ${{ runner.temp }}/vault-outage.json
+        run: |
+          set -euo pipefail
+          pid="$(cat "$RUNNER_TEMP/vault-server.pid")"
+          kill "$pid"
+          wait "$pid" || true
+          ! curl --fail --silent "$VAULT_ADDR/v1/sys/health" > /dev/null
+          cargo test -p ccos-enterprise-envelope \
+            vault::tests::live_vault_outage_fails_closed \
+            --locked -- --ignored --exact --nocapture
+      - name: Validate and sign secret-free evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/vault-qualification.json"
+          python3 scripts/verify-vault-qualification.py \
+            --active "$RUNNER_TEMP/vault-active.json" \
+            --outage "$RUNNER_TEMP/vault-outage.json" \
+            --output "$evidence" \
+            --vault-version "$VAULT_VERSION" \
+            --vault-binary-sha256 "$VAULT_ZIP_SHA256" \
+            --commit-sha "$QUALIFICATION_SHA" \
+            --run-id "$GITHUB_RUN_ID"
+          sha256sum "$evidence" > "$RUNNER_TEMP/vault-qualification.sha256"
+          openssl genpkey -algorithm ED25519 -out "$RUNNER_TEMP/evidence-private.pem"
+          openssl pkey -in "$RUNNER_TEMP/evidence-private.pem" \
+            -pubout -out "$RUNNER_TEMP/vault-qualification.pub.pem"
+          openssl pkeyutl -sign -rawin \
+            -inkey "$RUNNER_TEMP/evidence-private.pem" \
+            -in "$evidence" \
+            -out "$RUNNER_TEMP/vault-qualification.sig"
+          openssl pkeyutl -verify -rawin \
+            -pubin -inkey "$RUNNER_TEMP/vault-qualification.pub.pem" \
+            -in "$evidence" \
+            -sigfile "$RUNNER_TEMP/vault-qualification.sig"
+          rm -f "$RUNNER_TEMP/evidence-private.pem"
+      - name: Upload qualification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: vault-qualification-${{ env.QUALIFICATION_SHA }}
+          path: |
+            ${{ runner.temp }}/vault-active.json
+            ${{ runner.temp }}/vault-outage.json
+            ${{ runner.temp }}/vault-qualification.json
+            ${{ runner.temp }}/vault-qualification.sha256
+            ${{ runner.temp }}/vault-qualification.pub.pem
+            ${{ runner.temp }}/vault-qualification.sig
+            ${{ runner.temp }}/vault-version.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop Vault after a failed step
+        if: always()
+        shell: bash
+        run: |
+          if test -f "$RUNNER_TEMP/vault-server.pid"; then
+            pid="$(cat "$RUNNER_TEMP/vault-server.pid")"
+            kill "$pid" 2>/dev/null || true
+          fi
+          rm -f "$RUNNER_TEMP/evidence-private.pem"
+      - name: No implicit lockfile repair
+        if: always()
+        run: git diff --exit-code HEAD -- Cargo.lock

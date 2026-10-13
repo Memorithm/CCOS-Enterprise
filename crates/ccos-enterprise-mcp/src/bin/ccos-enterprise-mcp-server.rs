@@ -31,7 +31,7 @@ mod skill_projection;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -59,6 +59,7 @@ use execution_backend::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use skill_projection::{source_sha256, ProjectionState};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -78,6 +79,66 @@ const MAX_HOST_META_BYTES: usize = 256;
 /// snapshot write plus a rename) but not free, so it runs only here, on the
 /// durability boundary, never mid-request.
 const COMPACTION_THRESHOLD_BYTES: u64 = 128 * 1024 * 1024;
+const DATA_AT_REST_POLICY_MAX_BYTES: usize = 64 * 1024;
+const DATA_AT_REST_EVIDENCE_MAX_BYTES: usize = 1024 * 1024;
+const PROVIDER_PURGE_FLOOR_FILE: &str = "provider-purge-floor.json";
+const BACKUP_MANIFEST_FILE: &str = "ccos-backup-manifest.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AtRestProtection {
+    ApplicationEnvelope,
+    OperatorManagedEncryptedVolume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AtRestRoot {
+    root: PathBuf,
+    protection: AtRestProtection,
+    key_scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PurgeFloorReceipt {
+    schema_version: u32,
+    tenant: String,
+    provider_root: PathBuf,
+    provider_generation: u64,
+    floor_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupReconciliationReceipt {
+    schema_version: u32,
+    backup_root: PathBuf,
+    key_policy_ref: String,
+    key_scope: String,
+    provider_generation: u64,
+    manifest_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DataAtRestPolicy {
+    schema_version: u32,
+    key_policy_ref: String,
+    state: AtRestRoot,
+    governed_provider: AtRestRoot,
+    #[serde(default)]
+    evidence_knowledge: Option<AtRestRoot>,
+    #[serde(default)]
+    source_blobs: Option<AtRestRoot>,
+    backup_roots: Vec<AtRestRoot>,
+}
+
+struct RestoreEvidence<'a> {
+    tenant: &'a str,
+    purge_floor_receipt_path: &'a Path,
+    backup_receipt_paths: &'a [PathBuf],
+}
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -131,6 +192,14 @@ impl Config {
             (Some(knowledge), Some(blobs)) if !knowledge.is_empty() && !blobs.is_empty() && governed_memory_root.is_some() => Some((knowledge.into(), blobs.into())),
             _ => return Err("evidence resolution requires both knowledge and source roots and a governed provider".into()),
         };
+        let state_dir = PathBuf::from(required_env("CCOS_ENTERPRISE_STATE_DIR")?);
+        validate_data_at_rest_profile(
+            &tenant,
+            &state_dir,
+            governed_memory_root.as_deref(),
+            evidence_roots.as_ref(),
+            envelope.is_some(),
+        )?;
         Ok(Self {
             audience: required_env("CCOS_ENTERPRISE_AUDIENCE")?,
             issuer_kid: required_env("CCOS_ENTERPRISE_ISSUER_KID")?,
@@ -149,12 +218,391 @@ impl Config {
                 .map(|v| positive_u64("CCOS_ENTERPRISE_CALL_COST_TOKENS", &v))
                 .transpose()?
                 .unwrap_or(1),
-            state_dir: PathBuf::from(required_env("CCOS_ENTERPRISE_STATE_DIR")?),
+            state_dir,
             governed_memory_root,
             envelope,
             evidence_roots,
         })
     }
+}
+
+fn validate_data_at_rest_profile(
+    tenant: &str,
+    state_dir: &Path,
+    governed_memory_root: Option<&Path>,
+    evidence_roots: Option<&(PathBuf, PathBuf)>,
+    envelope_configured: bool,
+) -> Result<(), String> {
+    let profile = data_at_rest_profile_from(std::env::var("CCOS_ENTERPRISE_DATA_AT_REST_PROFILE"))?;
+    match profile.as_str() {
+        "development" => {
+            if std::env::var_os("CCOS_ENTERPRISE_DATA_AT_REST_POLICY").is_some()
+                || std::env::var_os("CCOS_ENTERPRISE_BACKUP_ROOTS_JSON").is_some()
+                || std::env::var_os("CCOS_ENTERPRISE_PURGE_FLOOR_RECEIPT").is_some()
+                || std::env::var_os("CCOS_ENTERPRISE_BACKUP_RECONCILIATION_RECEIPTS_JSON").is_some()
+            {
+                return Err("data-at-rest policy inputs require the production profile".into());
+            }
+            Ok(())
+        }
+        "production" => {
+            let path = PathBuf::from(required_env("CCOS_ENTERPRISE_DATA_AT_REST_POLICY")?);
+            let policy = read_data_at_rest_policy(&path)?;
+            let backup_roots: Vec<PathBuf> =
+                serde_json::from_str(&required_env("CCOS_ENTERPRISE_BACKUP_ROOTS_JSON")?)
+                    .map_err(|_| "CCOS_ENTERPRISE_BACKUP_ROOTS_JSON must be a JSON path array")?;
+            let purge_floor_receipt =
+                PathBuf::from(required_env("CCOS_ENTERPRISE_PURGE_FLOOR_RECEIPT")?);
+            let backup_receipts: Vec<PathBuf> = serde_json::from_str(&required_env(
+                "CCOS_ENTERPRISE_BACKUP_RECONCILIATION_RECEIPTS_JSON",
+            )?)
+            .map_err(|_| {
+                "CCOS_ENTERPRISE_BACKUP_RECONCILIATION_RECEIPTS_JSON must be a JSON path array"
+            })?;
+            validate_production_data_at_rest_policy(
+                &policy,
+                state_dir,
+                governed_memory_root,
+                evidence_roots,
+                &backup_roots,
+                RestoreEvidence {
+                    tenant,
+                    purge_floor_receipt_path: &purge_floor_receipt,
+                    backup_receipt_paths: &backup_receipts,
+                },
+                envelope_configured,
+            )
+        }
+        _ => Err("CCOS_ENTERPRISE_DATA_AT_REST_PROFILE must be development or production".into()),
+    }
+}
+
+fn data_at_rest_profile_from(value: Result<String, std::env::VarError>) -> Result<String, String> {
+    match value {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => Ok("development".into()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("CCOS_ENTERPRISE_DATA_AT_REST_PROFILE is not valid UTF-8".into())
+        }
+    }
+}
+
+fn read_data_at_rest_policy(path: &Path) -> Result<DataAtRestPolicy, String> {
+    reject_symlink_components(path, "data-at-rest policy")?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| "data-at-rest policy is unavailable".to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("data-at-rest policy must be a regular non-symlink file".into());
+    }
+    let file =
+        fs::File::open(path).map_err(|_| "data-at-rest policy is unavailable".to_string())?;
+    let mut bytes = Vec::new();
+    file.take((DATA_AT_REST_POLICY_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "data-at-rest policy cannot be read".to_string())?;
+    if bytes.len() > DATA_AT_REST_POLICY_MAX_BYTES {
+        return Err("data-at-rest policy exceeds 64 KiB".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "data-at-rest policy is invalid JSON".into())
+}
+
+fn canonical_trusted_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("{label} must be an absolute path"));
+    }
+    reject_symlink_components(path, label)?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| format!("{label} is unavailable"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(format!("{label} must be a trusted non-symlink directory"));
+    }
+    fs::canonicalize(path).map_err(|_| format!("{label} cannot be canonicalized"))
+}
+
+fn reject_symlink_components(path: &Path, label: &str) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|_| format!("{label} has an unavailable path component"))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("{label} must not contain symlink path components"));
+        }
+    }
+    Ok(())
+}
+
+fn read_bounded_json<T: for<'de> Deserialize<'de>>(path: &Path, label: &str) -> Result<T, String> {
+    reject_symlink_components(path, label)?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| format!("{label} is unavailable"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(format!("{label} must be a regular non-symlink file"));
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|_| format!("{label} is unavailable"))?
+        .take((DATA_AT_REST_EVIDENCE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| format!("{label} cannot be read"))?;
+    if bytes.len() > DATA_AT_REST_EVIDENCE_MAX_BYTES {
+        return Err(format!("{label} exceeds 1 MiB"));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| format!("{label} is invalid JSON"))
+}
+
+fn sha256_regular_file(path: &Path, label: &str) -> Result<String, String> {
+    reject_symlink_components(path, label)?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| format!("{label} is unavailable"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(format!("{label} must be a regular non-symlink file"));
+    }
+    if metadata.len() > DATA_AT_REST_EVIDENCE_MAX_BYTES as u64 {
+        return Err(format!("{label} exceeds 1 MiB"));
+    }
+    let mut file = fs::File::open(path).map_err(|_| format!("{label} is unavailable"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| format!("{label} cannot be read"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(unix)]
+type RootIdentity = (u64, u64);
+#[cfg(not(unix))]
+type RootIdentity = PathBuf;
+
+#[cfg(unix)]
+fn root_identity(path: &Path) -> Result<RootIdentity, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata =
+        fs::metadata(path).map_err(|_| "durable root identity cannot be inspected".to_string())?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn root_identity(path: &Path) -> Result<RootIdentity, String> {
+    fs::canonicalize(path).map_err(|_| "durable root identity cannot be inspected".to_string())
+}
+
+fn insert_distinct_root(
+    roots: &mut std::collections::BTreeSet<PathBuf>,
+    identities: &mut std::collections::BTreeSet<RootIdentity>,
+    root: PathBuf,
+) -> Result<(), String> {
+    let identity = root_identity(&root)?;
+    if !roots.insert(root) || !identities.insert(identity) {
+        return Err(
+            "durable roots must not alias each other by path or filesystem identity".into(),
+        );
+    }
+    Ok(())
+}
+
+fn ensure_external_receipt(
+    path: &Path,
+    roots: &std::collections::BTreeSet<PathBuf>,
+) -> Result<(), String> {
+    let canonical = fs::canonicalize(path)
+        .map_err(|_| "data-at-rest receipt cannot be canonicalized".to_string())?;
+    if roots.iter().any(|root| canonical.starts_with(root)) {
+        return Err(
+            "data-at-rest receipts must be retained outside declared lifecycle roots".into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_policy_root(
+    configured: &Path,
+    declared: &AtRestRoot,
+    expected_protection: AtRestProtection,
+    label: &str,
+) -> Result<PathBuf, String> {
+    if declared.protection != expected_protection {
+        return Err(format!("{label} has the wrong at-rest protection class"));
+    }
+    if declared.key_scope.is_empty()
+        || declared.key_scope.len() > 256
+        || declared.key_scope.chars().any(char::is_whitespace)
+    {
+        return Err(format!(
+            "{label} key_scope must be a bounded opaque reference"
+        ));
+    }
+    let configured = canonical_trusted_directory(configured, label)?;
+    let declared_root = canonical_trusted_directory(&declared.root, label)?;
+    if configured != declared_root {
+        return Err(format!("{label} does not match the configured root"));
+    }
+    Ok(configured)
+}
+
+fn validate_production_data_at_rest_policy(
+    policy: &DataAtRestPolicy,
+    state_dir: &Path,
+    governed_memory_root: Option<&Path>,
+    evidence_roots: Option<&(PathBuf, PathBuf)>,
+    configured_backup_roots: &[PathBuf],
+    restore_evidence: RestoreEvidence<'_>,
+    envelope_configured: bool,
+) -> Result<(), String> {
+    if policy.schema_version != 1 {
+        return Err("unsupported data-at-rest policy schema".into());
+    }
+    if policy.key_policy_ref.is_empty()
+        || policy.key_policy_ref.len() > 512
+        || policy.key_policy_ref.chars().any(char::is_whitespace)
+    {
+        return Err("key_policy_ref must be a bounded opaque reference".into());
+    }
+    if !envelope_configured {
+        return Err("production data-at-rest profile requires the provider envelope".into());
+    }
+    let provider = governed_memory_root
+        .ok_or("production data-at-rest profile requires a governed provider root")?;
+
+    let mut roots = std::collections::BTreeSet::new();
+    let mut identities = std::collections::BTreeSet::new();
+    let state = validate_policy_root(
+        state_dir,
+        &policy.state,
+        AtRestProtection::OperatorManagedEncryptedVolume,
+        "state root",
+    )?;
+    insert_distinct_root(&mut roots, &mut identities, state)?;
+    let provider = validate_policy_root(
+        provider,
+        &policy.governed_provider,
+        AtRestProtection::ApplicationEnvelope,
+        "governed provider root",
+    )?;
+    insert_distinct_root(&mut roots, &mut identities, provider.clone())?;
+
+    match (
+        evidence_roots,
+        &policy.evidence_knowledge,
+        &policy.source_blobs,
+    ) {
+        (None, None, None) => {}
+        (Some((knowledge, blobs)), Some(declared_knowledge), Some(declared_blobs)) => {
+            for (configured, declared, label) in [
+                (
+                    knowledge.as_path(),
+                    declared_knowledge,
+                    "evidence knowledge root",
+                ),
+                (blobs.as_path(), declared_blobs, "source blobs root"),
+            ] {
+                let root = validate_policy_root(
+                    configured,
+                    declared,
+                    AtRestProtection::OperatorManagedEncryptedVolume,
+                    label,
+                )?;
+                insert_distinct_root(&mut roots, &mut identities, root)?;
+            }
+        }
+        _ => {
+            return Err(
+                "production evidence roots and their at-rest declarations must be complete".into(),
+            );
+        }
+    }
+
+    if configured_backup_roots.is_empty() || policy.backup_roots.is_empty() {
+        return Err("production data-at-rest policy requires at least one backup root".into());
+    }
+    if configured_backup_roots.len() != policy.backup_roots.len() {
+        return Err("configured backup roots do not match the policy inventory".into());
+    }
+    let mut canonical_backups = Vec::new();
+    for (configured, backup) in configured_backup_roots.iter().zip(&policy.backup_roots) {
+        let root = validate_policy_root(
+            configured,
+            backup,
+            AtRestProtection::OperatorManagedEncryptedVolume,
+            "backup root",
+        )?;
+        insert_distinct_root(&mut roots, &mut identities, root)?;
+        canonical_backups.push((
+            fs::canonicalize(configured)
+                .map_err(|_| "backup root cannot be canonicalized".to_string())?,
+            backup,
+        ));
+    }
+
+    let floor_receipt: PurgeFloorReceipt = read_bounded_json(
+        restore_evidence.purge_floor_receipt_path,
+        "purge-floor receipt",
+    )?;
+    ensure_external_receipt(restore_evidence.purge_floor_receipt_path, &roots)?;
+    if floor_receipt.schema_version != 1
+        || floor_receipt.tenant != restore_evidence.tenant
+        || !valid_sha256(&floor_receipt.floor_sha256)
+    {
+        return Err("purge-floor receipt is invalid".into());
+    }
+    let receipt_provider = canonical_trusted_directory(
+        &floor_receipt.provider_root,
+        "purge-floor receipt provider root",
+    )?;
+    if receipt_provider != provider {
+        return Err("purge-floor receipt is not bound to the configured provider".into());
+    }
+    let floor_hash = sha256_regular_file(
+        &provider.join(PROVIDER_PURGE_FLOOR_FILE),
+        "live provider purge floor",
+    )?;
+    if !floor_hash.eq_ignore_ascii_case(&floor_receipt.floor_sha256) {
+        return Err("live provider purge floor does not match retained external evidence".into());
+    }
+
+    if restore_evidence.backup_receipt_paths.len() != canonical_backups.len() {
+        return Err("every backup root requires one reconciliation receipt".into());
+    }
+    for ((backup_root, backup), receipt_path) in canonical_backups
+        .iter()
+        .zip(restore_evidence.backup_receipt_paths)
+    {
+        let receipt: BackupReconciliationReceipt =
+            read_bounded_json(receipt_path, "backup reconciliation receipt")?;
+        ensure_external_receipt(receipt_path, &roots)?;
+        if receipt.schema_version != 1
+            || receipt.key_policy_ref != policy.key_policy_ref
+            || receipt.key_scope != backup.key_scope
+            || receipt.provider_generation != floor_receipt.provider_generation
+            || !valid_sha256(&receipt.manifest_sha256)
+        {
+            return Err("backup reconciliation receipt is not bound to the current key policy and provider generation".into());
+        }
+        let receipt_root = canonical_trusted_directory(
+            &receipt.backup_root,
+            "backup reconciliation receipt root",
+        )?;
+        if &receipt_root != backup_root {
+            return Err("backup reconciliation receipt is not bound to its backup root".into());
+        }
+        let manifest_hash = sha256_regular_file(
+            &backup_root.join(BACKUP_MANIFEST_FILE),
+            "backup reconciliation manifest",
+        )?;
+        if !manifest_hash.eq_ignore_ascii_case(&receipt.manifest_sha256) {
+            return Err("backup reconciliation manifest does not match its receipt".into());
+        }
+    }
+    Ok(())
 }
 
 fn required_env(name: &str) -> Result<String, String> {
@@ -2004,6 +2452,131 @@ mod tests {
     use ccos_enterprise_auth::{issue_identity_token, IdentityClaims, IDENTITY_TOKEN_VERSION};
     use ed25519_dalek::SigningKey;
 
+    fn at_rest_root(root: PathBuf, protection: AtRestProtection, key_scope: &str) -> AtRestRoot {
+        AtRestRoot {
+            root,
+            protection,
+            key_scope: key_scope.into(),
+        }
+    }
+
+    struct AtRestFixture {
+        base: PathBuf,
+        provider: PathBuf,
+        evidence: (PathBuf, PathBuf),
+        policy: DataAtRestPolicy,
+        floor_receipt: PathBuf,
+        backup_receipts: Vec<PathBuf>,
+    }
+
+    impl AtRestFixture {
+        fn restore_evidence(&self) -> RestoreEvidence<'_> {
+            RestoreEvidence {
+                tenant: "acme",
+                purge_floor_receipt_path: &self.floor_receipt,
+                backup_receipt_paths: &self.backup_receipts,
+            }
+        }
+    }
+
+    fn production_at_rest_fixture(label: &str) -> AtRestFixture {
+        let base = std::env::temp_dir().join(format!(
+            "ccos-enterprise-at-rest-{label}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let state = base.join("state");
+        let provider = base.join("provider");
+        let knowledge = base.join("knowledge");
+        let sources = base.join("sources");
+        let backups = base.join("backups");
+        for root in [&state, &provider, &knowledge, &sources, &backups] {
+            fs::create_dir_all(root).unwrap();
+        }
+        fs::write(
+            provider.join(PROVIDER_PURGE_FLOOR_FILE),
+            br#"{"version":1,"tenant":"acme","generation":7,"purged":["asset-1"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            backups.join(BACKUP_MANIFEST_FILE),
+            br#"{"schema_version":1,"provider_generation":7,"key_scope":"backups/acme"}"#,
+        )
+        .unwrap();
+        let floor_receipt = base.join("retained-purge-floor-receipt.json");
+        fs::write(
+            &floor_receipt,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "tenant": "acme",
+                "provider_root": provider.clone(),
+                "provider_generation": 7,
+                "floor_sha256": sha256_regular_file(
+                    &provider.join(PROVIDER_PURGE_FLOOR_FILE),
+                    "test purge floor",
+                )
+                .unwrap(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let backup_receipt = base.join("backup-reconciliation-receipt.json");
+        fs::write(
+            &backup_receipt,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "backup_root": backups.clone(),
+                "key_policy_ref": "kms-policy:tenant/acme/v2",
+                "key_scope": "backups/acme",
+                "provider_generation": 7,
+                "manifest_sha256": sha256_regular_file(
+                    &backups.join(BACKUP_MANIFEST_FILE),
+                    "test backup manifest",
+                )
+                .unwrap(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let policy = DataAtRestPolicy {
+            schema_version: 1,
+            key_policy_ref: "kms-policy:tenant/acme/v2".into(),
+            state: at_rest_root(
+                state.clone(),
+                AtRestProtection::OperatorManagedEncryptedVolume,
+                "state/acme",
+            ),
+            governed_provider: at_rest_root(
+                provider.clone(),
+                AtRestProtection::ApplicationEnvelope,
+                "provider/acme-v2",
+            ),
+            evidence_knowledge: Some(at_rest_root(
+                knowledge.clone(),
+                AtRestProtection::OperatorManagedEncryptedVolume,
+                "evidence/acme",
+            )),
+            source_blobs: Some(at_rest_root(
+                sources.clone(),
+                AtRestProtection::OperatorManagedEncryptedVolume,
+                "sources/acme",
+            )),
+            backup_roots: vec![at_rest_root(
+                backups.clone(),
+                AtRestProtection::OperatorManagedEncryptedVolume,
+                "backups/acme",
+            )],
+        };
+        AtRestFixture {
+            base,
+            provider,
+            evidence: (knowledge, sources),
+            policy,
+            floor_receipt,
+            backup_receipts: vec![backup_receipt],
+        }
+    }
+
     pub(super) fn test_config(label: &str) -> Config {
         let seed = [7u8; 32];
         let signing = SigningKey::from_bytes(&seed);
@@ -2035,6 +2608,154 @@ mod tests {
             envelope: None,
             evidence_roots: None,
         }
+    }
+
+    #[test]
+    fn production_at_rest_policy_covers_every_durable_class() {
+        let fixture = production_at_rest_fixture("complete");
+        validate_production_data_at_rest_policy(
+            &fixture.policy,
+            &fixture.base.join("state"),
+            Some(&fixture.provider),
+            Some(&fixture.evidence),
+            &[fixture.base.join("backups")],
+            fixture.restore_evidence(),
+            true,
+        )
+        .unwrap();
+        cleanup(&fixture.base);
+    }
+
+    #[test]
+    fn production_at_rest_policy_rejects_missing_backup_encryption() {
+        let mut fixture = production_at_rest_fixture("backup");
+        fixture.policy.backup_roots.clear();
+        let error = validate_production_data_at_rest_policy(
+            &fixture.policy,
+            &fixture.base.join("state"),
+            Some(&fixture.provider),
+            Some(&fixture.evidence),
+            &[],
+            fixture.restore_evidence(),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("backup root"));
+        cleanup(&fixture.base);
+    }
+
+    #[test]
+    fn production_at_rest_policy_rejects_plaintext_state() {
+        let mut fixture = production_at_rest_fixture("state");
+        fixture.policy.state.protection = AtRestProtection::ApplicationEnvelope;
+        let error = validate_production_data_at_rest_policy(
+            &fixture.policy,
+            &fixture.base.join("state"),
+            Some(&fixture.provider),
+            Some(&fixture.evidence),
+            &[fixture.base.join("backups")],
+            fixture.restore_evidence(),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("state root"));
+        cleanup(&fixture.base);
+    }
+
+    #[test]
+    fn production_at_rest_policy_rejects_aliasing_lifecycle_roots() {
+        let mut fixture = production_at_rest_fixture("alias");
+        fixture.policy.backup_roots[0].root = fixture.base.join("state");
+        let error = validate_production_data_at_rest_policy(
+            &fixture.policy,
+            &fixture.base.join("state"),
+            Some(&fixture.provider),
+            Some(&fixture.evidence),
+            &[fixture.base.join("state")],
+            fixture.restore_evidence(),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("must not alias"));
+        cleanup(&fixture.base);
+    }
+
+    #[test]
+    fn production_at_rest_policy_rejects_rolled_back_purge_floor() {
+        let fixture = production_at_rest_fixture("stale-floor");
+        fs::write(
+            fixture.provider.join(PROVIDER_PURGE_FLOOR_FILE),
+            br#"{"version":1,"tenant":"acme","generation":6,"purged":[]}"#,
+        )
+        .unwrap();
+        let error = validate_production_data_at_rest_policy(
+            &fixture.policy,
+            &fixture.base.join("state"),
+            Some(&fixture.provider),
+            Some(&fixture.evidence),
+            &[fixture.base.join("backups")],
+            fixture.restore_evidence(),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("retained external evidence"));
+        cleanup(&fixture.base);
+    }
+
+    #[test]
+    fn production_at_rest_policy_rejects_unreconciled_backup() {
+        let fixture = production_at_rest_fixture("stale-backup");
+        fs::write(
+            fixture.base.join("backups").join(BACKUP_MANIFEST_FILE),
+            br#"{"schema_version":1,"provider_generation":6,"key_scope":"backups/acme"}"#,
+        )
+        .unwrap();
+        let error = validate_production_data_at_rest_policy(
+            &fixture.policy,
+            &fixture.base.join("state"),
+            Some(&fixture.provider),
+            Some(&fixture.evidence),
+            &[fixture.base.join("backups")],
+            fixture.restore_evidence(),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("manifest does not match"));
+        cleanup(&fixture.base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_at_rest_policy_rejects_symlinked_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = production_at_rest_fixture("symlink-ancestor");
+        let alias = fixture.base.join("state-alias");
+        symlink(fixture.base.join("state"), &alias).unwrap();
+        let error = validate_production_data_at_rest_policy(
+            &fixture.policy,
+            &alias,
+            Some(&fixture.provider),
+            Some(&fixture.evidence),
+            &[fixture.base.join("backups")],
+            fixture.restore_evidence(),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("symlink path components"));
+        cleanup(&fixture.base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_at_rest_profile_rejects_non_utf8_encoding() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let error = data_at_rest_profile_from(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from_vec(vec![0xff]),
+        )))
+        .unwrap_err();
+        assert!(error.contains("not valid UTF-8"));
     }
 
     pub(super) fn call(

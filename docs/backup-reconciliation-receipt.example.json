@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "backup_root": "/srv/ccos-backup/acme",
+  "key_policy_ref": "kms-policy:tenant/acme/2026-10",
+  "key_scope": "backup/acme",
+  "provider_generation": 42,
+  "manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}

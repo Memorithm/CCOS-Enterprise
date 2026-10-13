@@ -128,7 +128,7 @@ jobs:
             --vault-binary-sha256 "$VAULT_ZIP_SHA256" \
             --commit-sha "$QUALIFICATION_SHA" \
             --run-id "$GITHUB_RUN_ID"
-          sha256sum "$evidence" > "$RUNNER_TEMP/vault-qualification.sha256"
+          (cd "$RUNNER_TEMP" && sha256sum vault-qualification.json > vault-qualification.sha256)
           openssl genpkey -algorithm ED25519 -out "$RUNNER_TEMP/evidence-private.pem"
           openssl pkey -in "$RUNNER_TEMP/evidence-private.pem" \
             -pubout -out "$RUNNER_TEMP/vault-qualification.pub.pem"

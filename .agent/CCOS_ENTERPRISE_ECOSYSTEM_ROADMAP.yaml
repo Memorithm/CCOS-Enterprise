@@ -1,7 +1,7 @@
 schema_version: 1
 kind: ccos_enterprise_ecosystem_agent_roadmap
 status: active
-last_updated: "2026-09-23"
+last_updated: "2026-10-13"
 repository: Memorithm/CCOS-Enterprise
 intended_consumer: autonomous_coding_agent
 merge_policy: never_merge_this_file_to_default_branch_unless_user_explicitly_requests
@@ -804,3 +804,37 @@ ax_governed_task_evidence_program:
     - TaskIdentity_is_context_not_automatic_trust
     - similarity_does_not_create_authority
     - telemetry_is_not_knowledge_without_governed_admission
+
+
+audit_global_remediation_2026_10_13:
+  finding: MEM-07
+  status: merged_integrated_validated
+  default_branch: main
+  pull_request: 193
+  candidate_head: 26a154c33815245b5e28883f8466c09b9abf2040
+  merge_sha: 50a3e66bcfe9734f35cea2d44ba985b514c9f147
+  contract:
+    - production_profile_fails_closed_without_exact_durable_data_inventory
+    - provider_requires_application_envelope
+    - state_evidence_sources_and_backups_require_declared_encrypted_storage
+    - distinct_roots_are_checked_by_path_and_filesystem_identity
+    - restore_binds_external_purge_floor_receipt_to_live_generation_and_hash
+    - key_retirement_binds_each_backup_to_a_reconciliation_manifest_receipt
+  candidate_validation_runs:
+    - 38359045282
+    - 38359045380
+    - 38359045508
+    - 38359045288
+    - 38359045281
+    - 38359045469
+  integrated_validation_runs:
+    - 38359990428
+    - 38359990438
+    - 38359990426
+    - 38359990486
+    - 38359990453
+    - 38359990784
+  limits:
+    - operator_managed_encrypted_volume_is_attestation_not_cryptographic_proof
+    - no_FIPS_or_production_Vault_HSM_IAM_qualification_claim
+    - copies_outside_declared_roots_remain_out_of_scope

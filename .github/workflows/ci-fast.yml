@@ -81,7 +81,7 @@ jobs:
       # Sweep Enterprise features, not unrelated optional features of Core.
       # Core remains a dependency and is also tested in the default workspace suite.
       - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --locked
-      - run: cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --locked -- -D warnings
+      - run: cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --all-targets --locked -- -D warnings
       - name: Enterprise all-features release tests
         shell: bash
         run: |

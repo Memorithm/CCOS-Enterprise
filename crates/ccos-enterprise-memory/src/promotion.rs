@@ -72,6 +72,11 @@ impl std::error::Error for MemoryPromotionError {}
 /// The order is fail-closed and deliberate: existence, lineage validity state,
 /// semantic stratum, then trust evidence. No numeric confidence score is
 /// invented and no downstream lifecycle transition is performed here.
+///
+/// **Caller contract (audit 2026-10-27):** `trust` is *not* bound to `asset_id`
+/// by type or content; this function cannot detect trust metadata belonging to
+/// a different asset. Callers must look `trust` up by the same `asset_id`.
+/// Binding the two is a known, deferred API gap.
 pub fn evaluate_memory_promotion(
     graph: &MemoryLineageGraph,
     asset_id: &MemoryAssetId,

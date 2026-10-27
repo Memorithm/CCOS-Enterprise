@@ -54,7 +54,7 @@ jobs:
 
   rust-stdio-e2e:
     name: Real Rust stdio end-to-end
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, memorithm-ci, dell-general, ci-light, trusted-main]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

@@ -158,5 +158,6 @@ never silently drift apart.
 **Bottom line:** measure first. The Gram matrix was already incremental — distilling that (rather than
 linking SciRust's heavyweight, rayon-parallel SVD) bought linear ingestion *and* kept the determinism
 moat intact. #14b lands the causal weighting in the live engine on the moat-preserving side of the
-incremental-vs-rebuildable tension, and the causal-belief gate is what actually beats RAG on
-contradictions.
+incremental-vs-rebuildable tension, and the causal-belief gate ranks the authoritative document first on this 2-query
+contradiction probe (2/2 vs blind TF-IDF RAG 1/2). This is not evidence against strong
+RAG baselines; see `docs/RAG_COMPARATIVE_CAMPAIGN.md` (not yet run).

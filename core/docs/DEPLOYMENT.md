@@ -250,6 +250,14 @@ causal graph, Q-Page, and recall are **never** gated):
 
 `ccos license` enumerates the active set; `ccos doctor` reports the compiled verifier scheme(s).
 
+## 4d. Injection guard calibration (not yet wired)
+
+`ccos::conformal::ConformalGuard` (calibrated via `InjectionClassifier::calibrate_guard`) gives a
+distribution-free bound on the benign false-alarm rate, but **no ingest, CLI or MCP path uses it
+yet**; the injection check still takes an explicit probability cut. Calibration requirements and the
+`alpha >= 1/(n+1)` minimum are documented in the `conformal` module docs. The semantic-recall floor
+in 4c is a separate, wired use of the same technique.
+
 ## 5. Durability (what survives a crash / power cut)
 
 Every checkpoint is **crash- and power-safe**. `util::write_durable` writes a temp file, `fsync`s it,

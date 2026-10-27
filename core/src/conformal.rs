@@ -1,7 +1,7 @@
 //! # Conformal calibration — a distribution-free false-alarm bound
 //!
 //! The injection signal today flags on a hard-coded probability cut (`>= 0.5`), a knob with no
-//! guarantee about how often it wrongly flags benign text. **Split-conformal prediction** replaces
+//! guarantee about how often it wrongly flags benign text. **Split-conformal prediction** is meant to replace
 //! that guess with a threshold calibrated on a corpus of known-benign scores: pick a target
 //! miscoverage `alpha`, and any future *exchangeable* benign input is flagged with probability at
 //! most `alpha` — a **distribution-free, finite-sample** guarantee (no assumption on the score
@@ -12,6 +12,24 @@
 //! guard is bit-reproducible and `replay == live` holds. Distilled from `scirust-core`'s
 //! `conformal_quantile` (oracle only; nothing linked). A stateless cosine ranker cannot even express
 //! such a bound on its own false-alarm rate.
+//!
+//! ## Deployment status (audit 2026-10-27)
+//!
+//! [`ConformalGuard`] is a library primitive. Its only producer is
+//! `InjectionClassifier::calibrate_guard`; **no ingest, CLI or MCP path constructs or
+//! consults a guard yet**, so the live injection check still uses a caller-supplied
+//! probability cut (`is_injection(text, threshold)`). To deploy it:
+//!
+//! 1. Calibrate on a held-out corpus of *benign* texts from the same source/distribution
+//!    the guard will see (the bound only holds under exchangeability with that corpus).
+//! 2. Pick `alpha`; with `n` calibration scores the threshold is finite only when
+//!    `alpha >= 1/(n+1)`. Smaller `alpha` (or NaN) yields an infinite threshold that never
+//!    flags — check [`ConformalGuard::threshold`] / [`ConformalGuard::alarm_bound`]
+//!    before relying on it.
+//! 3. Persist the guard (it is deterministic: same scores + alpha ⇒ same guard) and
+//!    recalibrate whenever the classifier weights or the source distribution change.
+//! 4. The guarantee bounds the *false-alarm* rate on benign inputs only; it says nothing
+//!    about detection rate on injections.
 
 /// The finite-sample split-conformal quantile of `scores` at miscoverage `alpha`: the
 /// `⌈(n+1)(1−alpha)⌉`-th smallest score. A future exchangeable score **above** it is flagged, and by

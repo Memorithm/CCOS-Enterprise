@@ -22,9 +22,13 @@
 /// flag nothing rather than fabricate a bound. Deterministic: a total-order sort (`total_cmp`) and an
 /// integer index, no RNG.
 pub fn conformal_quantile(scores: &[f64], alpha: f64) -> f64 {
+    // NaN scores carry no order information and would otherwise sort last under
+    // `total_cmp` and could become a NaN threshold that never flags. Drop them.
+    let finite: Vec<f64> = scores.iter().copied().filter(|s| !s.is_nan()).collect();
+    let scores = finite.as_slice();
     let n = scores.len();
-    if n == 0 {
-        return f64::INFINITY;
+    if n == 0 || alpha.is_nan() {
+        return f64::INFINITY; // uncalibrated ⇒ fail-open, consistent with too-few-samples
     }
     let alpha = alpha.clamp(0.0, 1.0);
     // 1-based rank of the order statistic; the finite-sample ceil correction is what makes the
@@ -58,11 +62,15 @@ impl ConformalGuard {
     pub fn calibrate(calibration: &[f64], alpha: f64) -> Self {
         Self {
             threshold: conformal_quantile(calibration, alpha),
-            alpha: alpha.clamp(0.0, 1.0),
+            alpha: if alpha.is_nan() {
+                0.0
+            } else {
+                alpha.clamp(0.0, 1.0)
+            },
         }
     }
 
-    /// The calibrated flag threshold (a score `>=` this is flagged).
+    /// The calibrated flag threshold (a score strictly `>` this is flagged).
     pub fn threshold(&self) -> f64 {
         self.threshold
     }
@@ -74,14 +82,70 @@ impl ConformalGuard {
 
     /// Whether `score` crosses the calibrated threshold. Fail-open when uncalibrated (`+∞` ⇒ never
     /// flags).
+    ///
+    /// The comparison is **strict**: for exchangeable scores,
+    /// `P(S_{n+1} > S_(k)) <= 1 - k/(n+1) <= alpha` with `k = ceil((n+1)(1-alpha))`, whereas
+    /// `>=` can exceed `alpha` when scores tie (discrete scores: with all-equal
+    /// benign scores, `>=` flags 100% of benign inputs). `alpha >= 1`
+    /// yields a `-inf` threshold, so every non-NaN score is still flagged.
     pub fn flags(&self, score: f64) -> bool {
-        score >= self.threshold
+        score > self.threshold
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Distinct scores: exhaustive exchangeability check, the test point is equally
+    // likely at each of the 5 ranks.
+    #[test]
+    fn strict_flag_respects_alpha_under_exchangeability() {
+        let alpha = 0.2;
+        let all = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let mut flagged = 0;
+        for i in 0..all.len() {
+            let cal: Vec<f64> = all
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, v)| *v)
+                .collect();
+            if ConformalGuard::calibrate(&cal, alpha).flags(all[i]) {
+                flagged += 1;
+            }
+        }
+        assert!(
+            (flagged as f64) / (all.len() as f64) <= alpha + 1e-12,
+            "flagged {flagged}/5"
+        );
+    }
+
+    // Regression: with tied (discrete) benign scores `>=` flagged every benign input,
+    // violating the stated alpha bound.
+    #[test]
+    fn tied_benign_scores_are_not_flagged() {
+        let cal = [0.5; 20];
+        let g = ConformalGuard::calibrate(&cal, 0.1);
+        assert!(
+            !g.flags(0.5),
+            "a benign score equal to all calibration scores"
+        );
+        assert!(g.flags(0.51));
+    }
+
+    #[test]
+    fn nan_inputs_do_not_produce_a_silent_never_flag_bound() {
+        let g = ConformalGuard::calibrate(
+            &[0.1, f64::NAN, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            0.5,
+        );
+        assert!(!g.threshold().is_nan());
+        assert!(g.flags(2.0));
+        let u = ConformalGuard::calibrate(&[0.1, 0.2], f64::NAN);
+        assert_eq!(u.threshold(), f64::INFINITY);
+        assert_eq!(u.alarm_bound(), 0.0);
+    }
 
     #[test]
     fn quantile_matches_the_order_statistic() {

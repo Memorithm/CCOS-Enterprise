@@ -277,7 +277,9 @@ impl MemoryGraph {
             }
         }
         // Anything still on the frontier after the last layer is a cut dependency.
-        if cfg.horizon > 0 {
+        // With `horizon == 0` the frontier is the seed set itself, so every
+        // non-orphan dependency of a seed is cut and must be reported.
+        {
             for parent in &frontier {
                 if let Some(children) = adj.fwd.get(parent) {
                     for (child, _) in children {
@@ -446,6 +448,26 @@ mod tests {
         assert!(!ids.contains(&"unrelated"), "disconnected node excluded");
         assert_eq!(win.seed_count, 1);
         assert!(win.complete, "closure fits inside default horizon 3");
+    }
+
+    // Regression: horizon 0 used to report `complete == true` even though every
+    // dependency of the seed was cut.
+    #[test]
+    fn horizon_zero_reports_cut_dependencies() {
+        let mut g = MemoryGraph::new(0.2, usize::MAX);
+        for id in ["w", "a"] {
+            n(&mut g, id);
+        }
+        dep(&mut g, "w", "a");
+        g.set_node_state(&"w".into(), NodeState::Working);
+        let cfg = CausalFlashConfig {
+            horizon: 0,
+            include_callers: false,
+            ..Default::default()
+        };
+        let win = g.causal_flash_window(&cfg);
+        assert!(!win.complete, "seed dependency a was cut at horizon 0");
+        assert_eq!(win.omitted, 1);
     }
 
     // Horizon truncation is reported: a dependency one hop past `n` is cut and

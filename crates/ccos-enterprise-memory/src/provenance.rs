@@ -353,7 +353,12 @@ impl<S: SourceBytes> Resolver<'_, S> {
             if bytes.len() > limit {
                 return Err(ProvenanceError::Limit);
             }
-            if hash(&bytes) != source.content_hash.as_deref().unwrap() {
+            if hash(&bytes)
+                != source
+                    .content_hash
+                    .as_deref()
+                    .ok_or(ProvenanceError::MissingHash)?
+            {
                 return Err(ProvenanceError::ContentMismatch);
             }
             self.source_total += bytes.len();

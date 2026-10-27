@@ -61,7 +61,10 @@ pub use loadout_policy::{
 };
 
 mod promotion;
-pub use promotion::{evaluate_memory_promotion, MemoryPromotionCandidate, MemoryPromotionError};
+pub use promotion::{
+    evaluate_memory_promotion, evaluate_memory_promotion_in, MemoryPromotionCandidate,
+    MemoryPromotionError,
+};
 
 mod provenance_class;
 pub use provenance_class::{MemoryProvenanceClass, MemoryProvenanceError};

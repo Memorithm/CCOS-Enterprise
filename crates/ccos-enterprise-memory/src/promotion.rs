@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::{
@@ -36,6 +37,8 @@ pub enum MemoryPromotionError {
         state: MemoryValidationState,
         contradiction_count: u32,
     },
+    /// No trust metadata is recorded for this asset in the supplied store.
+    MissingTrust(MemoryAssetId),
 }
 
 impl fmt::Display for MemoryPromotionError {
@@ -61,11 +64,39 @@ impl fmt::Display for MemoryPromotionError {
                 "memory asset {} is not promotion-eligible (state {state:?}, contradictions {contradiction_count})",
                 asset_id.as_str()
             ),
+            Self::MissingTrust(id) => {
+                write!(f, "no trust metadata recorded for memory asset {}", id.as_str())
+            }
         }
     }
 }
 
 impl std::error::Error for MemoryPromotionError {}
+
+/// Evaluate promotion for `asset_id`, looking its trust metadata up **by the
+/// same id** in `trust_store` (e.g. `MemoryProjection::trust`).
+///
+/// This is the recommended entry point: it makes it impossible to evaluate one
+/// asset against another asset's trust evidence. A missing entry fails closed
+/// with [`MemoryPromotionError::MissingTrust`], after the graph-side gates.
+pub fn evaluate_memory_promotion_in(
+    graph: &MemoryLineageGraph,
+    asset_id: &MemoryAssetId,
+    trust_store: &BTreeMap<MemoryAssetId, MemoryTrustMetadata>,
+) -> Result<MemoryPromotionCandidate, MemoryPromotionError> {
+    // Run graph gates first so error precedence matches `evaluate_memory_promotion`.
+    let placeholder = MemoryTrustMetadata::unverified(0);
+    match trust_store.get(asset_id) {
+        Some(trust) => evaluate_memory_promotion(graph, asset_id, trust),
+        None => match evaluate_memory_promotion(graph, asset_id, &placeholder) {
+            Err(MemoryPromotionError::TrustNotEligible { .. }) => {
+                Err(MemoryPromotionError::MissingTrust(asset_id.clone()))
+            }
+            Err(other) => Err(other),
+            Ok(_) => Err(MemoryPromotionError::MissingTrust(asset_id.clone())),
+        },
+    }
+}
 
 /// Evaluate the memory-side promotion gates for one governed asset.
 ///
@@ -76,7 +107,7 @@ impl std::error::Error for MemoryPromotionError {}
 /// **Caller contract (audit 2026-10-27):** `trust` is *not* bound to `asset_id`
 /// by type or content; this function cannot detect trust metadata belonging to
 /// a different asset. Callers must look `trust` up by the same `asset_id`.
-/// Binding the two is a known, deferred API gap.
+/// Prefer [`evaluate_memory_promotion_in`], which performs the lookup itself.
 pub fn evaluate_memory_promotion(
     graph: &MemoryLineageGraph,
     asset_id: &MemoryAssetId,
@@ -173,6 +204,44 @@ mod tests {
             .register(derived("pattern", MemoryStratum::Pattern, "context"))
             .unwrap();
         graph
+    }
+
+    #[test]
+    fn store_lookup_ignores_another_assets_trust() {
+        let graph = pattern_graph();
+        let mut store = BTreeMap::new();
+        // Verified trust recorded for a *different* asset must not promote "pattern".
+        store.insert(id("context"), verified());
+        assert_eq!(
+            evaluate_memory_promotion_in(&graph, &id("pattern"), &store),
+            Err(MemoryPromotionError::MissingTrust(id("pattern")))
+        );
+        store.insert(id("pattern"), MemoryTrustMetadata::unverified(1));
+        assert!(matches!(
+            evaluate_memory_promotion_in(&graph, &id("pattern"), &store),
+            Err(MemoryPromotionError::TrustNotEligible { .. })
+        ));
+        store.insert(id("pattern"), verified());
+        assert_eq!(
+            evaluate_memory_promotion_in(&graph, &id("pattern"), &store)
+                .unwrap()
+                .asset_id,
+            id("pattern")
+        );
+    }
+
+    #[test]
+    fn store_lookup_keeps_graph_gate_precedence() {
+        let graph = pattern_graph();
+        let store = BTreeMap::new();
+        assert!(matches!(
+            evaluate_memory_promotion_in(&graph, &id("missing"), &store),
+            Err(MemoryPromotionError::UnknownAsset(_))
+        ));
+        assert!(matches!(
+            evaluate_memory_promotion_in(&graph, &id("context"), &store),
+            Err(MemoryPromotionError::NotPattern { .. })
+        ));
     }
 
     #[test]

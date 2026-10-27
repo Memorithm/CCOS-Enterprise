@@ -11,10 +11,11 @@
 //!
 //! This is **not** flash-attention's exact tiling of a global op — a fixed
 //! depth-`n` neighbourhood is a *truncation* of global centrality, so we do not
-//! pretend to reproduce it. Instead the relevance we compute is **exactly** the
-//! decayed dependency mass reachable *within the cone* — a well-defined
-//! projection of the graph onto the cone, with no randomness and no reliance on
-//! the rest of the graph. Completeness is reported honestly: the returned window
+//! pretend to reproduce it. Instead the relevance is a deterministic, layered
+//! (BFS-order) accumulation of decayed dependency mass *within the cone*, with no
+//! randomness and no reliance on the rest of the graph. It is **not** the exact
+//! all-paths sum: mass added to a node after it has already propagated (same-layer
+//! or back edges) is not re-propagated. Completeness is reported honestly: the returned window
 //! carries a [`CausalWindow::complete`] flag that is `true` **iff** the
 //! dependency closure closed before the horizon (nothing was cut).
 //!

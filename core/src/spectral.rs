@@ -4,11 +4,10 @@
 //! direction (ROADMAP #13: *eigenvector centrality → spectral regions → temporal
 //! tensor*). It computes the classic eigenvector-centrality ranking — the dominant
 //! eigenvector of the adjacency, `A x = λ x` — by **power iteration**, as a clean,
-//! self-contained, dependency-free primitive. Nothing here is wired into the CLI,
-//! the scoring path, or the snapshot; it is a pure read-only ranking signal you can
-//! call on any [`MemoryGraph`]. The richer pipeline
-//! (spectral regions, the temporal tensor, any `scirust` fusion) is **deliberately
-//! deferred** to a later design pass and adds no new dependency here.
+//! self-contained, dependency-free primitive. It is a pure read-only ranking signal
+//! you can call on any [`MemoryGraph`]. *Status (audit 2026-10-27):* it is now consumed by
+//! `external_memory` (batched centrality) and [`temporal_profile`] by `agent_session`; it is
+//! still not on the default eviction/scoring path. Spectral regions remain deferred.
 //!
 //! ## Relationship to [`MemoryGraph::eigencentrality`]
 //!

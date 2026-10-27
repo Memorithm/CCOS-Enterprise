@@ -10,8 +10,8 @@
 //! target ends the scan. Written atomically (`util::write_durable`), so a crash
 //! never leaves a half-segment.
 //!
-//! This brick is **standalone and unwired**: it is exercised only by its own tests
-//! here; a later brick threads serialized husks through it. Like the LZSS codec, it
+//! *Status (audit 2026-10-27):* originally a standalone brick; [`HuskStore`] is now
+//! used by `memory.rs` for COLD husks. Like the LZSS codec, it
 //! is verified by a property round-trip before anything depends on it.
 //!
 //! ## Format

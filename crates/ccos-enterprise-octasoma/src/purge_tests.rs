@@ -309,3 +309,30 @@ fn process_death_at_each_durable_boundary_rolls_forward_without_resurrection() {
         assert_purged(&ProviderGenerationStore::open(&dir.0, tenant()).unwrap());
     }
 }
+
+#[test]
+fn stale_preparation_is_rejected_and_sequential_purges_accumulate() {
+    let dir = Directory::new();
+    let store = initialize(&dir.0);
+    let root_purge = store.prepare_purge(&tenant(), id("root")).unwrap();
+    let stale_survivor_purge = store.prepare_purge(&tenant(), id("survivor")).unwrap();
+    let (store, _) = store.commit_prepared_purge(root_purge).unwrap();
+    // A preparation captured against generation 0 must not commit over generation 1:
+    // its records would re-materialize the purged root's payload.
+    assert!(store.commit_prepared_purge(stale_survivor_purge).is_err());
+    assert!(!dir.0.join(INTENT).exists());
+    let store = ProviderGenerationStore::open(&dir.0, tenant()).unwrap();
+    assert_purged(&store);
+
+    let prepared = store.prepare_purge(&tenant(), id("survivor")).unwrap();
+    let (store, receipt) = store.commit_prepared_purge(prepared).unwrap();
+    assert!(store.matches_purge_receipt(&receipt));
+    assert_eq!(store.generation(), 2);
+    drop(store);
+    let store = ProviderGenerationStore::open(&dir.0, tenant()).unwrap();
+    let rows = store.recovered.source_records();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.is_physically_purged()));
+    assert_eq!(tombstones(rows).len(), 3);
+    assert!(!store.root.join(INTENT).exists());
+}

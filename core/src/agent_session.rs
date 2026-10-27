@@ -198,7 +198,7 @@ pub struct SyncBundle {
     chain: Vec<String>,
     /// The exporter's base64url ed25519 public key, present iff the bundle is
     /// signed (`signed-sync` builds sign automatically when the workspace has a
-    /// key — see [`generate_workspace_key`]). Additive: unsigned bundles omit it.
+    /// key — see `generate_workspace_key`). Additive: unsigned bundles omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pubkey: Option<String>,
     /// base64url ed25519 signature over the bundle's canonical payload (its own

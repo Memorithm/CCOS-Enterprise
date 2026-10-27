@@ -1030,6 +1030,7 @@ impl MemoryGraph {
         // and reclaims its on-disk blob(s) if no other entry still references them.
         self.forget_cold_shadow(id);
         self.edges.retain(|e| &e.source != id && &e.target != id);
+        self.edge_set.clear(); // invalidate the dedup index; add_edge rebuilds on length mismatch
     }
 
     pub fn set_failure_relevance(&mut self, id: &NodeId, relevance: f64) {
@@ -1445,8 +1446,9 @@ impl MemoryGraph {
                 .cloned()
                 .collect();
             self.edges.retain(|e| &e.source != id && &e.target != id);
-            // The other endpoint of each archived edge — recorded in the reverse index
-            // (brick 8) so cold_neighbours is O(degree), not an O(N) tier scan.
+            self.edge_set.clear(); // invalidate the dedup index; add_edge rebuilds on length mismatch
+                                   // The other endpoint of each archived edge — recorded in the reverse index
+                                   // (brick 8) so cold_neighbours is O(degree), not an O(N) tier scan.
             let others: Vec<NodeId> = incident
                 .iter()
                 .map(|e| {
@@ -1573,6 +1575,7 @@ impl MemoryGraph {
                 });
                 if !known {
                     self.edges.push(e);
+                    self.edge_set.clear(); // invalidate the dedup index; add_edge rebuilds on length mismatch
                 }
                 self.radj_del_edge(id, &other);
             } else if let Some(neighbour) = self.cold.get_mut(&other) {
@@ -2395,6 +2398,7 @@ impl MemoryGraph {
         let nodes = &self.nodes;
         self.edges
             .retain(|e| nodes.contains_key(&e.source) && nodes.contains_key(&e.target));
+        self.edge_set.clear(); // invalidate the dedup index; add_edge rebuilds on length mismatch
         before - self.edges.len()
     }
 
@@ -2998,6 +3002,7 @@ impl MemoryGraph {
             }
             _ => true,
         });
+        self.edge_set.clear(); // invalidate the dedup index; add_edge rebuilds on length mismatch
         before - self.edges.len()
     }
 
@@ -4819,6 +4824,33 @@ mod tests {
             vec![NodeId("sym:src/api.rs:run".into())],
             "only the unreferenced symbol is flagged"
         );
+    }
+
+    #[test]
+    fn add_edge_dedup_index_survives_demote_page_in_and_equal_length_drift() {
+        // Regression: the lazy `edge_set` rebuild keyed only on `edges.len()`. A page-in push
+        // (bypassing add_edge) followed by an unrelated removal restored equal lengths with
+        // different contents, so an exact duplicate was accepted and a removed edge was refused.
+        let mut g = MemoryGraph::new(0.0, usize::MAX);
+        for id in ["a", "b", "c", "d", "x", "y"] {
+            g.upsert_node(id.into(), id.into(), String::new(), NodeType::ContextBlock);
+        }
+        assert!(g.add_edge("a".into(), "b".into(), 1.0, EdgeType::DependsOn));
+        assert!(g.add_edge("c".into(), "d".into(), 1.0, EdgeType::DependsOn));
+        g.demote(&"a".into()); // archives a->b
+        assert!(g.add_edge("x".into(), "y".into(), 1.0, EdgeType::DependsOn)); // index rebuilt w/o a->b
+        assert!(g.page_in(&"a".into())); // a->b pushed back directly
+        g.remove_node(&"c".into()); // drops c->d: lengths now equal, contents differ
+        assert!(
+            !g.add_edge("a".into(), "b".into(), 1.0, EdgeType::DependsOn),
+            "exact duplicate of a paged-in edge must be rejected"
+        );
+        let n = g
+            .edges()
+            .iter()
+            .filter(|e| e.source.0 == "a" && e.target.0 == "b")
+            .count();
+        assert_eq!(n, 1);
     }
 
     #[test]

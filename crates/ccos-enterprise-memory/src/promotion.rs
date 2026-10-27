@@ -87,8 +87,8 @@ pub fn evaluate_memory_promotion_in(
     // Run graph gates first so error precedence matches `evaluate_memory_promotion`.
     let placeholder = MemoryTrustMetadata::unverified(0);
     match trust_store.get(asset_id) {
-        Some(trust) => evaluate_memory_promotion(graph, asset_id, trust),
-        None => match evaluate_memory_promotion(graph, asset_id, &placeholder) {
+        Some(trust) => evaluate_unchecked(graph, asset_id, trust),
+        None => match evaluate_unchecked(graph, asset_id, &placeholder) {
             Err(MemoryPromotionError::TrustNotEligible { .. }) => {
                 Err(MemoryPromotionError::MissingTrust(asset_id.clone()))
             }
@@ -108,7 +108,19 @@ pub fn evaluate_memory_promotion_in(
 /// by type or content; this function cannot detect trust metadata belonging to
 /// a different asset. Callers must look `trust` up by the same `asset_id`.
 /// Prefer [`evaluate_memory_promotion_in`], which performs the lookup itself.
+#[deprecated(
+    since = "0.1.0-pre",
+    note = "trust is not bound to asset_id; use evaluate_memory_promotion_in with the trust store"
+)]
 pub fn evaluate_memory_promotion(
+    graph: &MemoryLineageGraph,
+    asset_id: &MemoryAssetId,
+    trust: &MemoryTrustMetadata,
+) -> Result<MemoryPromotionCandidate, MemoryPromotionError> {
+    evaluate_unchecked(graph, asset_id, trust)
+}
+
+fn evaluate_unchecked(
     graph: &MemoryLineageGraph,
     asset_id: &MemoryAssetId,
     trust: &MemoryTrustMetadata,
@@ -151,6 +163,7 @@ pub fn evaluate_memory_promotion(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::{MemoryAssetDescriptor, MemoryEvidenceRef, MemoryLineage};
@@ -306,6 +319,42 @@ mod tests {
                 contradiction_count: 1,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn store_lookup_rejects_corroborated_and_stale_even_with_own_trust() {
+        let mut graph = pattern_graph();
+        let corroborated = MemoryTrustMetadata::new(
+            MemoryValidationState::Corroborated,
+            2,
+            2,
+            0,
+            Vec::<String>::new(),
+        )
+        .unwrap();
+        let mut store = BTreeMap::new();
+        store.insert(id("pattern"), corroborated);
+        assert!(matches!(
+            evaluate_memory_promotion_in(&graph, &id("pattern"), &store),
+            Err(MemoryPromotionError::TrustNotEligible {
+                state: MemoryValidationState::Corroborated,
+                ..
+            })
+        ));
+        store.insert(id("pattern"), verified());
+        graph.invalidate(&id("e0")).unwrap();
+        assert!(matches!(
+            evaluate_memory_promotion_in(&graph, &id("pattern"), &store),
+            Err(MemoryPromotionError::AssetNotActive {
+                state: MemoryAssetState::Stale,
+                ..
+            })
+        ));
+        // Missing trust on a stale asset still reports the graph gate first.
+        assert!(matches!(
+            evaluate_memory_promotion_in(&graph, &id("pattern"), &BTreeMap::new()),
+            Err(MemoryPromotionError::AssetNotActive { .. })
         ));
     }
 

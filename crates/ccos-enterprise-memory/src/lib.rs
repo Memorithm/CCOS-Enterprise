@@ -61,6 +61,7 @@ pub use loadout_policy::{
 };
 
 mod promotion;
+#[allow(deprecated)]
 pub use promotion::{
     evaluate_memory_promotion, evaluate_memory_promotion_in, MemoryPromotionCandidate,
     MemoryPromotionError,

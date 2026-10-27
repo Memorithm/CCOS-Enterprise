@@ -32,7 +32,7 @@
 //!   replay over typed [`event_log::EventPayload`] records.
 //! - [`distributed_event_log`] — hash-chained, tamper-evident event log with an
 //!   integrity verifier.
-//! - [`llm`] — async client for an Ollama-style `/api/generate` endpoint with
+//! - `llm` (feature `llm`) — async client for an Ollama-style `/api/generate` endpoint with
 //!   retries and a deterministic offline fallback.
 //! - [`guard`] — validation/sanitization layer that rejects malformed model
 //!   output and substitutes a safe, valid-JSON fallback.

@@ -18,7 +18,7 @@
 //! This module is the **gate**: tiers, the feature set, and the explicit-logging policy. The gate and
 //! the verifier are **pure** — the single [`load_license_blob`] helper is the one explicit, opt-in I/O
 //! entry point (an env var or a local file; never a network call). The public-key signature check
-//! ([`LicenseVerifier`]) is pluggable; the bundled ed25519 verifier ([`Ed25519Verifier`]) is provided
+//! ([`LicenseVerifier`]) is pluggable; the bundled ed25519 verifier (`Ed25519Verifier`) is provided
 //! behind the `license` cargo feature so the default build pulls in no cryptography.
 
 use std::fmt;
@@ -671,8 +671,8 @@ pub fn verify_token_blob(blob: &[u8], now: u64) -> Result<License, LicenseError>
 impl Licensing {
     /// Determine the active licensing from the host: load any local token ([`load_license_blob`]) and
     /// verify it with the compiled-in verifier. The token's **scheme tag** selects the verifier:
-    /// a `slhdsa.`-prefixed token is checked by the offline [`SlhDsaVerifier`] (when `license-pq`
-    /// is compiled in); any other token by the offline [`Ed25519Verifier`] (when `license` is
+    /// a `slhdsa.`-prefixed token is checked by the offline `SlhDsaVerifier` (when `license-pq`
+    /// is compiled in); any other token by the offline `Ed25519Verifier` (when `license` is
     /// compiled in). A build may compile in one, the other, or both. With neither feature (or a
     /// token whose scheme has no compiled-in verifier) there is no matching verifier, so the result
     /// is the community tier (the core is never gated). Pure beyond the single [`load_license_blob`]

@@ -82,6 +82,8 @@ jobs:
       # Core remains a dependency and is also tested in the default workspace suite.
       - run: cargo check --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --locked
       - run: cargo clippy --workspace --exclude ccos-core --exclude ccos-memory-runtime --all-features --all-targets --locked -- -D warnings
+      # ccos-core/ccos-memory-runtime: default features only (--all-features pulls openssl-sys).
+      - run: cargo clippy -p ccos-core -p ccos-memory-runtime --all-targets --locked -- -D warnings
       - name: Enterprise all-features release tests
         shell: bash
         run: |

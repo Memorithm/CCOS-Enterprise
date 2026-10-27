@@ -151,7 +151,7 @@ type Extracted = (
 /// hand-written file at 20. 128 is therefore ~3× the worst real file observed and
 /// still an order of magnitude below the overflow.
 ///
-/// Over the limit, [`ASTParser::extract_all`] falls back to the line-based
+/// Over the limit, `ASTParser::extract_all` falls back to the line-based
 /// heuristic, which is iterative and cannot overflow: a pathological file
 /// degrades to a coarser graph instead of killing the process.
 pub const MAX_PARSE_NESTING: usize = 128;

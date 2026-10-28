@@ -522,6 +522,7 @@ impl<E: Encoder> HybridRetriever<E> {
 /// CCOS's **bridge** to the [`Encoder`] trait: a TF-IDF embedder (the deterministic dense-vector
 /// source CCOS already owns) fitted on a corpus. `encode(text)` is the corpus-fitted TF-IDF vector,
 /// so the same text always encodes to the same vector and `embedding_dim` is the embedder dimension.
+#[derive(Debug, Clone)]
 pub struct CcosEncoder {
     embedder: TfidfEmbedder,
     dim: usize,
@@ -554,6 +555,7 @@ impl Encoder for CcosEncoder {
 /// dense/hybrid retrieval over it can *out-recall* a lexical RAG on a paraphrase corpus (measured in
 /// `examples/semantic_retrieval_crux.rs`). Deterministic: the LSA projection is a fixed-order Jacobi
 /// solve on the corpus Gram matrix.
+#[derive(Debug, Clone)]
 pub struct LsaEncoder {
     embedder: TfidfEmbedder,
     projection: Vec<Vec<f32>>, // rank × dim latent basis

@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   supply-chain:
-    runs-on: [self-hosted, Linux, X64, memorithm-ci, dell-general, ci-light, trusted-main]
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || fromJSON('["self-hosted","Linux","X64","memorithm-ci","dell-general","ci-light","trusted-main"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Embedded Core lineage and security-diff contract

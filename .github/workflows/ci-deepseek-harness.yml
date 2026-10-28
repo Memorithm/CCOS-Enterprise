@@ -30,7 +30,7 @@ env:
 
 jobs:
   adapter:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, memorithm-ci, dell-general, ci-light, trusted-main]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

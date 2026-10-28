@@ -12,3 +12,6 @@ ccos-core.workspace = true
 unicode-normalization = "0.1"
 unicode_categories = "0.1"
 serde_json.workspace = true
+
+[dev-dependencies]
+serde.workspace = true

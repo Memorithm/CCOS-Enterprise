@@ -107,7 +107,7 @@ jobs:
 
   conformance:
     name: Core dependency conformance
-    runs-on: [self-hosted, Linux, X64, memorithm-ci, dell-general, ci-light, trusted-main]
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || fromJSON('["self-hosted","Linux","X64","memorithm-ci","dell-general","ci-light","trusted-main"]') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

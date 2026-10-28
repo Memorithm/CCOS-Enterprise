@@ -154,6 +154,7 @@ name = "ccos-dense-encoder"
 version = "0.1.0-pre"
 dependencies = [
  "ccos-core",
+ "serde",
  "serde_json",
  "unicode-normalization",
  "unicode_categories",

@@ -1,0 +1,12 @@
+config	nDCG@10
+lexical	0.6704
+dense_minilm	0.6602
+fused_minilm a=0.1	0.6863
+fused_minilm a=0.2	0.6998
+fused_minilm a=0.3	0.7072
+fused_minilm a=0.4	0.7149
+fused_minilm a=0.5	0.7212
+fused_minilm a=0.6	0.7178
+fused_minilm a=0.7	0.6979
+fused_minilm a=0.8	0.6877
+fused_minilm a=0.9	0.6746

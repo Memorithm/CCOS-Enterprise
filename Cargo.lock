@@ -265,6 +265,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccos-enterprise-docmemory"
+version = "0.1.0-pre"
+dependencies = [
+ "ccos-core",
+ "ccos-enterprise-memory",
+ "ccos-enterprise-tenancy",
+]
+
+[[package]]
 name = "ccos-enterprise-envelope"
 version = "0.1.0-pre"
 dependencies = [

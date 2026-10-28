@@ -1,0 +1,13 @@
+[package]
+name = "ccos-enterprise-docmemory"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Tenant- and space-partitioned adapter that puts Core DocumentMemory (BM25/dense/fused) behind the governed recall path, with an optional ConformalGuard at ingest."
+
+[dependencies]
+ccos-core.workspace = true
+ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
+ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }

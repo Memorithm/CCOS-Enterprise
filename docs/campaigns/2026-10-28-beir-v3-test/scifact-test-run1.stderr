@@ -1,0 +1,4 @@
+strict import: qrel_rows=339 positive=339
+encoded 5483 texts (dim=384): 332.8s
+indexes: 623.6ms
+retrieve+score: 8.2s

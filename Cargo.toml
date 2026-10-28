@@ -44,6 +44,7 @@ members = [
     "crates/ccos-enterprise-skills-audit",
     "crates/ccos-enterprise-mcp",
     "crates/ccos-enterprise-sessions",
+    "crates/ccos-dense-encoder",
     "tools/ccos-license-server",
     "tests/ccos-enterprise-conformance",
     "tests/ccos-knowledge-conformance",

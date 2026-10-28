@@ -1,0 +1,16 @@
+[package]
+name = "ccos-dense-encoder"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "CPU sentence-transformer encoder (BERT / MiniLM via candle) behind ccos_core::retrieval::Encoder."
+
+[dependencies]
+ccos-core.workspace = true
+candle-core = { version = "0.9", default-features = false }
+candle-nn = { version = "0.9", default-features = false }
+candle-transformers = { version = "0.9", default-features = false }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+serde_json.workspace = true

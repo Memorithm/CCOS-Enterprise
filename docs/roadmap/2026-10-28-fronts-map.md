@@ -18,3 +18,10 @@ Règle: aucun gain n'est revendiqué sans prereg mergé + CI verte + résultats 
 - `crates/ccos-enterprise-memory`: `GovernedSemanticMemoryProvider`, `admit_governed_recall`, promotion, provenance — ne référencent pas `DocumentMemory`.
 - `core/src/conformal.rs`: `ConformalGuard` — seul appelant `core/src/injection_classifier.rs`.
 - Câblage non fait dans cette PR: il exige des choix (persistance de l'index, tenant scoping, budget d'encodage à l'ingest) qui ne sont pas « sûrs » sans revue. Proposition: PR dédiée avec adaptateur + test de parité campagne↔API.
+
+## Mise à jour 2026-10-29 — câblage front 2/3 (crate `ccos-enterprise-docmemory`)
+
+- **Branché**: `GovernedDocumentMemory` (nouveau crate Enterprise, Core inchangé) porte `DocumentMemory` derrière `TenantScope` + `MemoryLoadout`; une partition `(tenant, space)` = un `DocumentMemory` (stats BM25 et vecteurs isolés). Encodeur injecté par fabrique (même encodeur que la campagne possible). Sortie = `GovernedMemoryObservation` (asset id CCOS) → doit passer `admit_governed_recall`.
+- **Test de parité**: loadout mono-espace ⇒ ids, scores et payloads identiques à `DocumentMemory::rank` (lexical, dense, fused). Ce n'est pas une mesure BEIR; aucune métrique nouvelle n'est revendiquée.
+- **ConformalGuard à l'ingest**: optionnel (`IngestGuard`), scoreur de non-conformité injecté; document flaggé (ou score NaN) refusé avant indexation; guard non calibré (seuil `+∞`, fail-open côté Core) refusé à la construction. Texte vide refusé (leçon FiQA). Le taux de fausses alarmes ≤ α sur jeu bénin tenu à part reste **à mesurer** (pas de scoreur produit choisi).
+- **Reste bloqué**: `ccos-enterprise-ingest` n'appelle pas encore l'adaptateur (choix: déclencheur à la promotion vs à l'ingest, budget d'encodage); persistance de l'index (actuellement en mémoire, reconstructible depuis les assets gouvernés); exposition via le gateway/MCP recall.

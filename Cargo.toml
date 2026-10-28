@@ -45,6 +45,7 @@ members = [
     "crates/ccos-enterprise-mcp",
     "crates/ccos-enterprise-sessions",
     "crates/ccos-dense-encoder",
+    "crates/ccos-enterprise-docmemory",
     "tools/ccos-license-server",
     "tests/ccos-enterprise-conformance",
     "tests/ccos-knowledge-conformance",

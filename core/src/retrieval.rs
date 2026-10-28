@@ -237,7 +237,7 @@ impl DenseIndex {
 
 /// Tokenise for the lexical (BM25) path: split on non-alphanumeric, lower-case, drop empties. Kept
 /// local (rather than [`crate::embeddings::tokenize`]) so the hand-derived BM25 oracle values hold.
-fn bm25_tokenize(text: &str) -> Vec<String> {
+pub fn bm25_tokenize(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .map(|t| t.to_lowercase())
@@ -311,6 +311,50 @@ impl Bm25Index {
         self.doc_len.push(tokens.len() as u32);
         self.total_len += tokens.len() as u64;
         self.ids.push(id);
+    }
+
+    /// Top-`k` documents for an explicitly **weighted** bag of query terms (each term's BM25
+    /// contribution is multiplied by its weight; duplicate terms add their weights). With every
+    /// weight `1.0` over the distinct tokens of a query this equals [`search`](Self::search). Used
+    /// for pseudo-relevance-feedback query expansion.
+    pub fn search_weighted(&self, terms: &[(String, f32)], k: usize) -> Vec<Scored> {
+        if k == 0 || self.is_empty() {
+            return Vec::new();
+        }
+        let n = self.ids.len() as f32;
+        let avgdl = self.total_len as f32 / n;
+        let mut weights: BTreeMap<usize, f32> = BTreeMap::new();
+        for (term, w) in terms {
+            if let Some(&tid) = self.vocab.get(&term.to_lowercase()) {
+                *weights.entry(tid).or_insert(0.0) += *w;
+            }
+        }
+        let mut acc: BTreeMap<usize, f32> = BTreeMap::new();
+        for (&tid, &w) in &weights {
+            let df = self.postings[tid].len() as f32;
+            let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
+            for &(doc_idx, tf) in &self.postings[tid] {
+                let tf = tf as f32;
+                let dl = self.doc_len[doc_idx] as f32;
+                let denom = tf + self.k1 * (1.0 - self.b + self.b * dl / avgdl);
+                *acc.entry(doc_idx).or_insert(0.0) += w * idf * tf * (self.k1 + 1.0) / denom;
+            }
+        }
+        let scored = acc
+            .into_iter()
+            .map(|(doc_idx, score)| Scored {
+                id: self.ids[doc_idx],
+                score,
+            })
+            .collect();
+        rank_truncate(scored, k)
+    }
+
+    /// Document frequency of `term` (lowercased), `0` when absent.
+    pub fn doc_freq(&self, term: &str) -> usize {
+        self.vocab
+            .get(&term.to_lowercase())
+            .map_or(0, |&t| self.postings[t].len())
     }
 
     /// Top-`k` documents for `query` by BM25 score, score-descending with an ascending-id tie-break.
@@ -478,6 +522,7 @@ impl<E: Encoder> HybridRetriever<E> {
 /// CCOS's **bridge** to the [`Encoder`] trait: a TF-IDF embedder (the deterministic dense-vector
 /// source CCOS already owns) fitted on a corpus. `encode(text)` is the corpus-fitted TF-IDF vector,
 /// so the same text always encodes to the same vector and `embedding_dim` is the embedder dimension.
+#[derive(Debug, Clone)]
 pub struct CcosEncoder {
     embedder: TfidfEmbedder,
     dim: usize,
@@ -510,6 +555,7 @@ impl Encoder for CcosEncoder {
 /// dense/hybrid retrieval over it can *out-recall* a lexical RAG on a paraphrase corpus (measured in
 /// `examples/semantic_retrieval_crux.rs`). Deterministic: the LSA projection is a fixed-order Jacobi
 /// solve on the corpus Gram matrix.
+#[derive(Debug, Clone)]
 pub struct LsaEncoder {
     embedder: TfidfEmbedder,
     projection: Vec<Vec<f32>>, // rank × dim latent basis

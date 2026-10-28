@@ -105,6 +105,7 @@ pub mod compressor;
 pub mod conformal;
 pub mod consensus;
 pub mod distributed_event_log;
+pub mod doc_memory;
 pub mod drift;
 pub mod dtw;
 pub mod egress;

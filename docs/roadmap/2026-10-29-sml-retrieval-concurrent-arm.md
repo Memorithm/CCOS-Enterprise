@@ -1,6 +1,24 @@
 # SML retrieval — bras concurrent (GROK-ICM) — 2026-10-29
 
-Statut : **contrat livré, backend indisponible**. Aucune métrique, aucun claim de performance.
+Statut : **backend SML réel branché (opt-in), toujours `NotBeirValidated`**. Aucune métrique,
+aucun claim de performance. (Historique : contrat livré en #241 avec backend indisponible.)
+
+## Mise à jour — backend sigpage-v0 (feature `sml-backend`)
+
+- Dépendance optionnelle `sml-core` (SML-GENIUS), **git pin rev `538d17da`** (#762), feature
+  `icm-rank`, même schéma de pin que `octasoma`. `deny.toml` : dépôt git autorisé + exception
+  licence PolyForm-Noncommercial pour `sml-core` (comme `scirust-license`).
+- Feature `sml-backend = ["concurrent-arm", "dep:sml-core"]`, défaut off. Sans elle, rien ne change
+  vs #241 : seul `UnavailableSmlRetrieval` existe (test `tests/feature_off.rs`).
+- `SmlSignaturePageAdapter` : un `SignaturePageRanker` par tenant (isolation par index),
+  conversion `RankedList` → `SmlRetrievalCandidate`, filtrage loadout avant troncature `k`,
+  scores non finis refusés, vérification `arm_id == sml-grok-icm-concurrent`, statut
+  `NotBeirValidated` propagé (`validation_status()`, `last_validation_status()`). Passe ensuite par
+  `GovernedSmlRetrieval` et `admit_governed_recall` (tests `tests/sml_backend.rs`, corpus jouet :
+  tests de contrat, pas de qualité).
+- Sélecteur MCP `memory.document_recall` : **non branché**.
+- Étape suivante : campagne BEIR selon la prereg SML #761 (`6fe51bee`), seuils figés avant run,
+  négatifs conservés. Non lancée ici.
 
 ## Décision
 
@@ -30,8 +48,8 @@ Statut : **contrat livré, backend indisponible**. Aucune métrique, aucun claim
 
 ## Suite (non démarrée)
 
-1. SML-GENIUS : définir une API de ranking GROK-ICM propre (prereg côté SML d'abord).
-2. Implémenter `SmlRetrievalAdapter` pour elle, dépendance SML optionnelle sous feature, pin SHA.
+1. ~~API de ranking SML~~ (fait : SML #761/#762).
+2. ~~Adapter + dépendance optionnelle pin SHA~~ (fait : feature `sml-backend`).
 3. Prereg campagne CCOS : bras `sml-grok-icm-concurrent` vs `DocumentMemory` fused sur les mêmes
    splits BEIR, seuils figés avant run ; négatifs conservés.
 4. Seulement après run : éventuel sélecteur de bras dans `memory.document_recall`.

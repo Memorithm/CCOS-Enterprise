@@ -11,6 +11,11 @@
 //! scores and does not depend on SML yet. See
 //! `docs/roadmap/2026-10-29-sml-retrieval-concurrent-arm.md`.
 //!
+//! Update (#762): SML-GENIUS `main` @ `538d17da` exposes `sml_core::icm_rank`
+//! (`DocumentRanker`, `SignaturePageRanker` sigpage-v0). With feature `sml-backend` this crate
+//! provides [`SmlSignaturePageAdapter`] over it. Status stays **`NotBeirValidated`**; without the
+//! feature, [`UnavailableSmlRetrieval`] remains the only backend (unchanged behaviour).
+//!
 //! Contracts:
 //! * The adapter never touches `DocumentMemory`; selecting it is an explicit caller choice.
 //! * Every request carries a `TenantScope` and an explicit [`MemoryLoadout`]; candidates
@@ -125,6 +130,11 @@ impl SmlRetrievalAdapter for UnavailableSmlRetrieval {
         ))
     }
 }
+
+#[cfg(feature = "sml-backend")]
+mod sml_backend;
+#[cfg(feature = "sml-backend")]
+pub use sml_backend::{SmlSignaturePageAdapter, SML_VALIDATION_STATUS};
 
 /// Governance wrapper turning any [`SmlRetrievalAdapter`] into a concurrent recall arm.
 #[cfg(feature = "concurrent-arm")]

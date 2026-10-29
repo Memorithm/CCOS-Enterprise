@@ -38,4 +38,9 @@ regexes = [
   # qualification evidence ("transit_algorithm"). A published algorithm
   # constant, not a credential.
   '''aes256-gcm96-derived''',
+  # sha256 of tokenizer.json of the pinned public model
+  # sentence-transformers/all-MiniLM-L6-v2 @ c9745ed1, recorded as a
+  # fingerprint in the ingest-guard FPR v8 raw.jsonl. A public file checksum,
+  # not a credential.
+  '''be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037''',
 ]

@@ -7,6 +7,12 @@ license.workspace = true
 publish = false
 description = "The governed MCP front door for Core and explicitly enabled Enterprise-local capabilities."
 
+[features]
+default = []
+# Minimal std-only HTTP transport for the governed read tools (docs/HTTP_GATEWAY.md).
+# Off by default: stdio stays the shipped transport until TLS/concurrency land (PR2).
+http-gateway = []
+
 [dependencies]
 ccos-enterprise-runtime = { path = "../ccos-enterprise-runtime" }
 ccos-enterprise-rbac = { path = "../ccos-enterprise-rbac" }

@@ -161,7 +161,9 @@ fn main() {
         "{}",
         serde_json::json!({"kind":"meta","model_fingerprint":model_fp,"scifact_docs":sci.len(),
             "scifact_blank":sci_blank,"score_min":sorted[0],"score_median":sorted[sorted.len()/2],
-            "score_max":sorted[sorted.len()-1],"distinct_scores":distinct.len()})
+            "score_max":sorted[sorted.len()-1],"distinct_scores":distinct.len(),
+            "scores_eq_1":sci_scores.iter().filter(|s| **s >= 1.0).count(),
+            "scores_ge_0_5":sci_scores.iter().filter(|s| **s >= 0.5).count()})
     );
 
     let mut seed0_guard = None;

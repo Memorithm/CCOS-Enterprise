@@ -19,6 +19,6 @@ sml-backend = ["concurrent-arm", "dep:sml-core"]
 [dependencies]
 ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
-# Pinned to SML-GENIUS main @ #762 (538d17da), same git-rev pin pattern as `octasoma`.
+# Pinned to SML-GENIUS main @ #762 (538d17da) (exact git-rev pin, as for other Memorithm git deps).
 # License note: sml-core is PolyForm-Noncommercial-1.0.0; optional, never in default builds.
 sml-core = { git = "https://github.com/Memorithm/SML-GENIUS", rev = "538d17da077391654fb2937520698e1a3205e371", default-features = false, features = ["icm-rank"], optional = true }

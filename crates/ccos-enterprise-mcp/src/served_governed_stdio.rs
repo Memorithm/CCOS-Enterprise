@@ -5,17 +5,56 @@
 //! governance settlement. It owns no independent authorization state.
 
 use super::*;
-use ccos_enterprise_mcp::GOVERNED_CONTEXT_TOOL;
+use ccos_enterprise_ingest::doc_index::{lexical_only_memory, LexicalDocumentMemory};
+use ccos_enterprise_mcp::{
+    parse_document_recall_arguments, recall_governed_documents, DocumentRecallArguments,
+    GOVERNED_CONTEXT_TOOL, GOVERNED_DOCUMENT_RECALL_TOOL,
+};
 use ccos_enterprise_memory::{
     attest_governed_context, BudgetedMemoryRecall, GovernedRecallTrustPolicy, MemoryContextBudget,
     MemoryRecallBudget, MemorySpace, MemoryValidationState,
 };
+use ccos_enterprise_provider_adapter::generation::ProviderGenerationStore;
 use ccos_enterprise_tenancy::{TenantId, TenantScope};
 
 struct GovernedContextArguments {
     embedding: Vec<f32>,
     recall_budget: MemoryRecallBudget,
     context_budget: MemoryContextBudget,
+}
+
+/// Validated arguments for one of the two governed read tools sharing this seam.
+enum GovernedRead {
+    Context(GovernedContextArguments),
+    DocumentRecall(DocumentRecallArguments),
+}
+
+/// Lexical-only (BM25) document index derived from one provider generation.
+///
+/// Never persisted on its own: it is rebuilt from the verified governed assets of the selected
+/// generation at boot and whenever a governed mutation publishes a new generation.
+pub(super) struct DocumentIndex {
+    generation: u64,
+    memory: LexicalDocumentMemory,
+}
+
+impl DocumentIndex {
+    pub(super) fn rebuild(store: &ProviderGenerationStore) -> Result<Self, String> {
+        let mut memory = lexical_only_memory();
+        let report = store
+            .recovered()
+            .rebuild_document_index(&mut memory)
+            .map_err(|error| format!("cannot rebuild governed document index: {error}"))?;
+        eprintln!(
+            "ccos-enterprise-mcp: governed document index rebuilt (generation {}, {} indexed)",
+            store.generation(),
+            report.indexed
+        );
+        Ok(Self {
+            generation: store.generation(),
+            memory,
+        })
+    }
 }
 
 impl Server {
@@ -26,7 +65,14 @@ impl Server {
         meta: &Meta,
         arguments: &Value,
     ) -> Result<Value, (i64, String)> {
-        let parsed = parse_arguments(arguments).map_err(|error| (-32602, error))?;
+        let parsed = if request.tool == GOVERNED_DOCUMENT_RECALL_TOOL {
+            GovernedRead::DocumentRecall(
+                parse_document_recall_arguments(arguments)
+                    .map_err(|error| (-32602, error.to_string()))?,
+            )
+        } else {
+            GovernedRead::Context(parse_arguments(arguments).map_err(|error| (-32602, error))?)
+        };
         let checkpoint = DeploymentCheckpoint::capture(self.front_door.deployment());
         let execution = DispatchExecution::new(
             meta.turn_id.clone(),
@@ -59,7 +105,7 @@ impl Server {
                         turn_id: execution.turn_id.clone(),
                         step_id: execution.step_id.clone(),
                         call_id: execution.call_id.clone(),
-                        tool: GOVERNED_CONTEXT_TOOL.to_string(),
+                        tool: request.tool.clone(),
                         input_sha256,
                     },
                 )?;
@@ -88,7 +134,12 @@ impl Server {
                     ));
                 }
 
-                let result = self.read_governed_context(request, &parsed);
+                let result = match &parsed {
+                    GovernedRead::Context(parsed) => self.read_governed_context(request, parsed),
+                    GovernedRead::DocumentRecall(parsed) => {
+                        self.read_governed_documents(request, parsed)
+                    }
+                };
                 let (success, output_sha256) = match &result {
                     Ok(value) => (
                         true,
@@ -314,6 +365,50 @@ impl Server {
                 "items": items
             }
         }))
+    }
+}
+
+impl Server {
+    fn read_governed_documents(
+        &mut self,
+        request: &GatewayRequest,
+        parsed: &DocumentRecallArguments,
+    ) -> Result<Value, String> {
+        let store = self
+            .governed_memory
+            .as_ref()
+            .ok_or_else(|| "governed provider generation is unavailable".to_string())?;
+        // Tenant equality precedes any index access.
+        if store.tenant().as_str() != request.tenant {
+            return Err("governed provider tenant differs from admitted request".into());
+        }
+        let tenant = TenantId::validated(&request.tenant)
+            .ok_or_else(|| "admitted tenant is not canonical".to_string())?;
+        if self
+            .document_index
+            .as_ref()
+            .is_none_or(|index| index.generation != store.generation())
+        {
+            self.document_index = Some(DocumentIndex::rebuild(store)?);
+        }
+        let index = self
+            .document_index
+            .as_mut()
+            .ok_or_else(|| "governed document index is unavailable".to_string())?;
+        let assembly = recall_governed_documents(
+            &mut index.memory,
+            &tenant,
+            store.governance(),
+            GovernedRecallTrustPolicy::VerifiedOnly,
+            &parsed.query,
+            parsed.k,
+            parsed.context_budget,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut result = ccos_enterprise_mcp::document_recall_result(&assembly);
+        result["structuredContent"]["generation"] = json!(store.generation());
+        result["structuredContent"]["ranking"] = json!("lexical_bm25");
+        Ok(result)
     }
 }
 

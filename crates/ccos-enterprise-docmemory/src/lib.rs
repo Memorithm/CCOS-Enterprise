@@ -16,8 +16,9 @@
 //!   Core [`ConformalGuard`] over an injected nonconformity scorer; flagged documents are refused
 //!   and never indexed. An uncalibrated guard (threshold `+inf`, Core's fail-open state) is
 //!   rejected at construction instead of silently accepting everything.
-//! * **No persistence here.** The index is in-memory and rebuildable from governed assets; where
-//!   it is persisted is a separate architecture decision (see roadmap).
+//! * **No persistence here.** The index is in-memory and rebuilt from governed assets
+//!   (`RecoveredGovernedMemory::rebuild_document_index` in the provider adapter); no separate
+//!   on-disk index format exists.
 //!
 //! Cross-space merge: each space ranks independently (fused scores are min-max normalised per
 //! space), then candidates are merged by score desc, asset id asc. With a single-space loadout the

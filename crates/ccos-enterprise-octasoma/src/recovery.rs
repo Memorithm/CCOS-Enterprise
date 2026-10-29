@@ -9,11 +9,15 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use ccos_core::retrieval::Encoder;
+use ccos_enterprise_docmemory::{
+    DocumentMemoryError, GovernedDocumentMemory, GovernedDocumentWrite, IngestScorer,
+};
 use ccos_enterprise_memory::{
     encode_governed_memory_projection, AdmittedGovernedRecall, BudgetedMemoryRecall,
     GovernedMemoryContextAssembly, GovernedMemoryProjection, GovernedMemoryProjectionError,
     GovernedMemorySnapshot, GovernedRecallGateError, GovernedRecallTrustPolicy,
-    GovernedSemanticMemoryProviderExt, MemoryContextBudget, MemoryContextError,
+    GovernedSemanticMemoryProviderExt, MemoryAssetState, MemoryContextBudget, MemoryContextError,
     MemoryRecallBudgetError,
 };
 use ccos_enterprise_tenancy::TenantScope;
@@ -336,6 +340,71 @@ impl RecoveredGovernedMemory {
         &self.records
     }
 
+    /// Rebuild a tenant/space text index from this generation's governed assets.
+    ///
+    /// The document index is a derived, reconstructible projection: it is never persisted on
+    /// its own and is rebuilt from the same verified recovery image that backs semantic recall.
+    /// Only records that are (a) not forgotten, (b) `Active` in the lineage graph, (c) in a
+    /// space bound by the governance loadout and (d) non-blank UTF-8 are indexed, under the
+    /// authority tenant and the canonical descriptor space (never a provider label). Indexing
+    /// does not grant authority: recall output must still pass `admit_governed_recall`.
+    /// Ranking mode and encoder are the caller's (lexical-only by default upstream).
+    pub fn rebuild_document_index<E, F, S>(
+        &self,
+        memory: &mut GovernedDocumentMemory<E, F, S>,
+    ) -> Result<DocumentIndexRebuild, RecoveryError>
+    where
+        E: Encoder,
+        F: Fn() -> E,
+        S: IngestScorer,
+    {
+        let authority = self.authority.projection();
+        let mut report = DocumentIndexRebuild::default();
+        for record in &self.records {
+            if record.forgotten {
+                report.skipped_inactive += 1;
+                continue;
+            }
+            let descriptor = authority
+                .graph
+                .descriptor(&record.asset_id)
+                .ok_or(RecoveryError::Invalid("record descriptor missing"))?;
+            if authority.graph.state(&record.asset_id) != Some(MemoryAssetState::Active) {
+                report.skipped_inactive += 1;
+                continue;
+            }
+            if !authority
+                .loadout
+                .bindings()
+                .any(|binding| binding.space == descriptor.space)
+            {
+                report.skipped_out_of_loadout += 1;
+                continue;
+            }
+            let Ok(text) = std::str::from_utf8(&record.payload) else {
+                report.skipped_non_text += 1;
+                continue;
+            };
+            if text.trim().is_empty() {
+                report.skipped_non_text += 1;
+                continue;
+            }
+            match memory.insert_document(TenantScope::new(
+                authority.tenant.clone(),
+                GovernedDocumentWrite {
+                    asset_id: &record.asset_id,
+                    space: &descriptor.space,
+                    text,
+                },
+            )) {
+                Ok(()) => report.indexed += 1,
+                Err(DocumentMemoryError::Flagged { .. }) => report.refused_by_guard += 1,
+                Err(_) => return Err(RecoveryError::Invalid("document index rebuild failed")),
+            }
+        }
+        Ok(report)
+    }
+
     /// Recall only after exact tenant, current-generation and loadout checks.
     ///
     /// This is not authentication. Supply authority from an acknowledged owner
@@ -413,6 +482,16 @@ impl RecoveredGovernedMemory {
     ) -> Result<GovernedMemoryContextAssembly, MemoryContextError> {
         self.authority.assemble(admitted, budget)
     }
+}
+
+/// Counts from [`RecoveredGovernedMemory::rebuild_document_index`]. Counts only, no payloads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DocumentIndexRebuild {
+    pub indexed: usize,
+    pub skipped_inactive: usize,
+    pub skipped_out_of_loadout: usize,
+    pub skipped_non_text: usize,
+    pub refused_by_guard: usize,
 }
 
 /// Verify one bounded input and reconstruct a fresh real OctaSoma provider.

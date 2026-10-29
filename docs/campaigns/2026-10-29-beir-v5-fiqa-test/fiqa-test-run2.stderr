@@ -1,0 +1,4 @@
+strict import: qrel_rows=1705 positive=1705 skipped_blank_docs=38 reattached_unretrievable_judgments=1
+encoded 58246 texts (dim=384): 1562.4s
+indexes: 5.3s
+retrieve+score: 139.0s

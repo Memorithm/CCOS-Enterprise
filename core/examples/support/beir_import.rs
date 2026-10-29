@@ -20,9 +20,26 @@ pub struct QrelImportStats {
     pub positive_queries: usize,
 }
 
+/// How the corpus importer treats a record whose title and text are both blank.
+///
+/// `Fail` is the default and the only policy used by v1–v4. `SkipUnretrievable`
+/// (prereg v5 amendment) keeps the record's ID reserved under a sentinel that is
+/// never indexed, so a judgment pointing at it still counts toward the ideal DCG
+/// but can never be retrieved by any arm.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // shared by several example binaries
+pub enum BlankDocPolicy {
+    #[default]
+    Fail,
+    SkipUnretrievable,
+}
+
 #[derive(Debug)]
 pub struct BeirDataset {
     pub docs: Vec<String>,
+    /// Number of blank corpus records skipped (always 0 under `Fail`).
+    #[allow(dead_code)] // shared by several example binaries
+    pub skipped_blank_docs: usize,
     pub queries: HashMap<String, String>,
     pub qrels: HashMap<String, HashMap<u64, f64>>,
     pub qrel_stats: QrelImportStats,
@@ -46,6 +63,7 @@ struct QueryRow {
 
 struct Corpus {
     docs: Vec<String>,
+    skipped_blank: usize,
     ids: HashMap<String, u64>,
 }
 
@@ -95,12 +113,23 @@ fn json_rows<T: DeserializeOwned>(
     Ok(())
 }
 
+#[allow(dead_code)] // shared by several example binaries
 fn parse_corpus(reader: impl BufRead, path: &Path) -> Result<Corpus, String> {
+    parse_corpus_with(reader, path, BlankDocPolicy::Fail)
+}
+
+fn parse_corpus_with(
+    reader: impl BufRead,
+    path: &Path,
+    policy: BlankDocPolicy,
+) -> Result<Corpus, String> {
     let mut docs = Vec::new();
     let mut ids = HashMap::new();
+    let mut skipped_blank = 0usize;
     json_rows(reader, path, |row: CorpusRow, line| {
         check_id(&row.id, path, line)?;
-        if row.title.trim().is_empty() && row.text.trim().is_empty() {
+        let blank = row.title.trim().is_empty() && row.text.trim().is_empty();
+        if blank && policy == BlankDocPolicy::Fail {
             return Err(invalid(
                 path,
                 line,
@@ -115,6 +144,12 @@ fn parse_corpus(reader: impl BufRead, path: &Path) -> Result<Corpus, String> {
                     format!("duplicate document ID {:?}", entry.key()),
                 ));
             }
+            Entry::Vacant(entry) if blank => {
+                // Sentinel IDs count down from u64::MAX and never collide with
+                // dense IDs (which count up from 0) nor reach the index.
+                skipped_blank += 1;
+                entry.insert(u64::MAX - (skipped_blank as u64 - 1));
+            }
             Entry::Vacant(entry) => {
                 let dense_id = u64::try_from(docs.len())
                     .map_err(|_| invalid(path, line, "too many documents for a u64 ID"))?;
@@ -125,7 +160,11 @@ fn parse_corpus(reader: impl BufRead, path: &Path) -> Result<Corpus, String> {
         }
         Ok(())
     })?;
-    Ok(Corpus { docs, ids })
+    Ok(Corpus {
+        docs,
+        skipped_blank,
+        ids,
+    })
 }
 
 fn parse_queries(reader: impl BufRead, path: &Path) -> Result<HashMap<String, String>, String> {
@@ -228,15 +267,23 @@ fn open(path: &Path) -> Result<BufReader<File>, String> {
 /// This module has no index or encoder dependency. Callers receive no partial
 /// dataset and must not start indexing until this function succeeds. It streams
 /// lines but retains the validated dataset; no total-RAM bound is claimed.
+#[allow(dead_code)] // shared by several example binaries
 pub fn load_dataset(root: &Path) -> Result<BeirDataset, String> {
+    load_dataset_with(root, BlankDocPolicy::Fail)
+}
+
+/// As [`load_dataset`], with an explicit blank-document policy (prereg v5).
+#[allow(dead_code)] // shared by several example binaries
+pub fn load_dataset_with(root: &Path, policy: BlankDocPolicy) -> Result<BeirDataset, String> {
     let corpus_path = root.join("corpus.jsonl");
     let query_path = root.join("queries.jsonl");
     let qrel_path = root.join("qrels/test.tsv");
-    let corpus = parse_corpus(open(&corpus_path)?, &corpus_path)?;
+    let corpus = parse_corpus_with(open(&corpus_path)?, &corpus_path, policy)?;
     let queries = parse_queries(open(&query_path)?, &query_path)?;
     let imported = parse_qrels(open(&qrel_path)?, &qrel_path, &corpus.ids, &queries)?;
     Ok(BeirDataset {
         docs: corpus.docs,
+        skipped_blank_docs: corpus.skipped_blank,
         queries,
         qrels: imported.qrels,
         qrel_stats: imported.stats,
@@ -248,6 +295,7 @@ mod tests {
     use super::*;
 
     const DOC: &str = r#"{"_id":"d1","title":"Title","text":"Body"}"#;
+    const DOC2: &str = r#"{"_id":"d2","title":"T2","text":"B2"}"#;
     const QUERY: &str = r#"{"_id":"q1","text":"Question"}"#;
     const HEADER: &str = "query-id\tcorpus-id\tscore\n";
 
@@ -280,6 +328,24 @@ mod tests {
         assert_eq!(parsed.ids["d1"], 0);
         assert_eq!(parsed.ids["Doc/É:2"], 1);
         assert_eq!(parsed.docs, vec!["Title Body", "   preserved  "]);
+    }
+
+    #[test]
+    fn blank_document_fails_by_default_and_is_skipped_only_on_request() {
+        let raw = format!("{DOC}\n{{\"_id\":\"b\",\"title\":\" \",\"text\":\"\"}}\n{DOC2}\n");
+        let error = corpus(&raw).err().unwrap();
+        assert!(error.contains("corpus.jsonl:2:"), "{error}");
+        let parsed = parse_corpus_with(
+            raw.as_bytes(),
+            Path::new("corpus.jsonl"),
+            BlankDocPolicy::SkipUnretrievable,
+        )
+        .unwrap();
+        assert_eq!(parsed.docs, vec!["Title Body", "T2 B2"]);
+        assert_eq!(parsed.skipped_blank, 1);
+        assert_eq!(parsed.ids["d1"], 0);
+        assert_eq!(parsed.ids["d2"], 1);
+        assert_eq!(parsed.ids["b"], u64::MAX);
     }
 
     #[test]

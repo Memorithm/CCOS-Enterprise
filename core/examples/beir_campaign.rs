@@ -79,6 +79,7 @@ fn run() -> Result<(), String> {
         _ => return Err("usage: beir_campaign <dir> [--limit-docs N]".into()),
     };
     let BeirDataset {
+        skipped_blank_docs: _,
         docs,
         queries,
         qrels,

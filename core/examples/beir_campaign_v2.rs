@@ -105,6 +105,7 @@ fn run() -> Result<(), String> {
         _ => return Err("usage: beir_campaign_v2 <dir> [--grid]".into()),
     };
     let BeirDataset {
+        skipped_blank_docs: _,
         docs,
         queries,
         qrels,

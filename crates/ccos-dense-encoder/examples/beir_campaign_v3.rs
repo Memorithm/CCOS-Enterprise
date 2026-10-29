@@ -12,7 +12,7 @@
 #[path = "../../../core/examples/support/beir_import.rs"]
 mod beir_import;
 
-use beir_import::{load_dataset, BeirDataset};
+use beir_import::{load_dataset_with, BeirDataset, BlankDocPolicy};
 use ccos_core::doc_memory::{DocRankConfig, DocumentMemory, PrfConfig, RankMode};
 use ccos_core::retrieval::{metrics, reciprocal_rank_fusion, Bm25Index, Encoder, Scored};
 use ccos_dense_encoder::{BertSentenceEncoder, CachedEncoder, DEFAULT_MAX_LEN, DEFAULT_THREADS};
@@ -90,8 +90,15 @@ fn cfg(mode: RankMode, prf: Option<PrfConfig>) -> DocRankConfig {
 }
 
 fn run() -> Result<(), String> {
-    let usage = "usage: beir_campaign_v3 <beir-dir> <model-dir> [--grid]";
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let usage = "usage: beir_campaign_v3 <beir-dir> <model-dir> [--grid] [--skip-blank-docs]";
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Prereg v5 amendment: opt-in blank-document policy; default stays strict (fail).
+    let policy = if let Some(i) = args.iter().position(|a| a == "--skip-blank-docs") {
+        args.remove(i);
+        BlankDocPolicy::SkipUnretrievable
+    } else {
+        BlankDocPolicy::Fail
+    };
     let dir = args.first().ok_or(usage)?;
     let model_dir = args.get(1).ok_or(usage)?;
     let grid = match args.get(2).map(String::as_str) {
@@ -104,13 +111,14 @@ fn run() -> Result<(), String> {
     }
     let BeirDataset {
         docs,
+        skipped_blank_docs,
         queries,
         qrels,
         qrel_stats,
-    } = load_dataset(Path::new(dir))?;
+    } = load_dataset_with(Path::new(dir), policy)?;
     eprintln!(
-        "strict import: qrel_rows={} positive={}",
-        qrel_stats.data_rows, qrel_stats.positive_rows
+        "strict import: qrel_rows={} positive={} skipped_blank_docs={}",
+        qrel_stats.data_rows, qrel_stats.positive_rows, skipped_blank_docs
     );
     let mut qids: Vec<&String> = qrels.keys().collect();
     qids.sort();

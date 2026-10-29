@@ -11,3 +11,7 @@ description = "Tenant- and space-partitioned adapter that puts Core DocumentMemo
 ccos-core.workspace = true
 ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
+
+[dev-dependencies]
+serde_json.workspace = true
+sha2.workspace = true

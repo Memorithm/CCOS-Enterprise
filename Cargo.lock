@@ -269,6 +269,7 @@ name = "ccos-enterprise-docmemory"
 version = "0.1.0-pre"
 dependencies = [
  "ccos-core",
+ "ccos-dense-encoder",
  "ccos-enterprise-memory",
  "ccos-enterprise-tenancy",
  "serde_json",

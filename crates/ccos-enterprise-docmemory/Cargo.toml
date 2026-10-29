@@ -13,5 +13,6 @@ ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
 
 [dev-dependencies]
+ccos-dense-encoder = { path = "../ccos-dense-encoder" }
 serde_json.workspace = true
 sha2.workspace = true

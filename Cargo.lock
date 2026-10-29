@@ -332,7 +332,11 @@ dependencies = [
 name = "ccos-enterprise-ingest"
 version = "0.1.0-pre"
 dependencies = [
+ "ccos-core",
+ "ccos-enterprise-docmemory",
  "ccos-enterprise-knowledge-model",
+ "ccos-enterprise-memory",
+ "ccos-enterprise-tenancy",
  "sha2",
 ]
 

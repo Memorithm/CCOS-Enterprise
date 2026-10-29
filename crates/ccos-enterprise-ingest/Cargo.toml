@@ -10,3 +10,7 @@ description = "Tenant-scoped deterministic ingestion contracts and local filesys
 [dependencies]
 ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
 sha2.workspace = true
+ccos-core.workspace = true
+ccos-enterprise-docmemory = { path = "../ccos-enterprise-docmemory" }
+ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
+ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }

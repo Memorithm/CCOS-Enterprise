@@ -21,6 +21,8 @@ use ccos_enterprise_knowledge_model::{
 };
 use sha2::{Digest, Sha256};
 
+pub mod doc_index;
+
 pub const INGESTION_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -440,6 +440,8 @@ dependencies = [
 name = "ccos-enterprise-octasoma"
 version = "0.1.0-pre"
 dependencies = [
+ "ccos-core",
+ "ccos-enterprise-docmemory",
  "ccos-enterprise-envelope",
  "ccos-enterprise-memory",
  "ccos-enterprise-tenancy",

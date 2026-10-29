@@ -1173,6 +1173,7 @@ struct Server {
     front_door: GovernedMcp<JournaledBackend>,
     governed_memory: Option<ccos_enterprise_provider_adapter::generation::ProviderGenerationStore>,
     evidence: Option<served_provenance::ServedEvidence>,
+    document_index: Option<served_governed_stdio::DocumentIndex>,
     poisoned: Option<String>,
 }
 
@@ -1184,6 +1185,7 @@ impl Server {
         govern_skill_catalogue(&mut deployment);
         if config.governed_memory_root.is_some() {
             ccos_enterprise_mcp::govern_governed_context(&mut deployment);
+            ccos_enterprise_mcp::govern_governed_document_recall(&mut deployment);
             ccos_enterprise_mcp::govern_governed_evidence_write(&mut deployment);
             ccos_enterprise_mcp::govern_governed_purge(&mut deployment);
         }
@@ -1326,6 +1328,7 @@ impl Server {
         govern_skill_audit(&mut deployment);
         if config.governed_memory_root.is_some() {
             ccos_enterprise_mcp::govern_governed_context(&mut deployment);
+            ccos_enterprise_mcp::govern_governed_document_recall(&mut deployment);
             ccos_enterprise_mcp::govern_governed_evidence_write(&mut deployment);
             ccos_enterprise_mcp::govern_governed_purge(&mut deployment);
         }
@@ -1407,6 +1410,11 @@ impl Server {
         } else {
             None
         };
+        // Derived text index: rebuilt from the verified governed assets, never stored apart.
+        let document_index = governed_memory
+            .as_ref()
+            .map(served_governed_stdio::DocumentIndex::rebuild)
+            .transpose()?;
 
         let evidence = config
             .evidence_roots
@@ -1427,6 +1435,7 @@ impl Server {
             front_door,
             governed_memory,
             evidence,
+            document_index,
             poisoned: None,
         })
     }
@@ -2091,7 +2100,11 @@ impl Server {
         {
             return self.call_governed_mutation(&identity, &request, &meta, &arguments);
         }
-        if request.tool == ccos_enterprise_mcp::GOVERNED_CONTEXT_TOOL
+        if [
+            ccos_enterprise_mcp::GOVERNED_CONTEXT_TOOL,
+            ccos_enterprise_mcp::GOVERNED_DOCUMENT_RECALL_TOOL,
+        ]
+        .contains(&request.tool.as_str())
             && self.governed_memory.is_some()
         {
             return self.call_governed_context(&identity, &request, &meta, &arguments);
@@ -2342,6 +2355,16 @@ fn enterprise_specs(include_governed_context: bool) -> Result<Vec<Value>, (i64, 
             ));
         }
         governed.push(ccos_enterprise_mcp::governed_context_tool_spec());
+        if governed.iter().any(|tool| {
+            tool.get("name").and_then(Value::as_str)
+                == Some(ccos_enterprise_mcp::GOVERNED_DOCUMENT_RECALL_TOOL)
+        }) {
+            return Err((
+                -32000,
+                "Enterprise document-recall capability collides with catalogue".into(),
+            ));
+        }
+        governed.push(ccos_enterprise_mcp::governed_document_recall_tool_spec());
         if governed.iter().any(|tool| {
             tool.get("name").and_then(Value::as_str)
                 == Some(ccos_enterprise_mcp::GOVERNED_EVIDENCE_WRITE_TOOL)

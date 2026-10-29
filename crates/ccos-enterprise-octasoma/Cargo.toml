@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
+ccos-enterprise-docmemory = { path = "../ccos-enterprise-docmemory" }
+ccos-core.workspace = true
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
 ccos-enterprise-envelope = { path = "../ccos-enterprise-envelope" }
 zeroize = "1.8"

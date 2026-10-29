@@ -13,7 +13,9 @@
 //! 4. index output passes `admit_governed_recall` (unknown asset, relabelled space, lineage,
 //!    trust policy) and is then item/byte bounded by the context budget.
 //!
-//! Scores are ordering data only. The index is in-memory (see roadmap: persistence open).
+//! Scores are ordering data only. The index is in-memory and derived: the stdio server rebuilds
+//! it (lexical-only) from the selected provider generation's governed assets at boot and after
+//! each new generation (`RecoveredGovernedMemory::rebuild_document_index`).
 
 use std::fmt;
 

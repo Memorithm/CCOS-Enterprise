@@ -22,7 +22,9 @@ mod beir_import;
 
 use beir_import::{load_dataset, BeirDataset};
 use ccos_core::retrieval::{metrics, Bm25Index};
-use sml_core::icm_rank::{DocumentRanker, RankError, SignaturePageRanker, ValidationStatus, ARM_ID};
+use sml_core::icm_rank::{
+    DocumentRanker, RankError, SignaturePageRanker, ValidationStatus, ARM_ID,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
@@ -50,10 +52,18 @@ fn paired_ci(diff: &[f64]) -> (f64, f64) {
     let n = diff.len();
     let mut s = BOOT_SEED.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut means: Vec<f64> = (0..BOOT)
-        .map(|_| (0..n).map(|_| diff[(xorshift(&mut s) % n as u64) as usize]).sum::<f64>() / n as f64)
+        .map(|_| {
+            (0..n)
+                .map(|_| diff[(xorshift(&mut s) % n as u64) as usize])
+                .sum::<f64>()
+                / n as f64
+        })
         .collect();
     means.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    (means[(BOOT as f64 * 0.025) as usize], means[(BOOT as f64 * 0.975) as usize])
+    (
+        means[(BOOT as f64 * 0.025) as usize],
+        means[(BOOT as f64 * 0.975) as usize],
+    )
 }
 
 /// Zero-padded decimal id so that the ranker's `id asc` tie-break equals corpus order.
@@ -65,9 +75,18 @@ fn published(path: &str) -> Result<HashMap<String, (f64, f64)>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let mut lines = text.lines();
     let header = lines.next().ok_or("empty published stdout")?;
-    let cols: Vec<&str> = header.trim_start_matches("# per_query: ").split('\t').collect();
-    let bi = cols.iter().position(|c| *c == "bm25").ok_or("no bm25 column")?;
-    let fi = cols.iter().position(|c| *c == "docmem_fused_minilm").ok_or("no fused column")?;
+    let cols: Vec<&str> = header
+        .trim_start_matches("# per_query: ")
+        .split('\t')
+        .collect();
+    let bi = cols
+        .iter()
+        .position(|c| *c == "bm25")
+        .ok_or("no bm25 column")?;
+    let fi = cols
+        .iter()
+        .position(|c| *c == "docmem_fused_minilm")
+        .ok_or("no fused column")?;
     let mut out = HashMap::new();
     for l in lines {
         if l.is_empty() {
@@ -82,16 +101,29 @@ fn published(path: &str) -> Result<HashMap<String, (f64, f64)>, String> {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = args.first().ok_or("usage: beir_sml_icm5 <beir-dir> [published-v3-stdout]")?;
+    let dir = args
+        .first()
+        .ok_or("usage: beir_sml_icm5 <beir-dir> [published-v3-stdout]")?;
     let pubd = args.get(1).map(|p| published(p)).transpose()?;
-    let BeirDataset { docs, queries, qrels, qrel_stats } = load_dataset(Path::new(dir))?;
-    eprintln!("strict import: qrel_rows={} positive={}", qrel_stats.data_rows, qrel_stats.positive_rows);
+    let BeirDataset {
+        docs,
+        queries,
+        qrels,
+        qrel_stats,
+    } = load_dataset(Path::new(dir))?;
+    eprintln!(
+        "strict import: qrel_rows={} positive={}",
+        qrel_stats.data_rows, qrel_stats.positive_rows
+    );
     let mut qids: Vec<&String> = qrels.keys().collect();
     qids.sort();
 
     let t = Instant::now();
     let mut bm25 = Bm25Index::new(1.2, 0.75);
-    let mut sml: Vec<SignaturePageRanker> = SIG_SEEDS.iter().map(|s| SignaturePageRanker::new(*s)).collect();
+    let mut sml: Vec<SignaturePageRanker> = SIG_SEEDS
+        .iter()
+        .map(|s| SignaturePageRanker::new(*s))
+        .collect();
     for (i, d) in docs.iter().enumerate() {
         bm25.add(i as u64, d);
         for r in &mut sml {
@@ -114,14 +146,23 @@ fn run() -> Result<(), String> {
         let q = &queries[*qid];
         let gains = &qrels[*qid];
         let relevant: HashSet<u64> = gains.keys().copied().collect();
-        let mut ranks = vec![bm25.search(q, DEPTH).into_iter().map(|s| s.id).collect::<Vec<u64>>()];
+        let mut ranks = vec![bm25
+            .search(q, DEPTH)
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<u64>>()];
         for (k, r) in sml.iter_mut().enumerate() {
             match r.rank(q, DEPTH) {
                 Ok(list) => {
                     if list.arm_id != ARM_ID || list.status != ValidationStatus::NotBeirValidated {
                         return Err("unexpected arm/status".into());
                     }
-                    ranks.push(list.candidates.iter().map(|c| c.id.parse::<u64>().unwrap()).collect());
+                    ranks.push(
+                        list.candidates
+                            .iter()
+                            .map(|c| c.id.parse::<u64>().unwrap())
+                            .collect(),
+                    );
                 }
                 Err(RankError::EmptyQuery) => {
                     rejected[k] += 1;
@@ -139,7 +180,9 @@ fn run() -> Result<(), String> {
             row.push_str(&format!("\t{nd:.6}"));
         }
         if let Some(p) = &pubd {
-            let (pb, pf) = *p.get(*qid).ok_or(format!("qid {qid} missing in published stdout"))?;
+            let (pb, pf) = *p
+                .get(*qid)
+                .ok_or(format!("qid {qid} missing in published stdout"))?;
             if format!("{pb:.6}") != format!("{:.6}", per[0].last().unwrap()) {
                 return Err(format!("bm25 mismatch vs published on qid {qid}"));
             }
@@ -151,7 +194,12 @@ fn run() -> Result<(), String> {
     }
     eprintln!("retrieve+score: {:.1?}", t.elapsed());
     let n = qids.len() as f64;
-    println!("\n# summary docs={} judged_queries={} sml_rejected_queries={:?}", docs.len(), qids.len(), rejected);
+    println!(
+        "\n# summary docs={} judged_queries={} sml_rejected_queries={:?}",
+        docs.len(),
+        qids.len(),
+        rejected
+    );
     println!("arm\tnDCG@10\tR@100\tMRR@10");
     for (k, name) in names.iter().enumerate() {
         let m = per[k].iter().sum::<f64>() / n;
@@ -173,7 +221,10 @@ fn run() -> Result<(), String> {
             let wins = diff.iter().filter(|d| **d > 0.0).count();
             let losses = diff.iter().filter(|d| **d < 0.0).count();
             let (lo, hi) = paired_ci(&diff);
-            println!("{}\tdelta={mean:+.4}\twins={wins}\tlosses={losses}\tci95=[{lo:+.4},{hi:+.4}]", names[k]);
+            println!(
+                "{}\tdelta={mean:+.4}\twins={wins}\tlosses={losses}\tci95=[{lo:+.4},{hi:+.4}]",
+                names[k]
+            );
         }
     }
     println!("\nstatus: NotBeirValidated (input) ; superiority_claim: false");

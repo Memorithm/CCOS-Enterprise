@@ -44,6 +44,8 @@ exceptions = [
     { name = "ccos-memory-runtime", allow = ["PolyForm-Noncommercial-1.0.0"] },
     { name = "octasoma", allow = ["LicenseRef-CheckupAuto-Dual"] },
     { name = "scirust-license", allow = ["PolyForm-Noncommercial-1.0.0"] },
+    # Optional (feature `sml-backend`, default off) SML-GENIUS ranking backend, same owner.
+    { name = "sml-core", allow = ["PolyForm-Noncommercial-1.0.0"] },
 ]
 
 [licenses.private]
@@ -72,4 +74,5 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/Memorithm/octasoma",
     "https://github.com/Memorithm/scirust",
+    "https://github.com/Memorithm/SML-GENIUS",
 ]

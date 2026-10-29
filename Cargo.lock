@@ -613,6 +613,7 @@ version = "0.1.0-pre"
 dependencies = [
  "ccos-enterprise-memory",
  "ccos-enterprise-tenancy",
+ "sml-core",
 ]
 
 [[package]]
@@ -2450,6 +2451,11 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "sml-core"
+version = "0.1.0"
+source = "git+https://github.com/Memorithm/SML-GENIUS?rev=538d17da077391654fb2937520698e1a3205e371#538d17da077391654fb2937520698e1a3205e371"
 
 [[package]]
 name = "socket2"

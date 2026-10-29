@@ -12,7 +12,13 @@ default = []
 # Opt-in: exposes the concurrent-arm wrapper. Without it only the trait, types and the
 # fail-closed `UnavailableSmlRetrieval` backend exist. No GPU / NVIDIA dependency either way.
 concurrent-arm = []
+# Opt-in: real SML-GENIUS backend (`sml_core::icm_rank::SignaturePageRanker`, sigpage-v0).
+# Experimental, NOT BEIR-validated. Implies `concurrent-arm`. CPU-only, no NVIDIA.
+sml-backend = ["concurrent-arm", "dep:sml-core"]
 
 [dependencies]
 ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
+# Pinned to SML-GENIUS main @ #762 (538d17da) (exact git-rev pin, as for other Memorithm git deps).
+# License note: sml-core is PolyForm-Noncommercial-1.0.0; optional, never in default builds.
+sml-core = { git = "https://github.com/Memorithm/SML-GENIUS", rev = "538d17da077391654fb2937520698e1a3205e371", default-features = false, features = ["icm-rank"], optional = true }

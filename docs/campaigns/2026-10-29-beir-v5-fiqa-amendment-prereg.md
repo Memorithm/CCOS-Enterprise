@@ -27,7 +27,7 @@ number exists.
    (an empty string still gets a MiniLM embedding and could be ranked by the dense side, giving the
    fused arm a spurious, content-free hit); *drop the qrels* (silently removes judged evidence).
    All other strict checks (IDs, duplicates, unknown IDs, JSON shape, blank queries) are unchanged.
-2. `beir_campaign_v3` gains only the `--skip-blank-docs` flag and prints `skipped_blank_docs=N` on
+2. `beir_campaign_v3` gains only the `--skip-blank-docs` flag and prints `skipped_blank_docs=N reattached_unretrievable_judgments=M` on
    stderr. Without the flag, behaviour is byte-identical to v4 (default policy = `Fail`).
 3. The FiQA run uses `--skip-blank-docs`; the expected skipped count is **38**. Any other count makes
    the run invalid (reported, not re-run with changes).

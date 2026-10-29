@@ -11,8 +11,10 @@
 
 #[path = "../../../core/examples/support/beir_import.rs"]
 mod beir_import;
+#[path = "support/blank_docs.rs"]
+mod blank_docs;
 
-use beir_import::{load_dataset_with, BeirDataset, BlankDocPolicy};
+use beir_import::{load_dataset, BeirDataset};
 use ccos_core::doc_memory::{DocRankConfig, DocumentMemory, PrfConfig, RankMode};
 use ccos_core::retrieval::{metrics, reciprocal_rank_fusion, Bm25Index, Encoder, Scored};
 use ccos_dense_encoder::{BertSentenceEncoder, CachedEncoder, DEFAULT_MAX_LEN, DEFAULT_THREADS};
@@ -93,11 +95,11 @@ fn run() -> Result<(), String> {
     let usage = "usage: beir_campaign_v3 <beir-dir> <model-dir> [--grid] [--skip-blank-docs]";
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // Prereg v5 amendment: opt-in blank-document policy; default stays strict (fail).
-    let policy = if let Some(i) = args.iter().position(|a| a == "--skip-blank-docs") {
+    let skip_blank = if let Some(i) = args.iter().position(|a| a == "--skip-blank-docs") {
         args.remove(i);
-        BlankDocPolicy::SkipUnretrievable
+        true
     } else {
-        BlankDocPolicy::Fail
+        false
     };
     let dir = args.first().ok_or(usage)?;
     let model_dir = args.get(1).ok_or(usage)?;
@@ -109,16 +111,21 @@ fn run() -> Result<(), String> {
     if !grid && FROZEN_ALPHA.is_nan() {
         return Err("FROZEN_ALPHA not set: run --grid on train and freeze it first".into());
     }
+    let (dataset, skipped_blank_docs, reattached) = if skip_blank {
+        let s = blank_docs::load_skipping_blank(Path::new(dir))?;
+        (s.dataset, s.skipped_blank_docs, s.reattached_judgments)
+    } else {
+        (load_dataset(Path::new(dir))?, 0, 0)
+    };
     let BeirDataset {
         docs,
-        skipped_blank_docs,
         queries,
         qrels,
         qrel_stats,
-    } = load_dataset_with(Path::new(dir), policy)?;
+    } = dataset;
     eprintln!(
-        "strict import: qrel_rows={} positive={} skipped_blank_docs={}",
-        qrel_stats.data_rows, qrel_stats.positive_rows, skipped_blank_docs
+        "strict import: qrel_rows={} positive={} skipped_blank_docs={} reattached_unretrievable_judgments={}",
+        qrel_stats.data_rows, qrel_stats.positive_rows, skipped_blank_docs, reattached
     );
     let mut qids: Vec<&String> = qrels.keys().collect();
     qids.sort();

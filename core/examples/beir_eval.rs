@@ -49,7 +49,6 @@ fn run() -> Result<(), String> {
     let dir = Path::new(&directory);
     let t0 = Instant::now();
     let BeirDataset {
-        skipped_blank_docs: _,
         docs,
         queries,
         qrels,

@@ -611,8 +611,11 @@ dependencies = [
 name = "ccos-enterprise-sml-retrieval"
 version = "0.1.0-pre"
 dependencies = [
+ "ccos-core",
  "ccos-enterprise-memory",
  "ccos-enterprise-tenancy",
+ "serde",
+ "serde_json",
  "sml-core",
 ]
 

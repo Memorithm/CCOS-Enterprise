@@ -79,7 +79,9 @@ fn hex(b: &[u8]) -> String {
 
 fn n_features(defanged: &str) -> usize {
     static T: std::sync::OnceLock<HashingTokenizer> = std::sync::OnceLock::new();
-    T.get_or_init(HashingTokenizer::new).features(defanged).len()
+    T.get_or_init(HashingTokenizer::new)
+        .features(defanged)
+        .len()
 }
 
 /// FPR-v3 score (prereg §2): mean per-feature-occurrence margin contribution, prior removed.
@@ -283,8 +285,14 @@ fn main() {
     let sci_scores: Vec<f64> = sci.iter().map(|d| score(&d.text)).collect();
     let inj_scores: Vec<f64> = inj.iter().map(|t| score(t)).collect();
     let inj_refs: Vec<&str> = inj.iter().map(|s| s.as_str()).collect();
-    let sci_n: Vec<f64> = sci.iter().map(|d| n_features(&defang(&d.text).0) as f64).collect();
-    let inj_n_feat: Vec<f64> = inj.iter().map(|t| n_features(&defang(t).0) as f64).collect();
+    let sci_n: Vec<f64> = sci
+        .iter()
+        .map(|d| n_features(&defang(&d.text).0) as f64)
+        .collect();
+    let inj_n_feat: Vec<f64> = inj
+        .iter()
+        .map(|t| n_features(&defang(t).0) as f64)
+        .collect();
     let sci_n_le1 = sci_n.iter().filter(|n| **n <= 1.0).count();
     let bmax = sci_scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let allmax = inj_scores.iter().cloned().fold(bmax, f64::max);

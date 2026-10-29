@@ -61,7 +61,7 @@ calibrate-on-own-corpus documented) is left as a separate decision. No product d
 
 ## Deviations
 
-None. Harness written while #249 CI ran; first and only run after merge. The descriptive v2-reference
+None. Harness written while #249 CI ran; first and only run after merge. A later `cargo fmt`-only commit (whitespace, no semantic change) was made for CI; not re-run. The descriptive v2-reference
 line (prereg §6) is computed by direct `ConformalGuard::flags`, not via `insert_document`.
 
 ## Limitations

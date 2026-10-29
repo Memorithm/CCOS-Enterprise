@@ -22,3 +22,13 @@ ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
 # Pinned to SML-GENIUS main @ #762 (538d17da) (exact git-rev pin, as for other Memorithm git deps).
 # License note: sml-core is PolyForm-Noncommercial-1.0.0; optional, never in default builds.
 sml-core = { git = "https://github.com/Memorithm/SML-GENIUS", rev = "538d17da077391654fb2937520698e1a3205e371", default-features = false, features = ["icm-rank"], optional = true }
+
+[dev-dependencies]
+# Campaign harness only (SML-GENIUS prereg #761, PR3): BM25 + metrics reference of CCOS #217.
+ccos-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[[example]]
+name = "beir_sml_icm5"
+required-features = ["sml-backend"]

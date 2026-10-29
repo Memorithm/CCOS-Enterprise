@@ -34,7 +34,7 @@ evaluated on disjoint splits. The Core model / score / tokenizer stay untouched.
 count vector (D = 2048, unchanged), feature map `φ(x) = log1p(x) / ‖log1p(x)‖₂` (zero vector stays
 zero) plus an unpenalised bias. Score `s = w·φ + b` (logit, higher = more injection-like) on
 `defang(text).0`. Trained inside the harness, CPU, deterministic: full-batch **Nesterov accelerated
-gradient**, step 1/(0.25 + λ), **400 iterations**, w = 0, b = 0 init, f64, fixed-order reductions
+gradient**, step 1/(0.5 + λ) (‖[φ, 1]‖² ≤ 2 ⇒ logistic-loss Lipschitz ≤ 0.5 + λ), **400 iterations**, w = 0, b = 0 init, f64, fixed-order reductions
 (per-thread partial sums over fixed contiguous chunks, summed in chunk order — bit-reproducible for a
 fixed thread count; thread count fixed to 8 and logged).
 

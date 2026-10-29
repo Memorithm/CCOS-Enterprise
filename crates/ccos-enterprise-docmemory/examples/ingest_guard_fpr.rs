@@ -149,7 +149,11 @@ fn flagged_through_insert(guard: ConformalGuard, texts: &[&str]) -> usize {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    assert_eq!(args.len(), 3, "usage: <scifact> <nfcorpus> <fiqa> corpus.jsonl");
+    assert_eq!(
+        args.len(),
+        3,
+        "usage: <scifact> <nfcorpus> <fiqa> corpus.jsonl"
+    );
     let (sci, sci_blank) = load(&args[0], SCIFACT_SHA);
     let model_fp = shared_detector().model().fingerprint();
     let sci_scores: Vec<f64> = sci.iter().map(|d| score(&d.text)).collect();

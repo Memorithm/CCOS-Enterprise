@@ -1,0 +1,4 @@
+strict import: qrel_rows=12334 positive=12334
+indexes: 783.5ms
+retrieve+score: 24.1s
+wall_s=25.0 maxrss_kib=31880 exit=0

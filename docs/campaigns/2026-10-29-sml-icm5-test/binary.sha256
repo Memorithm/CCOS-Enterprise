@@ -1,0 +1,2 @@
+campaign-run (pre-rustfmt) 35280ff8e43d07b47fbfcfe4f3ea1221be85244309bf3b48542f74459b767621  target/release/examples/beir_sml_icm5
+post-rustfmt rebuild      cb6664f1a09f756e2993fa87576269af650c4803fec39e06adb496875d20cdbf  (reproduced identical stdout sha256 on scifact+nfcorpus)

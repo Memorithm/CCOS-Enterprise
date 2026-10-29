@@ -1,0 +1,18 @@
+[package]
+name = "ccos-enterprise-sml-retrieval"
+version = "0.1.0-pre"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Concurrent (alternative-arm) SML/GROK-ICM retrieval adapter contract behind the governed recall path. Never replaces the DocumentMemory lexical/fused default."
+
+[features]
+default = []
+# Opt-in: exposes the concurrent-arm wrapper. Without it only the trait, types and the
+# fail-closed `UnavailableSmlRetrieval` backend exist. No GPU / NVIDIA dependency either way.
+concurrent-arm = []
+
+[dependencies]
+ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
+ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }

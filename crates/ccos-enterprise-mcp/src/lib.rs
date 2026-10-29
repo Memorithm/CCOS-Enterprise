@@ -51,6 +51,13 @@
 
 pub mod decision;
 pub mod governed_context_tool;
+pub mod governed_document_recall;
+pub use governed_document_recall::{
+    document_recall_result, govern_governed_document_recall, governed_document_recall_tool_spec,
+    parse_document_recall_arguments, recall_governed_documents, serve_document_recall,
+    DocumentRecallArguments, DocumentRecallError, GOVERNED_DOCUMENT_RECALL_PERMISSION,
+    GOVERNED_DOCUMENT_RECALL_TOOL,
+};
 pub mod governed_evidence_tool;
 pub mod governed_purge_tool;
 pub use governed_purge_tool::{

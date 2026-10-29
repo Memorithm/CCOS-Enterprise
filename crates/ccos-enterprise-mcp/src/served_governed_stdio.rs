@@ -5,10 +5,9 @@
 //! governance settlement. It owns no independent authorization state.
 
 use super::*;
-use ccos_enterprise_ingest::doc_index::{lexical_only_memory, LexicalDocumentMemory};
 use ccos_enterprise_mcp::{
-    parse_document_recall_arguments, recall_governed_documents, DocumentRecallArguments,
-    GOVERNED_CONTEXT_TOOL, GOVERNED_DOCUMENT_RECALL_TOOL,
+    parse_document_recall_arguments, DocumentRanker, DocumentRecallArguments, ServedDocumentMemory,
+    ServedIndexMut, GOVERNED_CONTEXT_TOOL, GOVERNED_DOCUMENT_RECALL_TOOL,
 };
 use ccos_enterprise_memory::{
     attest_governed_context, BudgetedMemoryRecall, GovernedRecallTrustPolicy, MemoryContextBudget,
@@ -29,26 +28,33 @@ enum GovernedRead {
     DocumentRecall(DocumentRecallArguments),
 }
 
-/// Lexical-only (BM25) document index derived from one provider generation.
+/// Document index derived from one provider generation: lexical-only (BM25) by default, dense or
+/// fused when the operator injected a CPU encoder at boot (see [`DocumentRanker`]).
 ///
 /// Never persisted on its own: it is rebuilt from the verified governed assets of the selected
 /// generation at boot and whenever a governed mutation publishes a new generation.
 pub(super) struct DocumentIndex {
     generation: u64,
-    memory: LexicalDocumentMemory,
+    memory: ServedDocumentMemory,
 }
 
 impl DocumentIndex {
-    pub(super) fn rebuild(store: &ProviderGenerationStore) -> Result<Self, String> {
-        let mut memory = lexical_only_memory();
-        let report = store
-            .recovered()
-            .rebuild_document_index(&mut memory)
-            .map_err(|error| format!("cannot rebuild governed document index: {error}"))?;
+    pub(super) fn rebuild(
+        store: &ProviderGenerationStore,
+        ranker: &DocumentRanker,
+    ) -> Result<Self, String> {
+        let mut memory = ranker.empty_memory();
+        let recovered = store.recovered();
+        let report = match memory.index_mut() {
+            ServedIndexMut::Lexical(m) => recovered.rebuild_document_index(m),
+            ServedIndexMut::Encoded(m) => recovered.rebuild_document_index(m),
+        }
+        .map_err(|error| format!("cannot rebuild governed document index: {error}"))?;
         eprintln!(
-            "ccos-enterprise-mcp: governed document index rebuilt (generation {}, {} indexed)",
+            "ccos-enterprise-mcp: governed document index rebuilt (generation {}, {} indexed, ranking {})",
             store.generation(),
-            report.indexed
+            report.indexed,
+            ranker.mode().label()
         );
         Ok(Self {
             generation: store.generation(),
@@ -389,25 +395,27 @@ impl Server {
             .as_ref()
             .is_none_or(|index| index.generation != store.generation())
         {
-            self.document_index = Some(DocumentIndex::rebuild(store)?);
+            self.document_index =
+                Some(DocumentIndex::rebuild(store, &self.config.document_ranker)?);
         }
         let index = self
             .document_index
             .as_mut()
             .ok_or_else(|| "governed document index is unavailable".to_string())?;
-        let assembly = recall_governed_documents(
-            &mut index.memory,
-            &tenant,
-            store.governance(),
-            GovernedRecallTrustPolicy::VerifiedOnly,
-            &parsed.query,
-            parsed.k,
-            parsed.context_budget,
-        )
-        .map_err(|error| error.to_string())?;
+        let assembly = index
+            .memory
+            .recall(
+                &tenant,
+                store.governance(),
+                GovernedRecallTrustPolicy::VerifiedOnly,
+                &parsed.query,
+                parsed.k,
+                parsed.context_budget,
+            )
+            .map_err(|error| error.to_string())?;
         let mut result = ccos_enterprise_mcp::document_recall_result(&assembly);
         result["structuredContent"]["generation"] = json!(store.generation());
-        result["structuredContent"]["ranking"] = json!("lexical_bm25");
+        index.memory.annotate(&mut result);
         Ok(result)
     }
 }

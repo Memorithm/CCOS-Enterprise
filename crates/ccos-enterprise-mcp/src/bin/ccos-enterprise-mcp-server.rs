@@ -154,6 +154,8 @@ struct Config {
     governed_memory_root: Option<PathBuf>,
     envelope: Option<std::sync::Arc<ccos_enterprise_envelope::EnvelopeCipher>>,
     evidence_roots: Option<(PathBuf, PathBuf)>,
+    /// Ranking of the derived `memory.document_recall` index (lexical BM25 unless opted in).
+    document_ranker: ccos_enterprise_mcp::DocumentRanker,
 }
 
 impl Config {
@@ -192,6 +194,7 @@ impl Config {
             (Some(knowledge), Some(blobs)) if !knowledge.is_empty() && !blobs.is_empty() && governed_memory_root.is_some() => Some((knowledge.into(), blobs.into())),
             _ => return Err("evidence resolution requires both knowledge and source roots and a governed provider".into()),
         };
+        let document_ranker = document_ranker_from_env(governed_memory_root.is_some())?;
         let state_dir = PathBuf::from(required_env("CCOS_ENTERPRISE_STATE_DIR")?);
         validate_data_at_rest_profile(
             &tenant,
@@ -222,8 +225,76 @@ impl Config {
             governed_memory_root,
             envelope,
             evidence_roots,
+            document_ranker,
         })
     }
+}
+
+/// Optional dense/fused ranking for `memory.document_recall` (default: lexical BM25, unchanged).
+///
+/// * `CCOS_ENTERPRISE_DOCUMENT_RANKING` = `lexical_bm25` (default) | `dense` | `fused`
+/// * `CCOS_ENTERPRISE_DOCUMENT_ENCODER_DIR`: pinned sentence-transformer directory
+///   (`config.json`, `tokenizer.json`, `model.safetensors`, e.g. all-MiniLM-L6-v2), loaded once
+///   on CPU by the pure-Rust `ccos-dense-encoder` (no GPU/CUDA). Required for dense/fused,
+///   refused otherwise.
+/// * `CCOS_ENTERPRISE_DOCUMENT_FUSED_ALPHA` (default 0.5), `CCOS_ENTERPRISE_DOCUMENT_FUSED_POOL`
+///   (default 100): fused only.
+/// * `CCOS_ENTERPRISE_DOCUMENT_ENCODER_LABEL`: identifier echoed as `ranking_encoder`
+///   (default: the directory name).
+///
+/// Misconfiguration fails the boot instead of silently falling back to another mode.
+fn document_ranker_from_env(
+    governed_memory: bool,
+) -> Result<ccos_enterprise_mcp::DocumentRanker, String> {
+    use ccos_enterprise_mcp::{DocumentRanker, DocumentRankingMode};
+    let var = |name: &str| -> Result<Option<String>, String> {
+        match std::env::var(name) {
+            Ok(v) => Ok(Some(v)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid UTF-8")),
+        }
+    };
+    let mode = DocumentRankingMode::parse(
+        var("CCOS_ENTERPRISE_DOCUMENT_RANKING")?.as_deref(),
+        var("CCOS_ENTERPRISE_DOCUMENT_FUSED_ALPHA")?.as_deref(),
+        var("CCOS_ENTERPRISE_DOCUMENT_FUSED_POOL")?.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
+    let dir = std::env::var_os("CCOS_ENTERPRISE_DOCUMENT_ENCODER_DIR");
+    let label = var("CCOS_ENTERPRISE_DOCUMENT_ENCODER_LABEL")?;
+    if !mode.needs_encoder() {
+        if dir.is_some() || label.is_some() {
+            return Err(
+                "CCOS_ENTERPRISE_DOCUMENT_ENCODER_DIR/LABEL require CCOS_ENTERPRISE_DOCUMENT_RANKING=dense|fused"
+                    .into(),
+            );
+        }
+        return Ok(DocumentRanker::lexical());
+    }
+    if !governed_memory {
+        return Err("dense/fused document ranking requires a governed provider".into());
+    }
+    let dir = match dir {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => {
+            return Err(format!(
+                "CCOS_ENTERPRISE_DOCUMENT_RANKING={} requires CCOS_ENTERPRISE_DOCUMENT_ENCODER_DIR",
+                mode.label()
+            ))
+        }
+    };
+    let encoder = ccos_dense_encoder::BertSentenceEncoder::load(
+        &dir,
+        ccos_dense_encoder::DEFAULT_MAX_LEN,
+        ccos_dense_encoder::DEFAULT_THREADS,
+    )
+    .map_err(|e| format!("cannot load document encoder: {e}"))?;
+    let label = label.unwrap_or_else(|| {
+        dir.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "sentence-encoder".into())
+    });
+    DocumentRanker::with_encoder(mode, Box::new(encoder), label).map_err(|e| e.to_string())
 }
 
 fn validate_data_at_rest_profile(
@@ -1413,7 +1484,9 @@ impl Server {
         // Derived text index: rebuilt from the verified governed assets, never stored apart.
         let document_index = governed_memory
             .as_ref()
-            .map(served_governed_stdio::DocumentIndex::rebuild)
+            .map(|store| {
+                served_governed_stdio::DocumentIndex::rebuild(store, &config.document_ranker)
+            })
             .transpose()?;
 
         let evidence = config
@@ -2630,6 +2703,7 @@ mod tests {
             governed_memory_root: None,
             envelope: None,
             evidence_roots: None,
+            document_ranker: ccos_enterprise_mcp::DocumentRanker::lexical(),
         }
     }
 

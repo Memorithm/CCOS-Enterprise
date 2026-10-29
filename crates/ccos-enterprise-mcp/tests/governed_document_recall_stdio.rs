@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ccos_enterprise_auth::{issue_identity_token, IdentityClaims, IDENTITY_TOKEN_VERSION};
 use ccos_enterprise_ingest::doc_index::lexical_only_memory;
-use ccos_enterprise_mcp::{recall_governed_documents, DocumentRecallError};
+use ccos_enterprise_mcp::{
+    recall_governed_documents, DocumentRanker, DocumentRankingMode, DocumentRecallError,
+    ServedDocumentMemory, ServedIndexMut,
+};
 use ccos_enterprise_memory::{
     GovernedMemoryProjection, MemoryAssetDescriptor, MemoryAssetId, MemoryEvidenceRef,
     MemoryLineage, MemoryLineageGraph, MemoryLoadoutBinding, MemoryLoadoutPlan, MemorySpace,
@@ -149,6 +152,16 @@ impl ServerProcess {
         public_key: &[u8; 32],
         roots: Option<(&Path, &Path)>,
     ) -> Self {
+        Self::spawn_with_env(state, provider, token, public_key, roots, &[])
+    }
+
+    fn command(
+        state: &Path,
+        provider: &Path,
+        token: &str,
+        public_key: &[u8; 32],
+        extra: &[(&str, &str)],
+    ) -> Command {
         let binary = env!("CARGO_BIN_EXE_ccos-enterprise-mcp-server");
         let public_hex: String = public_key
             .iter()
@@ -159,12 +172,19 @@ impl ServerProcess {
             .env_remove("CCOS_ENTERPRISE_ENVELOPE_CONFIG")
             .env_remove("CCOS_ENTERPRISE_EVIDENCE_KNOWLEDGE_ROOT")
             .env_remove("CCOS_ENTERPRISE_SOURCE_BLOBS_ROOT");
-        if let Some((knowledge, blobs)) = roots {
-            command
-                .env("CCOS_ENTERPRISE_EVIDENCE_KNOWLEDGE_ROOT", knowledge)
-                .env("CCOS_ENTERPRISE_SOURCE_BLOBS_ROOT", blobs);
+        for name in [
+            "CCOS_ENTERPRISE_DOCUMENT_RANKING",
+            "CCOS_ENTERPRISE_DOCUMENT_ENCODER_DIR",
+            "CCOS_ENTERPRISE_DOCUMENT_ENCODER_LABEL",
+            "CCOS_ENTERPRISE_DOCUMENT_FUSED_ALPHA",
+            "CCOS_ENTERPRISE_DOCUMENT_FUSED_POOL",
+        ] {
+            command.env_remove(name);
         }
-        let mut child = command
+        for (name, value) in extra {
+            command.env(name, value);
+        }
+        command
             .env("CCOS_ENTERPRISE_AUDIENCE", "docrecall-test")
             .env("CCOS_ENTERPRISE_ISSUER_KID", "test-key")
             .env("CCOS_ENTERPRISE_ISSUER_PUBLIC_KEY_HEX", public_hex)
@@ -174,7 +194,25 @@ impl ServerProcess {
             .env("CCOS_ENTERPRISE_TOKEN_BUDGET", "1000")
             .env("CCOS_ENTERPRISE_CALL_COST_TOKENS", "1")
             .env("CCOS_ENTERPRISE_STATE_DIR", state)
-            .env("CCOS_ENTERPRISE_GOVERNED_MEMORY_ROOT", provider)
+            .env("CCOS_ENTERPRISE_GOVERNED_MEMORY_ROOT", provider);
+        command
+    }
+
+    fn spawn_with_env(
+        state: &Path,
+        provider: &Path,
+        token: &str,
+        public_key: &[u8; 32],
+        roots: Option<(&Path, &Path)>,
+        extra: &[(&str, &str)],
+    ) -> Self {
+        let mut command = Self::command(state, provider, token, public_key, extra);
+        if let Some((knowledge, blobs)) = roots {
+            command
+                .env("CCOS_ENTERPRISE_EVIDENCE_KNOWLEDGE_ROOT", knowledge)
+                .env("CCOS_ENTERPRISE_SOURCE_BLOBS_ROOT", blobs);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -411,4 +449,238 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+// ── Encoder injection (dense / fused) ──────────────────────────────────────────────────────
+
+/// Test-only "semantic" encoder: maps synonyms to the same axis so dense recall can match a
+/// query with no lexical overlap. Not a model, not a quality claim.
+struct ConceptEncoder;
+impl ccos_core::retrieval::Encoder for ConceptEncoder {
+    fn embedding_dim(&self) -> usize {
+        3
+    }
+    fn encode(&mut self, text: &str) -> Vec<f32> {
+        let mut v = vec![0.0f32; 3];
+        for w in text.to_lowercase().split_whitespace() {
+            match w {
+                "revenue" | "earnings" | "income" => v[0] += 1.0,
+                "report" | "filing" => v[1] += 1.0,
+                _ => v[2] += 0.1,
+            }
+        }
+        v
+    }
+}
+
+fn ranker(mode: DocumentRankingMode) -> DocumentRanker {
+    DocumentRanker::with_encoder(mode, Box::new(ConceptEncoder), "concept-test").unwrap()
+}
+
+fn recalled(
+    memory: &mut ccos_enterprise_mcp::ServedDocumentMemory,
+    store: &ProviderGenerationStore,
+    tenant: &str,
+    q: &str,
+) -> Result<Vec<String>, DocumentRecallError> {
+    memory
+        .recall(
+            &TenantId::validated(tenant).unwrap(),
+            store.governance(),
+            GovernedRecallTrustPolicy::VerifiedOnly,
+            q,
+            8,
+            MemoryContextBudget::new(8, 4096).unwrap(),
+        )
+        .map(|a| {
+            a.chunks()
+                .iter()
+                .map(|c| c.asset_id.as_str().to_string())
+                .collect()
+        })
+}
+
+fn rebuilt(store: &ProviderGenerationStore, ranker: &DocumentRanker) -> ServedDocumentMemory {
+    let mut memory = ranker.empty_memory();
+    let report = match memory.index_mut() {
+        ServedIndexMut::Lexical(m) => store.recovered().rebuild_document_index(m),
+        ServedIndexMut::Encoded(m) => store.recovered().rebuild_document_index(m),
+    }
+    .unwrap();
+    assert_eq!(report.indexed, 2);
+    assert_eq!(report.skipped_inactive, 1);
+    assert_eq!(report.skipped_out_of_loadout, 1);
+    memory
+}
+
+#[test]
+fn default_ranker_is_lexical_and_matches_shipped_behaviour() {
+    let root = Directory::new();
+    let store = ProviderGenerationStore::initialize(
+        root.0.join("provider"),
+        authority(),
+        config(),
+        &records(),
+    )
+    .unwrap();
+    let mut served = rebuilt(&store, &DocumentRanker::default());
+    let mut shipped = lexical_only_memory();
+    store
+        .recovered()
+        .rebuild_document_index(&mut shipped)
+        .unwrap();
+    let budget = MemoryContextBudget::new(8, 4096).unwrap();
+    let acme = TenantId::validated("acme").unwrap();
+    for q in ["quarterly revenue report", "earnings filing", "active"] {
+        let a = served
+            .recall(
+                &acme,
+                store.governance(),
+                GovernedRecallTrustPolicy::VerifiedOnly,
+                q,
+                8,
+                budget,
+            )
+            .unwrap();
+        let b = recall_governed_documents(
+            &mut shipped,
+            &acme,
+            store.governance(),
+            GovernedRecallTrustPolicy::VerifiedOnly,
+            q,
+            8,
+            budget,
+        )
+        .unwrap();
+        let ids = |x: &ccos_enterprise_memory::GovernedMemoryContextAssembly| {
+            x.chunks()
+                .iter()
+                .map(|c| (c.asset_id.as_str().to_string(), c.similarity))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&a), ids(&b), "{q}");
+    }
+    // No lexical overlap => nothing under BM25.
+    assert_eq!(
+        recalled(&mut served, &store, "acme", "earnings filing").unwrap(),
+        Vec::<String>::new()
+    );
+    let mut r = json!({"structuredContent": {}});
+    served.annotate(&mut r);
+    assert_eq!(r["structuredContent"], json!({"ranking": "lexical_bm25"}));
+}
+
+#[test]
+fn injected_encoder_serves_dense_and_fused_through_governed_admission() {
+    let root = Directory::new();
+    let store = ProviderGenerationStore::initialize(
+        root.0.join("provider"),
+        authority(),
+        config(),
+        &records(),
+    )
+    .unwrap();
+    for mode in [
+        DocumentRankingMode::Dense,
+        DocumentRankingMode::Fused {
+            alpha: 0.5,
+            pool: 100,
+        },
+    ] {
+        let mut memory = rebuilt(&store, &ranker(mode));
+        // Synonym query with zero lexical overlap reaches the asset through the encoder, and
+        // the quarantined asset (indexed, same vector) is still dropped by admit_governed_recall.
+        assert_eq!(
+            recalled(&mut memory, &store, "acme", "earnings filing").unwrap(),
+            ["active"],
+            "{mode:?}"
+        );
+        // Tenant isolation: another tenant never reaches the index.
+        assert!(matches!(
+            recalled(&mut memory, &store, "globex", "earnings filing"),
+            Err(DocumentRecallError::RecallAdmission(_))
+        ));
+        let mut r = json!({"structuredContent": {}});
+        memory.annotate(&mut r);
+        assert_eq!(r["structuredContent"]["ranking"], mode.label());
+        assert_eq!(r["structuredContent"]["ranking_encoder"], "concept-test");
+        match mode {
+            DocumentRankingMode::Fused { .. } => {
+                assert_eq!(r["structuredContent"]["ranking_alpha"], 0.5);
+                assert_eq!(r["structuredContent"]["ranking_pool"], 100);
+            }
+            _ => assert!(r["structuredContent"].get("ranking_alpha").is_none()),
+        }
+    }
+}
+
+#[test]
+fn stdio_boot_refuses_dense_or_fused_without_an_encoder() {
+    let root = Directory::new();
+    let provider = root.0.join("provider");
+    drop(
+        ProviderGenerationStore::initialize(&provider, authority(), config(), &records()).unwrap(),
+    );
+    let (token, public) = token();
+    for extra in [
+        &[("CCOS_ENTERPRISE_DOCUMENT_RANKING", "fused")][..],
+        &[("CCOS_ENTERPRISE_DOCUMENT_RANKING", "dense")][..],
+        &[("CCOS_ENTERPRISE_DOCUMENT_RANKING", "bm25")][..],
+        &[("CCOS_ENTERPRISE_DOCUMENT_ENCODER_DIR", "/nonexistent")][..],
+        &[
+            ("CCOS_ENTERPRISE_DOCUMENT_RANKING", "fused"),
+            (
+                "CCOS_ENTERPRISE_DOCUMENT_ENCODER_DIR",
+                "/nonexistent/minilm",
+            ),
+        ][..],
+    ] {
+        let output =
+            ServerProcess::command(&root.0.join("server"), &provider, &token, &public, extra)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+        assert!(!output.status.success(), "{extra:?} booted");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("DOCUMENT") || stderr.contains("encoder") || stderr.contains("ranking"),
+            "{extra:?}: {stderr}"
+        );
+    }
+}
+
+/// Optional, not run in CI: real pinned all-MiniLM-L6-v2 on CPU through the stdio server.
+/// `CCOS_TEST_MINILM_DIR=/path/to/all-MiniLM-L6-v2 cargo test -p ccos-enterprise-mcp -- --ignored`
+#[test]
+#[ignore = "needs a local MiniLM directory (CCOS_TEST_MINILM_DIR)"]
+fn real_stdio_serves_fused_minilm_when_configured() {
+    let dir = std::env::var("CCOS_TEST_MINILM_DIR").expect("CCOS_TEST_MINILM_DIR");
+    let root = Directory::new();
+    let provider = root.0.join("provider");
+    let state = root.0.join("server");
+    drop(
+        ProviderGenerationStore::initialize(&provider, authority(), config(), &records()).unwrap(),
+    );
+    let (token, public) = token();
+    let mut server = ServerProcess::spawn_with_env(
+        &state,
+        &provider,
+        &token,
+        &public,
+        None,
+        &[
+            ("CCOS_ENTERPRISE_DOCUMENT_RANKING", "fused"),
+            ("CCOS_ENTERPRISE_DOCUMENT_ENCODER_DIR", &dir),
+            ("CCOS_ENTERPRISE_DOCUMENT_ENCODER_LABEL", "all-MiniLM-L6-v2"),
+        ],
+    );
+    let response = server.request(call(1, "acme", "doc-m1", query()));
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["ranking"], "fused", "{response}");
+    assert_eq!(structured["ranking_alpha"], 0.5);
+    assert_eq!(structured["ranking_encoder"], "all-MiniLM-L6-v2");
+    let items = structured["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["asset_id"], "active");
+    server.stop();
 }

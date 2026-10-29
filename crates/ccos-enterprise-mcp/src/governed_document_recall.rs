@@ -14,8 +14,9 @@
 //!    trust policy) and is then item/byte bounded by the context budget.
 //!
 //! Scores are ordering data only. The index is in-memory and derived: the stdio server rebuilds
-//! it (lexical-only) from the selected provider generation's governed assets at boot and after
-//! each new generation (`RecoveredGovernedMemory::rebuild_document_index`).
+//! it from the selected provider generation's governed assets at boot and after each new
+//! generation (`RecoveredGovernedMemory::rebuild_document_index`), lexical-only unless the
+//! operator injected a CPU encoder (see [`crate::document_ranking`]).
 
 use std::fmt;
 
@@ -50,7 +51,7 @@ pub fn govern_governed_document_recall(deployment: &mut Deployment) {
 pub fn governed_document_recall_tool_spec() -> Value {
     json!({
         "name": GOVERNED_DOCUMENT_RECALL_TOOL,
-        "description": "Text recall over tenant-governed DocumentMemory (lexical BM25 by default). Spaces come from the durable bootstrap loadout; results must pass governed recall admission (verified assets only); scores never grant authority.",
+        "description": "Text recall over tenant-governed DocumentMemory (lexical BM25 by default; dense or fused only when the operator configured an encoder, reported in structuredContent.ranking). Spaces come from the durable bootstrap loadout; results must pass governed recall admission (verified assets only); scores never grant authority.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,

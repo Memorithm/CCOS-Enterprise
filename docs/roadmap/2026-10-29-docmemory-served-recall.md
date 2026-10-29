@@ -34,8 +34,8 @@ Follow-up to #234 (`c8de0ea`), #235 (`8702a0b`), #236 (`d1912fe`).
 - **False-alarm guard at served ingest.** `IngestGuard` exists (#234) but the served rebuild uses
   no guard; a calibrated scorer and its wiring (and what to do with refused assets at rebuild)
   are open.
-- **Embedding trait / dense ranking in the server.** Server is lexical-only. Injecting an encoder
-  behind a stable Enterprise trait (no mandatory GPU/NVIDIA) is open.
+- ~~**Embedding trait / dense ranking in the server.**~~ Done — see
+  `2026-10-29-docmemory-served-encoder.md` (optional CPU encoder, lexical default).
 - **HTTP gateway.** Only the stdio binary serves the tool; an HTTP front door is open.
 - **Rebuild cost.** Rebuild is O(assets) at boot and per new generation; incremental update or a
   verified cached index is open if generation sizes require it. No measurements were taken.

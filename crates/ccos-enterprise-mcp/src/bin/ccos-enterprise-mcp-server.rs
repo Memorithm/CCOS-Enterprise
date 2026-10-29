@@ -17,6 +17,9 @@
 mod execution;
 #[path = "../execution_backend.rs"]
 mod execution_backend;
+#[cfg(feature = "http-gateway")]
+#[path = "../http_gateway.rs"]
+mod http_gateway;
 #[cfg(test)]
 #[path = "../kms_server_tests.rs"]
 mod kms_server_tests;
@@ -2511,8 +2514,23 @@ fn write_response(stdout: &io::Stdout, response: &Value) -> Result<(), String> {
         .map_err(|error| format!("stdout flush failed: {error}"))
 }
 
+/// `CCOS_ENTERPRISE_HTTP_BIND` selects the HTTP transport (feature `http-gateway`) instead of
+/// stdio. Same `Server`, same admission; see `docs/HTTP_GATEWAY.md`.
+fn run(config: Config) -> Result<(), String> {
+    match std::env::var("CCOS_ENTERPRISE_HTTP_BIND") {
+        Err(std::env::VarError::NotPresent) => serve(config),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("CCOS_ENTERPRISE_HTTP_BIND is not valid UTF-8".into())
+        }
+        #[cfg(feature = "http-gateway")]
+        Ok(bind) => http_gateway::serve_http(config, &bind),
+        #[cfg(not(feature = "http-gateway"))]
+        Ok(_) => Err("CCOS_ENTERPRISE_HTTP_BIND requires the http-gateway feature".into()),
+    }
+}
+
 fn main() {
-    if let Err(error) = Config::from_env().and_then(serve) {
+    if let Err(error) = Config::from_env().and_then(run) {
         eprintln!("ccos-enterprise-mcp-server: {error}");
         std::process::exit(1);
     }

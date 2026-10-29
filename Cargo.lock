@@ -380,6 +380,7 @@ name = "ccos-enterprise-mcp"
 version = "0.1.0-pre"
 dependencies = [
  "ccos-core",
+ "ccos-dense-encoder",
  "ccos-enterprise-auth",
  "ccos-enterprise-decision-service",
  "ccos-enterprise-docmemory",

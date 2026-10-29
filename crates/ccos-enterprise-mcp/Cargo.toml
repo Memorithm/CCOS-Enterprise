@@ -22,6 +22,9 @@ ccos-enterprise-skills-audit = { path = "../ccos-enterprise-skills-audit" }
 ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
 ccos-enterprise-docmemory = { path = "../ccos-enterprise-docmemory" }
 ccos-enterprise-ingest = { path = "../ccos-enterprise-ingest" }
+# Pure-Rust CPU sentence encoder (no BLAS, no GPU/CUDA). Only loaded when the operator opts
+# into dense/fused document ranking.
+ccos-dense-encoder = { path = "../ccos-dense-encoder" }
 ccos-enterprise-knowledge-model = { path = "../ccos-enterprise-knowledge-model" }
 ccos-enterprise-knowledge-store = { path = "../ccos-enterprise-knowledge-store" }
 ccos-enterprise-envelope = { path = "../ccos-enterprise-envelope" }

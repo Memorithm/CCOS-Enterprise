@@ -50,6 +50,11 @@
 //! pins exactly that.
 
 pub mod decision;
+pub mod document_ranking;
+pub use document_ranking::{
+    DocumentRanker, DocumentRankingConfigError, DocumentRankingMode, EncodedDocumentMemory,
+    ServedDocumentMemory, ServedIndexMut, SharedEncoder, DEFAULT_FUSED_ALPHA, DEFAULT_FUSED_POOL,
+};
 pub mod governed_context_tool;
 pub mod governed_document_recall;
 pub use governed_document_recall::{

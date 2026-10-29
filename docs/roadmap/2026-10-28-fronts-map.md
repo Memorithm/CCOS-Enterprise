@@ -25,3 +25,12 @@ Règle: aucun gain n'est revendiqué sans prereg mergé + CI verte + résultats 
 - **Test de parité**: loadout mono-espace ⇒ ids, scores et payloads identiques à `DocumentMemory::rank` (lexical, dense, fused). Ce n'est pas une mesure BEIR; aucune métrique nouvelle n'est revendiquée.
 - **ConformalGuard à l'ingest**: optionnel (`IngestGuard`), scoreur de non-conformité injecté; document flaggé (ou score NaN) refusé avant indexation; guard non calibré (seuil `+∞`, fail-open côté Core) refusé à la construction. Texte vide refusé (leçon FiQA). Le taux de fausses alarmes ≤ α sur jeu bénin tenu à part reste **à mesurer** (pas de scoreur produit choisi).
 - **Reste bloqué**: `ccos-enterprise-ingest` n'appelle pas encore l'adaptateur (choix: déclencheur à la promotion vs à l'ingest, budget d'encodage); persistance de l'index (actuellement en mémoire, reconstructible depuis les assets gouvernés); exposition via le gateway/MCP recall.
+
+## Mise à jour 2026-10-29 (suite) — `ccos-enterprise-ingest` → `GovernedDocumentMemory`
+
+- **Branché**: module `ccos_enterprise_ingest::doc_index` (`index_artifact`, `ingest_and_index`, `lexical_only_memory`). Core inchangé.
+- **Déclencheur (décision)**: indexation juste après un `fetch` réussi (artefact tenant-scopé, épinglé par hash), pas à la promotion — chemin le plus court pour fermer ingest → index → recall gouverné. L'asset id est stable (`artifact:<source_id>`), donc un déclenchement à la promotion reste possible plus tard sans changer l'index. Option écartée pour l'instant: indexer à la promotion (exige un hook dans `ccos-enterprise-promotion`, absent aujourd'hui).
+- **Budget d'encodage (décision)**: opt-in. `lexical_only_memory()` = BM25 seul (`LexicalOnly`, aucun vecteur). Dense/fused = encodeur injecté par l'appelant; aucun modèle imposé.
+- **ConformalGuard**: optionnel, construit par l'appelant avec un scoreur calibré (`GovernedDocumentMemory::with_guard`); jamais construit par défaut. Refus (vide, non UTF-8, flaggé) remontés dans `IndexReport.refused`, jamais indexés.
+- **Tests**: ingest → index → `admit_governed_recall` (lignage = evidence artefact), isolation tenant/espace, refus doc vide et non UTF-8, encodeur dense injecté + guard. Aucune métrique revendiquée.
+- **Reste ouvert**: persistance de l'index; exposition gateway/MCP recall; écart entre `GovernedSemanticMemoryProvider` (embedding) et l'API texte; taux de fausses alarmes ≤ α du guard à mesurer sur un jeu bénin tenu à part; ingestion orchestrée (journal P0 + indexation dans une même transaction) non implémentée.

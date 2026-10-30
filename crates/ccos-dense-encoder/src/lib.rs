@@ -12,6 +12,14 @@
 //!   (vocab from `tokenizer.json`; clean text, CJK split, accent strip, lower-case), `[CLS] … [SEP]`, truncation to `max_len` tokens
 //!   (256), attention-masked **mean pooling** over the last hidden state, then **L2 normalisation**.
 //!
+//! * Multilingual: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (d = 384, 12
+//!   layers, `max_seq_length` 128, Apache-2.0) is a `BertModel` with an XLM-R SentencePiece
+//!   **Unigram** vocabulary (250 002 pieces). [`BertSentenceEncoder::load`] auto-detects the
+//!   tokenizer from `tokenizer.json` `model.type` (see [`Tokenizer`] / [`unigram`]); the forward pass
+//!   (absolute positions from 0, token-type 0, mean pooling incl. `<s>`/`</s>`, L2) is unchanged.
+//!   Use [`BertSentenceEncoder::load_auto`] to pick `max_len` from `sentence_bert_config.json`.
+//!   Fetch with `fetch-model-multilingual.sh`.
+//!
 //! Replay caveat (same quarantine stance as `neural-embed`): outputs are deterministic on a given
 //! machine and build, but bit-exactness across CPUs / BLAS kernels is not promised.
 
@@ -20,8 +28,51 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+pub mod unigram;
 pub mod wordpiece;
+use unigram::Unigram;
 use wordpiece::WordPiece;
+
+/// Default maximum sequence length for `paraphrase-multilingual-MiniLM-L12-v2`
+/// (`sentence_bert_config.json` `max_seq_length`).
+pub const MULTILINGUAL_MAX_LEN: usize = 128;
+
+/// Sub-word tokenizer, auto-detected from `tokenizer.json` `model.type`.
+#[derive(Debug, Clone)]
+pub enum Tokenizer {
+    /// BERT WordPiece (`[CLS] … [SEP]`), e.g. all-MiniLM-L6-v2.
+    WordPiece(WordPiece),
+    /// SentencePiece Unigram (`<s> … </s>`, XLM-R vocabulary), e.g. paraphrase-multilingual-MiniLM-L12-v2.
+    Unigram(Unigram),
+}
+
+impl Tokenizer {
+    /// Parse a `tokenizer.json` and dispatch on `model.type` (`WordPiece` | `Unigram`).
+    pub fn from_json(t: &serde_json::Value, max_len: usize) -> Result<Self, String> {
+        match t["model"]["type"].as_str() {
+            Some("WordPiece") => WordPiece::from_json(t, max_len).map(Self::WordPiece),
+            Some("Unigram") => Unigram::from_json(t, max_len).map(Self::Unigram),
+            o => Err(format!("tokenizer.json: unsupported model.type {o:?}")),
+        }
+    }
+
+    /// Load `dir/tokenizer.json`.
+    pub fn load(dir: &Path, max_len: usize) -> Result<Self, DenseEncoderError> {
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("tokenizer.json")).map_err(err)?,
+        )
+        .map_err(err)?;
+        Self::from_json(&v, max_len).map_err(err)
+    }
+
+    /// Model input ids including the special begin/end tokens, at most `max_len` long.
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        match self {
+            Self::WordPiece(t) => t.encode(text),
+            Self::Unigram(t) => t.encode(text),
+        }
+    }
+}
 
 /// Errors raised while loading a model directory.
 #[derive(Debug)]
@@ -151,7 +202,7 @@ fn erf(x: f64) -> f64 {
 
 /// Pure-Rust CPU BERT sentence encoder (mean pooling + L2 norm). No unsafe, no BLAS, no GPU.
 pub struct BertSentenceEncoder {
-    tokenizer: WordPiece,
+    tokenizer: Tokenizer,
     word: Vec<f32>,
     pos: Vec<f32>,
     typ: Vec<f32>,
@@ -288,11 +339,7 @@ impl BertSentenceEncoder {
             .get("layer_norm_eps")
             .and_then(|v| v.as_f64())
             .unwrap_or(1e-12) as f32;
-        let tok_json: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("tokenizer.json")).map_err(err)?,
-        )
-        .map_err(err)?;
-        let tokenizer = WordPiece::from_json(&tok_json, max_len.min(maxpos)).map_err(err)?;
+        let tokenizer = Tokenizer::load(dir, max_len.min(maxpos))?;
         let st = SafeTensors::read(&dir.join("model.safetensors"))?;
         let mut layers = Vec::with_capacity(nl);
         for i in 0..nl {
@@ -323,6 +370,22 @@ impl BertSentenceEncoder {
                 threads
             },
         })
+    }
+
+    /// Like [`Self::load`], with `max_len` taken from `sentence_bert_config.json`
+    /// (`max_seq_length`) when present, else [`DEFAULT_MAX_LEN`].
+    pub fn load_auto(dir: &Path, threads: usize) -> Result<Self, DenseEncoderError> {
+        let max_len = std::fs::read_to_string(dir.join("sentence_bert_config.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["max_seq_length"].as_u64())
+            .map_or(DEFAULT_MAX_LEN, |v| v as usize);
+        Self::load(dir, max_len, threads)
+    }
+
+    /// The tokenizer in use.
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
     }
 
     /// Encode one text (no padding: one sequence per forward pass).
@@ -608,5 +671,55 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
         assert!(maxabs < 1e-4, "batch/single mismatch {maxabs}");
+    }
+
+    /// Oracle test against `sentence-transformers` for paraphrase-multilingual-MiniLM-L12-v2
+    /// (`tests/oracle_multilingual.json`: token ids + embeddings, EN/DE/FR). Runs only when
+    /// `CCOS_DENSE_MULTI_MODEL_DIR` points at a local checkout (see `fetch-model-multilingual.sh`).
+    #[test]
+    fn oracle_equal_multilingual_when_model_present() {
+        let Ok(dir) = std::env::var("CCOS_DENSE_MULTI_MODEL_DIR") else {
+            eprintln!("CCOS_DENSE_MULTI_MODEL_DIR unset: multilingual oracle test skipped");
+            return;
+        };
+        let oracle: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/oracle_multilingual.json")).unwrap();
+        let mut enc = BertSentenceEncoder::load_auto(Path::new(&dir), DEFAULT_THREADS).unwrap();
+        assert!(matches!(enc.tokenizer(), Tokenizer::Unigram(_)));
+        assert_eq!(enc.embedding_dim(), 384);
+        let items = oracle["items"].as_array().unwrap();
+        let texts: Vec<String> = items
+            .iter()
+            .map(|i| i["text"].as_str().unwrap().into())
+            .collect();
+        let got = enc.encode_batch(&texts);
+        for (i, item) in items.iter().enumerate() {
+            let ids: Vec<u32> = item["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u32)
+                .collect();
+            assert_eq!(enc.tokenizer().encode(&texts[i]), ids, "item {i} ids");
+            let want: Vec<f32> = item["embedding"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap() as f32)
+                .collect();
+            let cos: f32 = got[i].iter().zip(&want).map(|(a, b)| a * b).sum();
+            let maxabs = got[i]
+                .iter()
+                .zip(&want)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                cos > 0.9999 && maxabs < 1e-3,
+                "item {i}: cos={cos} maxabs={maxabs}"
+            );
+        }
+        // max_seq_length = 128 from sentence_bert_config.json: <s> + 126 + </s>.
+        let long = "Wort ".repeat(400);
+        assert_eq!(enc.tokenizer().encode(&long).len(), MULTILINGUAL_MAX_LEN);
     }
 }

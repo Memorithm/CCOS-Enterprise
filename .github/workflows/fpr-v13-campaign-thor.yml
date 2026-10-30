@@ -1,0 +1,82 @@
+name: FPR-v13 campaign (Thor CUDA, manual)
+
+# Manual-only. Runs the preregistered FPR-v13 harness exactly as in
+# docs/campaigns/2026-10-30-ingest-guard-fpr-v13-prereg.md §6, CUDA only, under thor_gpu_guard.py.
+# Not a required check. Results are uploaded as an artifact; the results doc is a separate PR.
+on:
+  workflow_dispatch:
+    inputs:
+      multi_dir:
+        description: "Runner-local paraphrase-multilingual-MiniLM-L12-v2 dir"
+        required: true
+        default: "/opt/ccos/models/paraphrase-multilingual-MiniLM-L12-v2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: thor-gpu-dense-encoder
+  cancel-in-progress: false
+
+jobs:
+  fpr-v13:
+    name: FPR-v13 10-seed campaign (Jetson Thor, CUDA)
+    runs-on: [self-hosted, Linux, ARM64, jetson-thor, internal]
+    timeout-minutes: 600 # prereg: run declared failed beyond 10 h
+    env:
+      CCOS_ENCODER_BACKEND: cuda
+      SCIRUST_SHA: "9943fd881861e6e33a62319997536473e0ee6e1b"
+      OUT: docs/campaigns/2026-10-30-ingest-guard-fpr-v13
+      DS: docs/campaigns/2026-10-30-ingest-guard-fpr-v12/inputs/deepset-prompt-injections.jsonl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned thor_gpu_guard.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://raw.githubusercontent.com/Memorithm/scirust/${SCIRUST_SHA}/scripts/thor_gpu_guard.py" -o "$RUNNER_TEMP/thor_gpu_guard.py"
+      - name: Fetch data
+        shell: bash
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/data"; mkdir -p "$D"
+          for c in scifact nfcorpus fiqa; do
+            curl -fsSL "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/$c.zip" -o "$D/$c.zip"
+            unzip -q -o "$D/$c.zip" -d "$D"
+          done
+          gunzip -c "$OUT/inputs/chat_v13.jsonl.gz" > "$D/chat_v13.jsonl"
+          sha256sum "$D"/*/corpus.jsonl "$D/chat_v13.jsonl" "$DS"
+      - name: Report device and commit
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          nvidia-smi --query-gpu=name,driver_version --format=csv,noheader || true
+      - name: Build (gpu-cuda)
+        run: cargo build --release --locked -p ccos-enterprise-docmemory --features gpu-cuda --example ingest_guard_fpr_v13
+      - name: Run FPR-v13 under GPU guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/data"
+          date -u +%FT%TZ > "$OUT/run.start"
+          set +e
+          python3 "$RUNNER_TEMP/thor_gpu_guard.py" -- \
+            cargo run --release --locked -p ccos-enterprise-docmemory --features gpu-cuda \
+            --example ingest_guard_fpr_v13 -- "$D/scifact/corpus.jsonl" "$D/nfcorpus/corpus.jsonl" \
+            "$D/fiqa/corpus.jsonl" "$DS" "$D/chat_v13.jsonl" \
+            "${{ inputs.multi_dir }}" "$OUT/model_seed0.json" > "$OUT/raw.jsonl" 2> "$OUT/stderr.txt"
+          rc=$?
+          echo "EXIT $rc $(date -u +%FT%TZ)" > "$OUT/run.exit"
+          tail -n 40 "$OUT/stderr.txt"; cat "$OUT/run.exit"
+          exit $rc
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpr-v13-results
+          path: |
+            docs/campaigns/2026-10-30-ingest-guard-fpr-v13/raw.jsonl
+            docs/campaigns/2026-10-30-ingest-guard-fpr-v13/model_seed0.json
+            docs/campaigns/2026-10-30-ingest-guard-fpr-v13/stderr.txt
+            docs/campaigns/2026-10-30-ingest-guard-fpr-v13/run.*
+          if-no-files-found: warn

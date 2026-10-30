@@ -161,3 +161,37 @@ The GPU is shared with the scirust runners; the workflow's `concurrency` group a
 
 FPR-v12 is preregistered (`docs/campaigns/2026-10-30-ingest-guard-fpr-v12-prereg.md`) and is
 CUDA-only: it refuses to start on CPU and needs this runner (plus the campaign data) first.
+
+## CUDA encode throughput: measured, not yet fixed (2026-10-30)
+
+Measured (no new benchmark; numbers from the campaign `meta` lines):
+
+| Run | Backend | Host | Unique texts | Encode time |
+|---|---|---|---|---|
+| FPR-v11 (#268) | CPU, 8 threads | Thor CPU | 126,767 | 3,319 s |
+| FPR-v12 (#273, run 41094227650) | CUDA (bf16 linears) | Jetson Thor | 126,767 | 6,999 s |
+
+Parity probe (4 items, includes warm-up): multilingual L12 `cpu_ms 87.5` vs `cuda_ms 157.4`;
+L6 `cpu_ms 540.6` vs `cuda_ms 284.6`. CUDA is not faster at batch size 1.
+
+Cause, from reading the code (not profiled yet):
+1. `BertSentenceEncoder::encode_batch` takes a **serial per-text path** when CUDA is active
+   (`texts.iter().map(embed_one_checked)`), while the CPU path fans out over 8 threads. Batch size on
+   the GPU is therefore 1 sequence (≤ 128 tokens).
+2. Only the linear layers run on the GPU. `CudaLinears::forward` **uploads the activation, runs one
+   GEMM and downloads the result synchronously for every linear** (≈ 6 per layer × 12 layers ≈ 72
+   host↔device round-trips per text), all behind one `Mutex`. Attention, softmax, LayerNorm, GELU,
+   bias add and pooling stay on one CPU thread.
+3. So each text pays ~72 launch+sync latencies for tiny GEMMs (`[≤128, 384] × [384, 1536]`) and loses
+   the 8-way CPU parallelism: slower than CPU overall.
+
+Follow-up checklist (each change must keep `dense-encoder-cuda-thor.yml` parity ≥ 0.999 and report
+measured times, no projected speedups):
+- [ ] Profile one 1k-text batch on Thor (`nsys` or timers): split upload / GEMM / download / CPU ops.
+- [ ] Overlap CPU work: run `embed_one_checked` from N threads, holding the CUDA mutex only inside
+      `forward` (cheapest change; attention/LN then parallelise again).
+- [ ] Batch across texts: pad/pack several sequences into one `[Σn, d]` GEMM per linear
+      (attention stays per sequence) to raise GEMM size and cut round-trips by the batch factor.
+- [ ] Keep activations resident: fuse QKV into one GEMM and avoid download→upload between
+      consecutive linears (needs device-side bias/GELU or a fused kernel in SciRust).
+- [ ] Re-measure on the FPR corpus (126,767 texts) and record CPU vs CUDA in this table.

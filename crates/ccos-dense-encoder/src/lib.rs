@@ -20,6 +20,10 @@
 //!   Use [`BertSentenceEncoder::load_auto`] to pick `max_len` from `sentence_bert_config.json`.
 //!   Fetch with `fetch-model-multilingual.sh`.
 //!
+//! * Execution backend: see [`backend`]. Default is the CPU reference path; with the optional
+//!   `gpu-cuda` feature and `CCOS_ENCODER_BACKEND=cuda`, all linear layers run on CUDA (bf16
+//!   Tensor cores, fp32 accumulation) with **no CPU fallback**. See `docs/gpu-execution-path.md`.
+//!
 //! Replay caveat (same quarantine stance as `neural-embed`): outputs are deterministic on a given
 //! machine and build, but bit-exactness across CPUs / BLAS kernels is not promised.
 
@@ -28,7 +32,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+pub mod backend;
 pub mod unigram;
+use backend::CudaLinears;
+pub use backend::{EncoderBackend, BACKEND_ENV};
 pub mod wordpiece;
 use unigram::Unigram;
 use wordpiece::WordPiece;
@@ -94,16 +101,44 @@ pub const DEFAULT_MAX_LEN: usize = 256;
 /// Default number of worker threads for batch encoding (0 = available parallelism).
 pub const DEFAULT_THREADS: usize = 0;
 
+/// Minimum cosine to the fp32 sentence-transformers oracle accepted for the CUDA backend
+/// (bf16 Tensor-core inputs, fp32 accumulation). The CPU path keeps `> 0.9999`.
+pub const CUDA_MIN_COS: f32 = 0.999;
+
 /// Dense linear layer, `y = x Wᵀ + b`, weight stored row-major `[out, in]`.
 struct Linear {
     w: Vec<f32>,
     b: Vec<f32>,
     out: usize,
     inp: usize,
+    /// Handle of the resident CUDA copy of `w` (CUDA backend only).
+    gpu: Option<usize>,
 }
 
 impl Linear {
-    /// `x`: `[n, inp]` row-major → `[n, out]`.
+    /// `x`: `[n, inp]` row-major → `[n, out]`, on CUDA when the weight is resident there.
+    fn run(
+        &self,
+        cuda: Option<&CudaLinears>,
+        x: &[f32],
+        n: usize,
+    ) -> Result<Vec<f32>, DenseEncoderError> {
+        match (cuda, self.gpu) {
+            (Some(c), Some(id)) => {
+                let mut y = c.forward(id, &x[..n * self.inp], n)?;
+                for yr in y.chunks_exact_mut(self.out) {
+                    for (yo, bo) in yr.iter_mut().zip(&self.b) {
+                        *yo += bo;
+                    }
+                }
+                Ok(y)
+            }
+            (None, None) => Ok(self.forward(x, n)),
+            _ => Err(DenseEncoderError("linear/backend mismatch".into())),
+        }
+    }
+
+    /// CPU reference: `x`: `[n, inp]` row-major → `[n, out]`.
     fn forward(&self, x: &[f32], n: usize) -> Vec<f32> {
         let mut y = vec![0f32; n * self.out];
         for (xr, yr) in x
@@ -200,7 +235,8 @@ fn erf(x: f64) -> f64 {
     }
 }
 
-/// Pure-Rust CPU BERT sentence encoder (mean pooling + L2 norm). No unsafe, no BLAS, no GPU.
+/// BERT sentence encoder (mean pooling + L2 norm). CPU path: pure Rust, no unsafe, no BLAS.
+/// Optional CUDA linear path behind feature `gpu-cuda` (see [`backend`]).
 pub struct BertSentenceEncoder {
     tokenizer: Tokenizer,
     word: Vec<f32>,
@@ -211,6 +247,8 @@ pub struct BertSentenceEncoder {
     dim: usize,
     heads: usize,
     threads: usize,
+    backend: EncoderBackend,
+    cuda: Option<CudaLinears>,
 }
 
 impl std::fmt::Debug for BertSentenceEncoder {
@@ -219,6 +257,7 @@ impl std::fmt::Debug for BertSentenceEncoder {
             .field("dim", &self.dim)
             .field("layers", &self.layers.len())
             .field("heads", &self.heads)
+            .field("backend", &self.backend)
             .finish()
     }
 }
@@ -294,6 +333,7 @@ impl SafeTensors {
             b: self.tensor(&format!("{p}.bias"), &[out])?,
             out,
             inp,
+            gpu: None,
         })
     }
 
@@ -309,7 +349,24 @@ impl SafeTensors {
 impl BertSentenceEncoder {
     /// Load `config.json`, `tokenizer.json` and `model.safetensors` from `dir`.
     /// `threads = 0` uses the available parallelism for batch encoding.
+    /// The backend comes from [`BACKEND_ENV`] (unset ⇒ CPU); see [`Self::load_with_backend`].
     pub fn load(dir: &Path, max_len: usize, threads: usize) -> Result<Self, DenseEncoderError> {
+        Self::load_with_backend(dir, max_len, threads, EncoderBackend::from_env()?)
+    }
+
+    /// Like [`Self::load`] with an explicit backend. [`EncoderBackend::Cuda`] opens the CUDA
+    /// device *before* reading weights and returns an error if it is unavailable (or if the crate
+    /// was built without `gpu-cuda`) — never a CPU fallback.
+    pub fn load_with_backend(
+        dir: &Path,
+        max_len: usize,
+        threads: usize,
+        backend: EncoderBackend,
+    ) -> Result<Self, DenseEncoderError> {
+        let mut cuda = match backend {
+            EncoderBackend::Cpu => None,
+            EncoderBackend::Cuda => Some(CudaLinears::open()?),
+        };
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).map_err(err)?)
                 .map_err(err)?;
@@ -355,6 +412,22 @@ impl BertSentenceEncoder {
                 ln2: st.ln(&format!("{p}.output.LayerNorm"), d, eps)?,
             });
         }
+        if let Some(c) = cuda.as_mut() {
+            for l in &mut layers {
+                for lin in [
+                    &mut l.q,
+                    &mut l.k,
+                    &mut l.v,
+                    &mut l.attn_out,
+                    &mut l.inter,
+                    &mut l.out,
+                ] {
+                    lin.gpu = Some(c.add_weight(&lin.w, lin.out, lin.inp)?);
+                    // Weights are resident on the device; drop the host copy.
+                    lin.w = Vec::new();
+                }
+            }
+        }
         Ok(Self {
             word: st.tensor("embeddings.word_embeddings.weight", &[vocab, d])?,
             pos: st.tensor("embeddings.position_embeddings.weight", &[maxpos, d])?,
@@ -364,6 +437,8 @@ impl BertSentenceEncoder {
             layers,
             dim: d,
             heads,
+            backend,
+            cuda,
             threads: if threads == 0 {
                 std::thread::available_parallelism().map_or(1, |n| n.get())
             } else {
@@ -375,12 +450,26 @@ impl BertSentenceEncoder {
     /// Like [`Self::load`], with `max_len` taken from `sentence_bert_config.json`
     /// (`max_seq_length`) when present, else [`DEFAULT_MAX_LEN`].
     pub fn load_auto(dir: &Path, threads: usize) -> Result<Self, DenseEncoderError> {
+        Self::load_auto_with_backend(dir, threads, EncoderBackend::from_env()?)
+    }
+
+    /// Like [`Self::load_auto`] with an explicit backend.
+    pub fn load_auto_with_backend(
+        dir: &Path,
+        threads: usize,
+        backend: EncoderBackend,
+    ) -> Result<Self, DenseEncoderError> {
         let max_len = std::fs::read_to_string(dir.join("sentence_bert_config.json"))
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v["max_seq_length"].as_u64())
             .map_or(DEFAULT_MAX_LEN, |v| v as usize);
-        Self::load(dir, max_len, threads)
+        Self::load_with_backend(dir, max_len, threads, backend)
+    }
+
+    /// The backend the linear layers run on.
+    pub fn backend(&self) -> EncoderBackend {
+        self.backend
     }
 
     /// The tokenizer in use.
@@ -407,8 +496,13 @@ impl BertSentenceEncoder {
         let hd = d / self.heads;
         let scale = 1.0 / (hd as f32).sqrt();
         let mut scores = vec![0f32; n];
+        let cu = self.cuda.as_ref();
         for l in &self.layers {
-            let (q, k, v) = (l.q.forward(&h, n), l.k.forward(&h, n), l.v.forward(&h, n));
+            let (q, k, v) = (
+                l.q.run(cu, &h, n)?,
+                l.k.run(cu, &h, n)?,
+                l.v.run(cu, &h, n)?,
+            );
             let mut ctx = vec![0f32; n * d];
             for hh in 0..self.heads {
                 let o = hh * hd;
@@ -433,16 +527,16 @@ impl BertSentenceEncoder {
                     }
                 }
             }
-            let mut a = l.attn_out.forward(&ctx, n);
+            let mut a = l.attn_out.run(cu, &ctx, n)?;
             for (x, r) in a.iter_mut().zip(&h) {
                 *x += r;
             }
             l.ln1.apply(&mut a);
-            let mut m = l.inter.forward(&a, n);
+            let mut m = l.inter.run(cu, &a, n)?;
             for x in m.iter_mut() {
                 *x = gelu(*x);
             }
-            let mut o = l.out.forward(&m, n);
+            let mut o = l.out.run(cu, &m, n)?;
             for (x, r) in o.iter_mut().zip(&a) {
                 *x += r;
             }
@@ -450,6 +544,17 @@ impl BertSentenceEncoder {
             h = o;
         }
         Ok(mean_pool_l2(&h, d))
+    }
+}
+
+impl BertSentenceEncoder {
+    /// CPU: errors become a zero vector (historic contract). CUDA: errors panic.
+    fn embed_one_checked(&self, text: &str) -> Vec<f32> {
+        match self.embed_one(text) {
+            Ok(v) => v,
+            Err(e) if self.cuda.is_some() => panic!("ccos-dense-encoder cuda backend failed: {e}"),
+            Err(_) => vec![0.0; self.dim],
+        }
     }
 }
 
@@ -475,13 +580,19 @@ impl Encoder for BertSentenceEncoder {
     }
 
     fn encode(&mut self, text: &str) -> Vec<f32> {
-        self.embed_one(text).unwrap_or_else(|_| vec![0.0; self.dim])
+        self.embed_one_checked(text)
     }
 
     /// Parallel over texts (scoped threads); output order equals input order and each vector is
     /// computed independently, so results do not depend on the thread count. A failing text yields
     /// a zero vector (never panics).
+    ///
+    /// CUDA backend: texts run serially on the device and a CUDA failure panics (no CPU fallback,
+    /// no silent zero vectors).
     fn encode_batch(&mut self, texts: &[String]) -> Vec<Vec<f32>> {
+        if self.cuda.is_some() {
+            return texts.iter().map(|t| self.embed_one_checked(t)).collect();
+        }
         let this: &Self = self;
         let per = texts.len().div_ceil(this.threads.max(1)).max(1);
         std::thread::scope(|s| {
@@ -635,8 +746,13 @@ mod tests {
         };
         let oracle: serde_json::Value =
             serde_json::from_str(include_str!("../tests/oracle.json")).unwrap();
-        let mut enc =
-            BertSentenceEncoder::load(Path::new(&dir), DEFAULT_MAX_LEN, DEFAULT_THREADS).unwrap();
+        let mut enc = BertSentenceEncoder::load_with_backend(
+            Path::new(&dir),
+            DEFAULT_MAX_LEN,
+            DEFAULT_THREADS,
+            EncoderBackend::Cpu,
+        )
+        .unwrap();
         assert_eq!(enc.embedding_dim(), 384);
         let items = oracle["items"].as_array().unwrap();
         let texts: Vec<String> = items
@@ -684,7 +800,12 @@ mod tests {
         };
         let oracle: serde_json::Value =
             serde_json::from_str(include_str!("../tests/oracle_multilingual.json")).unwrap();
-        let mut enc = BertSentenceEncoder::load_auto(Path::new(&dir), DEFAULT_THREADS).unwrap();
+        let mut enc = BertSentenceEncoder::load_auto_with_backend(
+            Path::new(&dir),
+            DEFAULT_THREADS,
+            EncoderBackend::Cpu,
+        )
+        .unwrap();
         assert!(matches!(enc.tokenizer(), Tokenizer::Unigram(_)));
         assert_eq!(enc.embedding_dim(), 384);
         let items = oracle["items"].as_array().unwrap();
@@ -721,5 +842,69 @@ mod tests {
         // max_seq_length = 128 from sentence_bert_config.json: <s> + 126 + </s>.
         let long = "Wort ".repeat(400);
         assert_eq!(enc.tokenizer().encode(&long).len(), MULTILINGUAL_MAX_LEN);
+    }
+
+    #[test]
+    fn backend_parse() {
+        assert_eq!(EncoderBackend::parse("").unwrap(), EncoderBackend::Cpu);
+        assert_eq!(EncoderBackend::parse(" CPU ").unwrap(), EncoderBackend::Cpu);
+        assert_eq!(EncoderBackend::parse("cuda").unwrap(), EncoderBackend::Cuda);
+        assert!(EncoderBackend::parse("metal").is_err());
+    }
+
+    /// `backend = cuda` must never degrade to CPU: without the feature, or on a host with no NVIDIA
+    /// device node (hosted CI), loading fails before any weight is read.
+    #[test]
+    fn cuda_backend_hard_fails_without_device() {
+        let no_device = !cfg!(feature = "gpu-cuda")
+            || !(Path::new("/dev/nvidia0").exists() || Path::new("/dev/nvgpu").exists());
+        if !no_device {
+            eprintln!("NVIDIA device node present: hard-fail test not applicable");
+            return;
+        }
+        let e = BertSentenceEncoder::load_with_backend(
+            Path::new("/nonexistent-model-dir"),
+            DEFAULT_MAX_LEN,
+            1,
+            EncoderBackend::Cuda,
+        )
+        .unwrap_err();
+        assert!(e.0.contains("refusing to fall back to CPU"), "{e}");
+    }
+
+    /// CUDA parity against `tests/oracle.json` (bf16 GEMM ⇒ looser bound than the CPU oracle).
+    /// Runs only with `gpu-cuda`, `CCOS_ENCODER_BACKEND=cuda` and `CCOS_DENSE_MODEL_DIR` set.
+    #[cfg(feature = "gpu-cuda")]
+    #[test]
+    fn cuda_oracle_parity_when_requested() {
+        if EncoderBackend::from_env().ok() != Some(EncoderBackend::Cuda) {
+            eprintln!("CCOS_ENCODER_BACKEND != cuda: cuda oracle test skipped");
+            return;
+        }
+        let Ok(dir) = std::env::var("CCOS_DENSE_MODEL_DIR") else {
+            eprintln!("CCOS_DENSE_MODEL_DIR unset: cuda oracle test skipped");
+            return;
+        };
+        let oracle: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/oracle.json")).unwrap();
+        let mut enc = BertSentenceEncoder::load_with_backend(
+            Path::new(&dir),
+            DEFAULT_MAX_LEN,
+            1,
+            EncoderBackend::Cuda,
+        )
+        .expect("cuda requested: device must be available");
+        assert_eq!(enc.backend(), EncoderBackend::Cuda);
+        for (i, item) in oracle["items"].as_array().unwrap().iter().enumerate() {
+            let got = enc.encode(item["text"].as_str().unwrap());
+            let want: Vec<f32> = item["embedding"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap() as f32)
+                .collect();
+            let cos: f32 = got.iter().zip(&want).map(|(a, b)| a * b).sum();
+            assert!(cos > CUDA_MIN_COS, "item {i}: cuda cos={cos}");
+        }
     }
 }

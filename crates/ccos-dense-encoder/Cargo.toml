@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "CPU sentence-transformer encoder (BERT / MiniLM, pure-Rust CPU) behind ccos_core::retrieval::Encoder."
+description = "Sentence-transformer encoder (BERT / MiniLM) behind ccos_core::retrieval::Encoder: pure-Rust CPU reference path, optional exclusive CUDA linear path (feature `gpu-cuda`)."
 
 [dependencies]
 ccos-core.workspace = true
@@ -13,6 +13,20 @@ unicode-normalization = "0.1"
 unicode_categories = "0.1"
 unicode-segmentation = "1"
 serde_json.workspace = true
+# Optional exclusive-GPU path (feature `gpu-cuda`, off by default). This is the
+# CUDA backend behind `scirust-gpu::CudaBackend` (cuBLASLt bf16 Tensor-core GEMM,
+# fp32 accumulation), pinned to a reviewed SciRust `master` commit. cudarc loads
+# CUDA dynamically, so the feature builds on hosts without a toolkit; selecting
+# `CCOS_ENCODER_BACKEND=cuda` without a usable device is a hard load error.
+scirust-cuda = { git = "https://github.com/Memorithm/scirust", rev = "9943fd881861e6e33a62319997536473e0ee6e1b", features = ["cuda"], optional = true }
+
+[features]
+default = []
+gpu-cuda = ["dep:scirust-cuda"]
+
+[[example]]
+name = "cuda_parity"
+required-features = ["gpu-cuda"]
 
 [dev-dependencies]
 serde.workspace = true

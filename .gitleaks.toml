@@ -43,4 +43,9 @@ regexes = [
   # fingerprint in the ingest-guard FPR v8 raw.jsonl. A public file checksum,
   # not a credential.
   '''be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037''',
+  # sha256 of tokenizer.json of the pinned public model
+  # sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 @ e8f8c211,
+  # recorded as a fingerprint in the ingest-guard FPR v11 raw.jsonl. A public
+  # file checksum, not a credential.
+  '''2c3387be76557bd40970cec13153b3bbf80407865484b209e655e5e4729076b8''',
 ]

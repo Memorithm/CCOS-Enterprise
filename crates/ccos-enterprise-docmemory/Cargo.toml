@@ -12,6 +12,10 @@ ccos-core.workspace = true
 ccos-enterprise-memory = { path = "../ccos-enterprise-memory" }
 ccos-enterprise-tenancy = { path = "../ccos-enterprise-tenancy" }
 
+[features]
+# Forwards the exclusive-GPU encoder path to research examples (FPR-v12 requires it).
+gpu-cuda = ["ccos-dense-encoder/gpu-cuda"]
+
 [dev-dependencies]
 ccos-dense-encoder = { path = "../ccos-dense-encoder" }
 serde_json.workspace = true

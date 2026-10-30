@@ -124,8 +124,40 @@ fetches `thor_gpu_guard.py` from the same pinned scirust SHA, and under the guar
 the `cuda_` tests and the `cuda_parity` example with model directories that are
 already on the runner (workflow inputs, no network model fetch).
 
-TODO (ops): register a Thor runner with these labels for **this** repository (today
-the runners serve `Memorithm/scirust`), and put the MiniLM model dirs on it. Until
-then a dispatch stays queued. No Thor run is claimed as evidence yet.
+#### Runner status (checked 2026-10-30)
 
-Not started: FPR-v12 (see step 4).
+`Memorithm/CCOS-Enterprise` has **no** self-hosted runner, so a dispatch stays queued. Thor
+runners exist but are scoped to other repositories: `tarek-scirust-arm64-01..04`
+(`jetson-thor, scirust-arm64, internal`, repo `Memorithm/scirust`) and `thor-remoteops-arm64-01`
+(`remoteops, thor, jetson-thor`, repo `Memorithm/RemoteOps`). RemoteOps' bootstrap workflow only
+provisions the CHECKUPAUTO.FR runner; it does not cover this repository. No Thor run is claimed
+as evidence yet.
+
+#### Registering a Thor runner for this repository (admin on Thor + repo admin)
+
+1. In repo **Settings → Actions → Runners → New self-hosted runner** (Linux, ARM64), take the
+   short-lived registration token (or `gh api -X POST
+   repos/Memorithm/CCOS-Enterprise/actions/runners/registration-token`; needs repo admin).
+2. On Thor, as a dedicated non-root user, in a new directory (for example
+   `/opt/actions-runner-ccos`; do not reuse the scirust runner directory):
+   ```bash
+   ./config.sh --url https://github.com/Memorithm/CCOS-Enterprise --token <TOKEN> \
+     --name thor-ccos-arm64-01 --labels jetson-thor,internal --unattended
+   sudo ./svc.sh install && sudo ./svc.sh start
+   ```
+   `self-hosted, Linux, ARM64` are added automatically, which matches the workflow's
+   `runs-on: [self-hosted, Linux, ARM64, jetson-thor, internal]`.
+3. Toolchain on the runner user: rustup (repo `rust-toolchain.toml`), CUDA 13 driver and libs,
+   `nvidia-smi`, `python3`, `curl`.
+4. Models (no network fetch in the workflow), at the workflow's default input paths:
+   - `/opt/ccos/models/all-MiniLM-L6-v2` (`fetch-model.sh`)
+   - `/opt/ccos/models/paraphrase-multilingual-MiniLM-L12-v2` (`fetch-model-multilingual.sh`,
+     rev `e8f8c211…5f42`; pass it as the `multi_dir` input).
+5. Dispatch: `gh workflow run dense-encoder-cuda-thor.yml --ref main -f
+   multi_dir=/opt/ccos/models/paraphrase-multilingual-MiniLM-L12-v2`.
+
+The GPU is shared with the scirust runners; the workflow's `concurrency` group and
+`thor_gpu_guard.py` serialise use on this repository's side only.
+
+FPR-v12 is preregistered (`docs/campaigns/2026-10-30-ingest-guard-fpr-v12-prereg.md`) and is
+CUDA-only: it refuses to start on CPU and needs this runner (plus the campaign data) first.

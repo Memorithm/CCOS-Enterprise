@@ -26,7 +26,7 @@ fn run(label: &str, dir: &str, oracle: &str) -> Result<bool, String> {
     let p = Path::new(dir);
     let mut cpu = BertSentenceEncoder::load_auto_with_backend(p, 0, EncoderBackend::Cpu)
         .map_err(|e| e.to_string())?;
-    let mut gpu = BertSentenceEncoder::load_auto_with_backend(p, 1, EncoderBackend::Cuda)
+    let mut gpu = BertSentenceEncoder::load_auto_with_backend(p, 0, EncoderBackend::Cuda)
         .map_err(|e| e.to_string())?;
     let t = Instant::now();
     let c = cpu.encode_batch(&texts);

@@ -188,10 +188,17 @@ Cause, from reading the code (not profiled yet):
 Follow-up checklist (each change must keep `dense-encoder-cuda-thor.yml` parity ≥ 0.999 and report
 measured times, no projected speedups):
 - [ ] Profile one 1k-text batch on Thor (`nsys` or timers): split upload / GEMM / download / CPU ops.
-- [ ] Overlap CPU work: run `embed_one_checked` from N threads, holding the CUDA mutex only inside
-      `forward` (cheapest change; attention/LN then parallelise again).
-- [ ] Batch across texts: pad/pack several sequences into one `[Σn, d]` GEMM per linear
-      (attention stays per sequence) to raise GEMM size and cut round-trips by the batch factor.
+- [x] Overlap CPU work: inside a pack, attention (per sequence), LayerNorm, GELU and residuals run
+      on the encoder's `threads` (scoped threads; `0` = available parallelism).
+- [x] Batch across texts: `encode_batch` on CUDA packs `CCOS_ENCODER_CUDA_BATCH` texts (default 32)
+      **without padding** into one `[Σn, d]` activation, so each linear is one GEMM per pack
+      (≈72 round-trips per pack instead of per text). Attention stays strictly per sequence.
+      On the CPU path packing is bit-identical to per-text encoding (unit test
+      `packed_forward_is_bit_identical_to_per_text`, tiny random model). On CUDA, cuBLASLt may pick
+      a different GEMM algorithm for larger `m`, so results can differ at bf16 rounding level; the
+      gate is unchanged (`CUDA_MIN_COS = 0.999` vs oracle and vs CPU). **Not yet measured on Thor**:
+      re-run `dense-encoder-cuda-thor.yml` (the parity example now loads the CUDA encoder with
+      `threads = 0`) and record the times here before claiming any speedup.
 - [ ] Keep activations resident: fuse QKV into one GEMM and avoid download→upload between
       consecutive linears (needs device-side bias/GELU or a fused kernel in SciRust).
 - [ ] Re-measure on the FPR corpus (126,767 texts) and record CPU vs CUDA in this table.

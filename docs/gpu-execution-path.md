@@ -185,6 +185,19 @@ Cause, from reading the code (not profiled yet):
 3. So each text pays ~72 launch+sync latencies for tiny GEMMs (`[≤128, 384] × [384, 1536]`) and loses
    the 8-way CPU parallelism: slower than CPU overall.
 
+Parity probe re-measured after packed CUDA encode (#275), run
+[41144823758](https://github.com/Memorithm/CCOS-Enterprise/actions/runs/41144823758), `main` `a55d61f`
+(4 items in one pack, includes warm-up; `cuda_parity` loads the CUDA encoder with `threads = 0`):
+
+| Model | `cpu_ms` | `cuda_ms` | `min_cos` CUDA vs CPU | `min_cos` CUDA vs oracle | Gate (≥ 0.999) |
+|---|---|---|---|---|---|
+| all-MiniLM-L6-v2 | 536.6 | 255.4 | 0.99998 | 0.99998 | pass |
+| paraphrase-multilingual-MiniLM-L12-v2 | 86.9 | 44.3 | 0.99999 | 0.99999 | pass |
+
+Before packing (numbers above): L6 `cuda_ms 284.6`, L12 `cuda_ms 157.4`. This is a 4-item probe on
+one run, not a throughput benchmark; it says nothing yet about the 126,767-text FPR corpus, and no
+corpus-level speedup is claimed until the last checklist item is measured.
+
 Follow-up checklist (each change must keep `dense-encoder-cuda-thor.yml` parity ≥ 0.999 and report
 measured times, no projected speedups):
 - [ ] Profile one 1k-text batch on Thor (`nsys` or timers): split upload / GEMM / download / CPU ops.
@@ -196,9 +209,11 @@ measured times, no projected speedups):
       On the CPU path packing is bit-identical to per-text encoding (unit test
       `packed_forward_is_bit_identical_to_per_text`, tiny random model). On CUDA, cuBLASLt may pick
       a different GEMM algorithm for larger `m`, so results can differ at bf16 rounding level; the
-      gate is unchanged (`CUDA_MIN_COS = 0.999` vs oracle and vs CPU). **Not yet measured on Thor**:
-      re-run `dense-encoder-cuda-thor.yml` (the parity example now loads the CUDA encoder with
-      `threads = 0`) and record the times here before claiming any speedup.
+      gate is unchanged (`CUDA_MIN_COS = 0.999` vs oracle and vs CPU).
+- [x] Re-measure the parity probe on Thor after packing (#275): run
+      [41144823758](https://github.com/Memorithm/CCOS-Enterprise/actions/runs/41144823758) on
+      `main` `a55d61f` (includes #275 `0d8e584`), runner `tarek-scirust-arm64-01`, under
+      `thor_gpu_guard.py`. Parity gate passed for both models (table below).
 - [ ] Keep activations resident: fuse QKV into one GEMM and avoid download→upload between
       consecutive linears (needs device-side bias/GELU or a fused kernel in SciRust).
 - [ ] Re-measure on the FPR corpus (126,767 texts) and record CPU vs CUDA in this table.

@@ -480,22 +480,48 @@ impl BertSentenceEncoder {
     /// Encode one text (no padding: one sequence per forward pass).
     fn embed_one(&self, text: &str) -> Result<Vec<f32>, DenseEncoderError> {
         let ids = self.tokenizer.encode(text);
-        let (n, d) = (ids.len(), self.dim);
+        let mut v = self.embed_packed(std::slice::from_ref(&ids), 1)?;
+        Ok(v.pop().unwrap_or_else(|| vec![0.0; self.dim]))
+    }
+
+    /// Forward several token sequences at once, **without padding**: the rows of all sequences
+    /// are packed into one `[Σnᵢ, d]` activation so every `Linear` runs as a single GEMM over the
+    /// whole pack (one H2D/GEMM/D2H per linear per pack on CUDA instead of per text). Attention is
+    /// computed strictly per sequence (no cross-sequence keys, no mask needed), and embeddings,
+    /// LayerNorm, GELU, residuals and pooling are row-local, so on the CPU path the result is
+    /// bit-identical to encoding each sequence alone. `threads` parallelises the row-local and
+    /// per-sequence CPU work inside the pack (each row/sequence is still computed by exactly the
+    /// same code, so the result does not depend on `threads`).
+    fn embed_packed(
+        &self,
+        seqs: &[Vec<u32>],
+        threads: usize,
+    ) -> Result<Vec<Vec<f32>>, DenseEncoderError> {
+        let d = self.dim;
+        let lens: Vec<usize> = seqs.iter().map(Vec::len).collect();
+        let n: usize = lens.iter().sum();
         let mut h = vec![0f32; n * d];
-        for (t, row) in h.chunks_exact_mut(d).enumerate() {
-            let (w, ty) = (ids[t] as usize, 0usize);
-            let wr = self
-                .word
-                .get(w * d..(w + 1) * d)
-                .ok_or_else(|| DenseEncoderError("token id out of vocab".into()))?;
-            for j in 0..d {
-                row[j] = wr[j] + self.pos[t * d + j] + self.typ[ty * d + j];
+        {
+            let mut rows = h.chunks_exact_mut(d);
+            for ids in seqs {
+                for (t, &id) in ids.iter().enumerate() {
+                    let row = rows.next().expect("row count matches token count");
+                    let (w, ty) = (id as usize, 0usize);
+                    let wr = self
+                        .word
+                        .get(w * d..(w + 1) * d)
+                        .ok_or_else(|| DenseEncoderError("token id out of vocab".into()))?;
+                    let pr = self
+                        .pos
+                        .get(t * d..(t + 1) * d)
+                        .ok_or_else(|| DenseEncoderError("position out of range".into()))?;
+                    for j in 0..d {
+                        row[j] = wr[j] + pr[j] + self.typ[ty * d + j];
+                    }
+                }
             }
         }
-        self.ln_emb.apply(&mut h);
-        let hd = d / self.heads;
-        let scale = 1.0 / (hd as f32).sqrt();
-        let mut scores = vec![0f32; n];
+        par_rows(&mut h, d, threads, |r| self.ln_emb.apply(r));
         let cu = self.cuda.as_ref();
         for l in &self.layers {
             let (q, k, v) = (
@@ -503,48 +529,181 @@ impl BertSentenceEncoder {
                 l.k.run(cu, &h, n)?,
                 l.v.run(cu, &h, n)?,
             );
-            let mut ctx = vec![0f32; n * d];
-            for hh in 0..self.heads {
-                let o = hh * hd;
-                for i in 0..n {
-                    let qi = &q[i * d + o..i * d + o + hd];
-                    let mut mx = f32::NEG_INFINITY;
-                    for (j, s) in scores.iter_mut().enumerate() {
-                        *s = dot(qi, &k[j * d + o..j * d + o + hd]) * scale;
-                        mx = mx.max(*s);
-                    }
-                    let mut z = 0f32;
-                    for s in scores.iter_mut() {
-                        *s = (*s - mx).exp();
-                        z += *s;
-                    }
-                    let ci = &mut ctx[i * d + o..i * d + o + hd];
-                    for (j, s) in scores.iter().enumerate() {
-                        let p = s / z;
-                        for (c, vv) in ci.iter_mut().zip(&v[j * d + o..j * d + o + hd]) {
-                            *c += p * vv;
-                        }
+            let ctx = self.attention_packed(&q, &k, &v, &lens, threads);
+            let mut a = l.attn_out.run(cu, &ctx, n)?;
+            par_rows2(&mut a, &h, d, threads, |x, r| {
+                for (x, r) in x.iter_mut().zip(r) {
+                    *x += r;
+                }
+                l.ln1.apply(x);
+            });
+            let mut m = l.inter.run(cu, &a, n)?;
+            par_rows(&mut m, l.inter.out, threads, |r| {
+                for x in r.iter_mut() {
+                    *x = gelu(*x);
+                }
+            });
+            let mut o = l.out.run(cu, &m, n)?;
+            par_rows2(&mut o, &a, d, threads, |x, r| {
+                for (x, r) in x.iter_mut().zip(r) {
+                    *x += r;
+                }
+                l.ln2.apply(x);
+            });
+            h = o;
+        }
+        let mut out = Vec::with_capacity(seqs.len());
+        let mut off = 0;
+        for &len in &lens {
+            out.push(mean_pool_l2(&h[off * d..(off + len) * d], d));
+            off += len;
+        }
+        Ok(out)
+    }
+
+    /// Per-sequence multi-head self-attention over a packed `[Σnᵢ, d]` Q/K/V.
+    fn attention_packed(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        lens: &[usize],
+        threads: usize,
+    ) -> Vec<f32> {
+        let d = self.dim;
+        let mut ctx = vec![0f32; q.len()];
+        // Split ctx into per-sequence slices, then distribute sequences over threads.
+        let mut jobs: Vec<(usize, &mut [f32])> = Vec::with_capacity(lens.len());
+        let mut rest: &mut [f32] = &mut ctx;
+        let mut off = 0;
+        for &len in lens {
+            let (a, b) = std::mem::take(&mut rest).split_at_mut(len * d);
+            jobs.push((off, a));
+            rest = b;
+            off += len;
+        }
+        let run = |(off, c): &mut (usize, &mut [f32])| {
+            let len = c.len() / d.max(1);
+            let r = *off * d..(*off + len) * d;
+            self.attend(&q[r.clone()], &k[r.clone()], &v[r], len, c);
+        };
+        let threads = threads.max(1).min(jobs.len().max(1));
+        if threads <= 1 {
+            jobs.iter_mut().for_each(run);
+        } else {
+            let per = jobs.len().div_ceil(threads);
+            std::thread::scope(|s| {
+                for chunk in jobs.chunks_mut(per) {
+                    s.spawn(move || chunk.iter_mut().for_each(run));
+                }
+            });
+        }
+        ctx
+    }
+
+    /// Multi-head attention for one sequence of `n` rows; `ctx` must be zeroed `[n, d]`.
+    fn attend(&self, q: &[f32], k: &[f32], v: &[f32], n: usize, ctx: &mut [f32]) {
+        let d = self.dim;
+        let hd = d / self.heads;
+        let scale = 1.0 / (hd as f32).sqrt();
+        let mut scores = vec![0f32; n];
+        for hh in 0..self.heads {
+            let o = hh * hd;
+            for i in 0..n {
+                let qi = &q[i * d + o..i * d + o + hd];
+                let mut mx = f32::NEG_INFINITY;
+                for (j, s) in scores.iter_mut().enumerate() {
+                    *s = dot(qi, &k[j * d + o..j * d + o + hd]) * scale;
+                    mx = mx.max(*s);
+                }
+                let mut z = 0f32;
+                for s in scores.iter_mut() {
+                    *s = (*s - mx).exp();
+                    z += *s;
+                }
+                let ci = &mut ctx[i * d + o..i * d + o + hd];
+                for (j, s) in scores.iter().enumerate() {
+                    let p = s / z;
+                    for (c, vv) in ci.iter_mut().zip(&v[j * d + o..j * d + o + hd]) {
+                        *c += p * vv;
                     }
                 }
             }
-            let mut a = l.attn_out.run(cu, &ctx, n)?;
-            for (x, r) in a.iter_mut().zip(&h) {
-                *x += r;
-            }
-            l.ln1.apply(&mut a);
-            let mut m = l.inter.run(cu, &a, n)?;
-            for x in m.iter_mut() {
-                *x = gelu(*x);
-            }
-            let mut o = l.out.run(cu, &m, n)?;
-            for (x, r) in o.iter_mut().zip(&a) {
-                *x += r;
-            }
-            l.ln2.apply(&mut o);
-            h = o;
         }
-        Ok(mean_pool_l2(&h, d))
     }
+
+    /// CUDA batch path: pack up to [`CUDA_BATCH_ENV`] texts per forward pass (see
+    /// [`Self::embed_packed`]). Any CUDA failure panics (no CPU fallback, no zero vectors).
+    fn encode_batch_cuda(&self, texts: &[String]) -> Vec<Vec<f32>> {
+        let per = cuda_batch_size();
+        let mut out = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(per) {
+            let seqs: Vec<Vec<u32>> = chunk.iter().map(|t| self.tokenizer.encode(t)).collect();
+            match self.embed_packed(&seqs, self.threads) {
+                Ok(v) => out.extend(v),
+                Err(e) => panic!("ccos-dense-encoder cuda backend failed: {e}"),
+            }
+        }
+        out
+    }
+}
+
+/// Environment variable: texts packed per CUDA forward pass (default [`DEFAULT_CUDA_BATCH`]).
+pub const CUDA_BATCH_ENV: &str = "CCOS_ENCODER_CUDA_BATCH";
+/// Default texts per CUDA pack (≤ 32 × max_len rows per GEMM).
+pub const DEFAULT_CUDA_BATCH: usize = 32;
+
+fn cuda_batch_size() -> usize {
+    std::env::var(CUDA_BATCH_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_CUDA_BATCH)
+}
+
+/// Apply `f` to each `row_len` row of `x`, split over up to `threads` scoped threads.
+fn par_rows<F: Fn(&mut [f32]) + Sync>(x: &mut [f32], row_len: usize, threads: usize, f: F) {
+    let rows = x.len() / row_len.max(1);
+    let threads = threads.max(1).min(rows.max(1));
+    if threads <= 1 {
+        x.chunks_exact_mut(row_len).for_each(&f);
+        return;
+    }
+    let per = rows.div_ceil(threads) * row_len;
+    let f = &f;
+    std::thread::scope(|s| {
+        for c in x.chunks_mut(per) {
+            s.spawn(move || c.chunks_exact_mut(row_len).for_each(f));
+        }
+    });
+}
+
+/// Like [`par_rows`] with a read-only companion buffer of the same shape (e.g. residual).
+fn par_rows2<F: Fn(&mut [f32], &[f32]) + Sync>(
+    x: &mut [f32],
+    r: &[f32],
+    row_len: usize,
+    threads: usize,
+    f: F,
+) {
+    let rows = x.len() / row_len.max(1);
+    let threads = threads.max(1).min(rows.max(1));
+    let each = |xc: &mut [f32], rc: &[f32]| {
+        for (xr, rr) in xc.chunks_exact_mut(row_len).zip(rc.chunks_exact(row_len)) {
+            f(xr, rr);
+        }
+    };
+    if threads <= 1 {
+        each(x, r);
+        return;
+    }
+    let per = rows.div_ceil(threads) * row_len;
+    let each = &each;
+    std::thread::scope(|s| {
+        for (xc, rc) in x.chunks_mut(per).zip(r.chunks(per)) {
+            s.spawn(move || each(xc, rc));
+        }
+    });
 }
 
 impl BertSentenceEncoder {
@@ -587,11 +746,11 @@ impl Encoder for BertSentenceEncoder {
     /// computed independently, so results do not depend on the thread count. A failing text yields
     /// a zero vector (never panics).
     ///
-    /// CUDA backend: texts run serially on the device and a CUDA failure panics (no CPU fallback,
-    /// no silent zero vectors).
+    /// CUDA backend: texts are packed [`CUDA_BATCH_ENV`] at a time so each linear layer is one
+    /// GEMM per pack; a CUDA failure panics (no CPU fallback, no silent zero vectors).
     fn encode_batch(&mut self, texts: &[String]) -> Vec<Vec<f32>> {
         if self.cuda.is_some() {
-            return texts.iter().map(|t| self.embed_one_checked(t)).collect();
+            return self.encode_batch_cuda(texts);
         }
         let this: &Self = self;
         let per = texts.len().div_ceil(this.threads.max(1)).max(1);
@@ -842,6 +1001,129 @@ mod tests {
         // max_seq_length = 128 from sentence_bert_config.json: <s> + 126 + </s>.
         let long = "Wort ".repeat(400);
         assert_eq!(enc.tokenizer().encode(&long).len(), MULTILINGUAL_MAX_LEN);
+    }
+
+    /// Write a tiny random BERT (WordPiece) model directory for CPU-only structural tests.
+    fn tiny_model_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ccos-tiny-bert-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (d, inter, nl, heads, maxpos) = (16usize, 32usize, 2usize, 4usize, 64usize);
+        let words = [
+            "[PAD]", "[UNK]", "[CLS]", "[SEP]", "hello", "world", "the", "cat", "sat", "on", "mat",
+            "##s", "a", "dog", "runs", "fast",
+        ];
+        let vocab: serde_json::Map<String, serde_json::Value> = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (w.to_string(), serde_json::json!(i)))
+            .collect();
+        let tok = serde_json::json!({
+            "normalizer": {"type": "BertNormalizer", "lowercase": true},
+            "pre_tokenizer": {"type": "BertPreTokenizer"},
+            "model": {"type": "WordPiece", "unk_token": "[UNK]", "vocab": vocab},
+        });
+        std::fs::write(dir.join("tokenizer.json"), tok.to_string()).unwrap();
+        let cfg = serde_json::json!({
+            "hidden_act": "gelu", "hidden_size": d, "intermediate_size": inter,
+            "num_hidden_layers": nl, "num_attention_heads": heads, "vocab_size": words.len(),
+            "max_position_embeddings": maxpos, "type_vocab_size": 1, "layer_norm_eps": 1e-12,
+        });
+        std::fs::write(dir.join("config.json"), cfg.to_string()).unwrap();
+        // Deterministic LCG weights.
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.4
+        };
+        let mut tensors: Vec<(String, Vec<usize>)> = vec![
+            (
+                "embeddings.word_embeddings.weight".into(),
+                vec![words.len(), d],
+            ),
+            (
+                "embeddings.position_embeddings.weight".into(),
+                vec![maxpos, d],
+            ),
+            ("embeddings.token_type_embeddings.weight".into(), vec![1, d]),
+            ("embeddings.LayerNorm.weight".into(), vec![d]),
+            ("embeddings.LayerNorm.bias".into(), vec![d]),
+        ];
+        for i in 0..nl {
+            let p = format!("encoder.layer.{i}");
+            for (n, o, inp) in [
+                ("attention.self.query", d, d),
+                ("attention.self.key", d, d),
+                ("attention.self.value", d, d),
+                ("attention.output.dense", d, d),
+                ("intermediate.dense", inter, d),
+                ("output.dense", d, inter),
+            ] {
+                tensors.push((format!("{p}.{n}.weight"), vec![o, inp]));
+                tensors.push((format!("{p}.{n}.bias"), vec![o]));
+            }
+            for n in ["attention.output.LayerNorm", "output.LayerNorm"] {
+                tensors.push((format!("{p}.{n}.weight"), vec![d]));
+                tensors.push((format!("{p}.{n}.bias"), vec![d]));
+            }
+        }
+        let mut header = serde_json::Map::new();
+        let mut data: Vec<u8> = Vec::new();
+        for (name, shape) in &tensors {
+            let cnt: usize = shape.iter().product();
+            let a = data.len();
+            for _ in 0..cnt {
+                let v = if name.ends_with("LayerNorm.weight") {
+                    1.0 + rnd()
+                } else {
+                    rnd()
+                };
+                data.extend_from_slice(&v.to_le_bytes());
+            }
+            header.insert(
+                name.clone(),
+                serde_json::json!({"dtype": "F32", "shape": shape, "data_offsets": [a, data.len()]}),
+            );
+        }
+        let h = serde_json::Value::Object(header).to_string().into_bytes();
+        let mut file = (h.len() as u64).to_le_bytes().to_vec();
+        file.extend_from_slice(&h);
+        file.extend_from_slice(&data);
+        std::fs::write(dir.join("model.safetensors"), file).unwrap();
+        dir
+    }
+
+    /// Packing several texts into one forward pass (the CUDA batching path) must be
+    /// bit-identical to encoding each text alone on the CPU path, for any thread count.
+    #[test]
+    fn packed_forward_is_bit_identical_to_per_text() {
+        let dir = tiny_model_dir();
+        let mut enc =
+            BertSentenceEncoder::load_with_backend(&dir, 32, 3, EncoderBackend::Cpu).unwrap();
+        let texts: Vec<String> = [
+            "hello world",
+            "the cat sat on the mat",
+            "a dog runs fast",
+            "",
+            "cats hello dog dog dog the the mat sat on a world runs fast fast",
+            "unknownword",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let single: Vec<Vec<f32>> = texts.iter().map(|t| enc.embed_one(t).unwrap()).collect();
+        let seqs: Vec<Vec<u32>> = texts.iter().map(|t| enc.tokenizer.encode(t)).collect();
+        for threads in [1, 2, 4, 16] {
+            let packed = enc.embed_packed(&seqs, threads).unwrap();
+            assert_eq!(packed, single, "threads={threads}");
+        }
+        assert_eq!(enc.encode_batch(&texts), single);
+        for v in &single {
+            let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((n - 1.0).abs() < 1e-5);
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -150,7 +150,8 @@ The evaluator deliberately emits `superiority_claim: false` until a real, indepe
 
 Read:
 [Reproducible RAG comparison campaign](docs/RAG_COMPARATIVE_CAMPAIGN.md) ·
-[Governed memory vs RAG](docs/GOVERNED_MEMORY_VS_RAG.md)
+[Governed memory vs RAG](docs/GOVERNED_MEMORY_VS_RAG.md) ·
+[Model runtime integration](docs/MODEL_RUNTIME_INTEGRATION.md)
 
 ---
 

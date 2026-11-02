@@ -7,7 +7,7 @@
     "generator": {
       "model_id": "Qwen/Qwen2.5-7B-Instruct",
       "hf_revision": "a09a35458c702b33eeacc393d103063234e8bc28",
-      "weights_sha256": "PENDING",
+      "weights_sha256": "sha256:016771b384d7f005d173cf0067d3e4b8802f5e249beb5670dfed0b0c9936c6d6",
       "tokenizer_sha256": "sha256:c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
       "prompt_path": "generator-prompt.v1.txt",
       "prompt_sha256": "sha256:9203b6c60ecb8f168a84613be557e7aa79ef7338ee068e0fc0e44cd7996c2746",

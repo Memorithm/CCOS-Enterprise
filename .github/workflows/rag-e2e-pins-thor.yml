@@ -35,7 +35,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install --user -q "huggingface_hub>=0.24"
+          # Runner Python is externally managed (PEP 668): use an isolated venv
+          # and expose it to later steps via GITHUB_PATH.
+          python3 -m venv "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/venv/bin:$PATH"
+          python3 -m pip install -q "huggingface_hub>=0.24"
           SNAP=$(python3 -c "from huggingface_hub import snapshot_download as s; print(s('$MODEL', revision='$REV', cache_dir='${{ inputs.cache_dir }}', allow_patterns=['*.safetensors','tokenizer.json','config.json']))")
           echo "SNAP=$SNAP" >> "$GITHUB_ENV"
       - name: Hash + pin

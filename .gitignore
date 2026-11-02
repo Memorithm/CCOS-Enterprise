@@ -11,3 +11,7 @@ core/fuzz/coverage/
 # Local AI-tooling workspace; its output must never enter the repository
 # (see scripts/check-author-policy.sh).
 .commandcode/
+
+# Python bytecode
+__pycache__/
+*.pyc

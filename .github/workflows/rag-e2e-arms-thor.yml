@@ -50,8 +50,11 @@ jobs:
         run: |
           set -euo pipefail
           nvidia-smi --query-gpu=name,driver_version --format=csv,noheader || true
-          /usr/bin/time -v ./target/release/examples/rag_e2e_arm_runs "$RUNNER_TEMP/export" "${{ inputs.minilm_dir }}" "$RUNNER_TEMP/runs" 2> "$RUNNER_TEMP/runs-time.txt" || { cat "$RUNNER_TEMP/runs-time.txt"; exit 1; }
-          cat "$RUNNER_TEMP/runs-time.txt"
+          # /usr/bin/time is absent on Thor: record wall time with date, peak RSS from /proc is not sampled.
+          t0=$(date +%s.%N)
+          ./target/release/examples/rag_e2e_arm_runs "$RUNNER_TEMP/export" "${{ inputs.minilm_dir }}" "$RUNNER_TEMP/runs" 2>&1 | tee "$RUNNER_TEMP/runs-log.txt"
+          echo "wall_seconds=$(echo "$(date +%s.%N) - $t0" | python3 -c "import sys; print(round(eval(sys.stdin.read()),3))")" | tee -a "$RUNNER_TEMP/runs-log.txt"
+          cp "$RUNNER_TEMP/runs-log.txt" "$RUNNER_TEMP/runs/"
       - name: Adapt to ranking JSONL + hash
         shell: bash
         run: |

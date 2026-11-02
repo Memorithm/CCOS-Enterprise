@@ -44,7 +44,7 @@ otherwise **INCONCLUSIVE**. A CONFIRMED result still only supports the scoped cl
 | `lexical` | lexical | Core BM25, k1 = 1.2, b = 0.75, depth 100 |
 | `dense` | dense | all-MiniLM-L6-v2 @ `c9745ed1d9f207416be6d2e6f8de32d1f16199bf`, exact search |
 | `hybrid` | hybrid | BM25 + same MiniLM, RRF (as `hybrid_bm25_minilm_rrf`, BEIR v5) |
-| `reranked` | reranked | `hybrid` top-100 → frozen cross-encoder `cross-encoder/ms-marco-MiniLM-L-6-v2` (SHA pinned at download) → top-10. **Primary baseline**, preselected as strongest RAG reference by construction (not chosen after results). |
+| `reranked` | reranked | `hybrid` top-100 → frozen cross-encoder `cross-encoder/ms-marco-MiniLM-L6-v2` @ `233902d2` (see Pins) → top-10. **Primary baseline**, preselected as strongest RAG reference by construction (not chosen after results). |
 | `ccos` | governed_memory | `DocumentMemory` fused (α = 0.5 frozen from SciFact train, v3), same MiniLM; tenant/loadout/lineage recorded; citations mapped back to source paragraph IDs |
 
 Every arm gets the identical generator, prompt, budgets, lifecycle status and tenant/ACL info.

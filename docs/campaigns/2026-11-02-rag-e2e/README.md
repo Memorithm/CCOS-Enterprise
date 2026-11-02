@@ -41,3 +41,15 @@ The 4.9 MB inventory is regenerable and not committed; `squad-provenance.stub.js
 ## SQuAD export and overlap audit
 - `scripts/rag-e2e-squad-export.py --train train-v2.0.json --dev dev-v2.0.json --out-dir OUT` writes `corpus.jsonl` (20233 docs, all splits), `queries.jsonl` (11873 test questions, 5928 answerable), `qrels.jsonl`; hashes in `squad-export-stats.json` (JSONL not committed).
 - `scripts/rag-e2e-overlap-audit.py` fails closed: without training 13-gram indexes for both generator and judge it writes `overlap-audit.pending.json` (status PENDING) and exits 2. Training corpora of the pinned models are unpublished, so `training_overlap_audit_sha256` stays PENDING and readiness stays closed.
+
+## Thor generator pins (recorded 2026-11-02)
+Source: Thor run https://github.com/Memorithm/CCOS-Enterprise/actions/runs/41535764724 (pin step output),
+`Qwen/Qwen2.5-7B-Instruct` @ `a09a35458c702b33eeacc393d103063234e8bc28`, prompt `generator-prompt.v1.txt`.
+- `weights_sha256 = sha256:016771b384d7f005d173cf0067d3e4b8802f5e249beb5670dfed0b0c9936c6d6`
+- `tokenizer_sha256 = sha256:c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539` (matches existing pin)
+- `prompt_sha256 = sha256:9203b6c60ecb8f168a84613be557e7aa79ef7338ee068e0fc0e44cd7996c2746` (matches existing pin)
+
+The run's job conclusion was `failure` solely because the readiness step's expected FAIL (gate is
+fail-closed while arms/hardware/audit are PENDING) tripped `bash -e` before artifact upload; fixed by #290.
+Readiness remains **FAIL/closed**; no arm results or hardware measurements exist yet;
+`training_overlap_audit_sha256` stays **PENDING**.

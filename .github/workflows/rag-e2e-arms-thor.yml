@@ -1,0 +1,71 @@
+name: RAG E2E retrieval arms -> rankings (Thor, manual)
+
+# Manual-only, not a required check. Downloads the prereg-pinned SQuAD 2.0 files,
+# verifies their SHA-256, exports corpus/queries/qrels, ranks ALL queries with the
+# four retrieval arms implemented in-repo (lexical, dense, hybrid, ccos) on the
+# Thor GPU encoder, adapts them to ranking JSONL and uploads them with hashes.
+# It scores nothing, runs no generator and writes no manifest result field.
+# The `reranked` arm (primary baseline) is NOT produced: no cross-encoder runner yet.
+on:
+  workflow_dispatch:
+    inputs:
+      minilm_dir:
+        description: "Runner-local all-MiniLM-L6-v2 @ c9745ed1 dir"
+        required: true
+        default: "/opt/ccos/models/all-MiniLM-L6-v2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: thor-rag-e2e-arms
+  cancel-in-progress: false
+
+jobs:
+  arms:
+    runs-on: [self-hosted, Linux, ARM64, jetson-thor, internal]
+    timeout-minutes: 240
+    env:
+      CCOS_ENCODER_BACKEND: cuda
+      D: docs/campaigns/2026-11-02-rag-e2e
+      TRAIN_SHA: 68dcfbb971bd3e96d5b46c7177b16c1a4e7d4bdef19fb204502738552dede002
+      DEV_SHA: 80a5225e94905956a6446d296ca1093975c4d3b3260f1d6c8f68bc2ab77182d8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch + verify SQuAD 2.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          S="$RUNNER_TEMP/squad"; mkdir -p "$S"
+          base=https://rajpurkar.github.io/SQuAD-explorer/dataset
+          curl -fsSL "$base/train-v2.0.json" -o "$S/train-v2.0.json"
+          curl -fsSL "$base/dev-v2.0.json" -o "$S/dev-v2.0.json"
+          echo "$TRAIN_SHA  $S/train-v2.0.json" | sha256sum -c -
+          echo "$DEV_SHA  $S/dev-v2.0.json" | sha256sum -c -
+          python3 scripts/rag-e2e-squad-export.py --train "$S/train-v2.0.json" --dev "$S/dev-v2.0.json" --out-dir "$RUNNER_TEMP/export"
+      - name: Build (gpu-cuda)
+        run: cargo build --release --locked -p ccos-dense-encoder --features gpu-cuda --example rag_e2e_arm_runs
+      - name: Rank four arms
+        shell: bash
+        run: |
+          set -euo pipefail
+          nvidia-smi --query-gpu=name,driver_version --format=csv,noheader || true
+          /usr/bin/time -v ./target/release/examples/rag_e2e_arm_runs "$RUNNER_TEMP/export" "${{ inputs.minilm_dir }}" "$RUNNER_TEMP/runs" 2> "$RUNNER_TEMP/runs-time.txt" || { cat "$RUNNER_TEMP/runs-time.txt"; exit 1; }
+          cat "$RUNNER_TEMP/runs-time.txt"
+      - name: Adapt to ranking JSONL + hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          P="sha256:$(sha256sum docs/campaigns/2026-11-02-rag-e2e-prereg.md | cut -d' ' -f1)"
+          for arm in lexical dense hybrid ccos; do
+            python3 scripts/rag-e2e-rank-adapter.py --format trec --run "$RUNNER_TEMP/runs/$arm.trec" \
+              --queries "$RUNNER_TEMP/export/queries.jsonl" --corpus "$RUNNER_TEMP/export/corpus.jsonl" \
+              --protocol-sha256 "$P" --k 10 > "$RUNNER_TEMP/runs/$arm.ranking.jsonl"
+          done
+          cp "$RUNNER_TEMP/export/export-stats.json" "$RUNNER_TEMP/runs/"
+          { echo "code_sha=$GITHUB_SHA"; echo "protocol_sha256=$P"; (cd "$RUNNER_TEMP/runs" && sha256sum *); } | tee "$RUNNER_TEMP/runs/SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rag-e2e-arm-rankings
+          path: ${{ runner.temp }}/runs
+          retention-days: 30

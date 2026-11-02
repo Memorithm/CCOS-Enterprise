@@ -53,3 +53,19 @@ The run's job conclusion was `failure` solely because the readiness step's expec
 fail-closed while arms/hardware/audit are PENDING) tripped `bash -e` before artifact upload; fixed by #290.
 Readiness remains **FAIL/closed**; no arm results or hardware measurements exist yet;
 `training_overlap_audit_sha256` stays **PENDING**.
+
+## Retrieval arms -> rankings (tooling only, no run yet)
+Prior BEIR v3/v5 outputs are BEIR-corpus metrics (no per-query runs, different corpora), so **no
+existing ranking is reusable** for SQuAD. New: `crates/ccos-dense-encoder/examples/rag_e2e_arm_runs.rs`
+ranks **all** export queries (incl. unanswerable) at depth 100 and writes `lexical|dense|hybrid|ccos.trec`
+(same frozen configs as BEIR v3/v5: BM25 1.2/0.75, MiniLM exact, RRF k=60, `DocumentMemory` fused α=0.5).
+`.github/workflows/rag-e2e-arms-thor.yml` (manual) verifies the pinned SQuAD SHA-256, exports, ranks on
+the Thor CUDA encoder, adapts with `rag-e2e-rank-adapter.py --k 10` and uploads TREC + ranking JSONL +
+`SHA256SUMS.txt` (code SHA, protocol sha256). It scores nothing and fills no manifest field.
+
+`gh workflow run rag-e2e-arms-thor.yml -R Memorithm/CCOS-Enterprise -f minilm_dir=/opt/ccos/models/all-MiniLM-L6-v2`
+
+Still blocked: `reranked` (primary baseline) needs a cross-encoder runner for
+`cross-encoder/ms-marco-MiniLM-L6-v2` @ `233902d2` (none in repo); generation needs a pinned Qwen backend
+module for `rag-e2e-generate.py --backend` (none in repo); MiniLM dir must exist on Thor;
+overlap audit PENDING; readiness stays closed.

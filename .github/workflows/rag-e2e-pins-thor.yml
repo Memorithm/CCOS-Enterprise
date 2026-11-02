@@ -1,0 +1,59 @@
+name: RAG E2E generator pins + readiness (Thor, manual)
+
+# Manual-only, not a required check. Downloads Qwen/Qwen2.5-7B-Instruct at the
+# preregistered Hub revision onto the runner (never into the repo), hashes the
+# shards/tokenizer/prompt, writes a pinned manifest and runs the fail-closed
+# readiness gate. It runs NO campaign arm and produces NO results; readiness is
+# expected to keep failing on measurement fields until the arms run.
+# CUDA hardware is the runner only; the product has no NVIDIA dependency.
+on:
+  workflow_dispatch:
+    inputs:
+      cache_dir:
+        description: "Runner-local HF cache dir"
+        required: true
+        default: "/opt/ccos/models/hf"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: thor-rag-e2e-pins
+  cancel-in-progress: false
+
+jobs:
+  pins:
+    runs-on: [self-hosted, Linux, ARM64, jetson-thor, internal]
+    timeout-minutes: 180
+    env:
+      MODEL: Qwen/Qwen2.5-7B-Instruct
+      REV: a09a35458c702b33eeacc393d103063234e8bc28
+      D: docs/campaigns/2026-11-02-rag-e2e
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download pinned snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user -q "huggingface_hub>=0.24"
+          SNAP=$(python3 -c "from huggingface_hub import snapshot_download as s; print(s('$MODEL', revision='$REV', cache_dir='${{ inputs.cache_dir }}', allow_patterns=['*.safetensors','tokenizer.json','config.json']))")
+          echo "SNAP=$SNAP" >> "$GITHUB_ENV"
+      - name: Hash + pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test-rag-e2e-pins.py
+          python3 scripts/rag-e2e-pin-generator.py --snapshot "$SNAP" --manifest "$D/manifest.skeleton.json" --out "$RUNNER_TEMP/manifest.pinned.json" | tee "$RUNNER_TEMP/pins.json"
+      - name: Readiness (expected FAIL until arms run)
+        shell: bash
+        run: |
+          set -uo pipefail
+          python3 scripts/check-rag-campaign-readiness.py "$RUNNER_TEMP/manifest.pinned.json" 2> "$RUNNER_TEMP/readiness.txt"; echo "exit=$?" >> "$RUNNER_TEMP/readiness.txt"
+          cat "$RUNNER_TEMP/readiness.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rag-e2e-pins
+          path: |
+            ${{ runner.temp }}/manifest.pinned.json
+            ${{ runner.temp }}/pins.json
+            ${{ runner.temp }}/readiness.txt

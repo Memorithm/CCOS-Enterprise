@@ -1,0 +1,167 @@
+{
+  "schema_version": 3,
+  "scope": "rag_e2e_2026_11_02",
+  "_status": "SKELETON: every PENDING/0/-1/empty field must be filled by a real run; readiness gate fails closed until then. superiority_claim=false.",
+  "superiority_claim": false,
+  "protocol": {
+    "generator": {
+      "model_id": "Qwen/Qwen2.5-7B-Instruct",
+      "hf_revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+      "weights_sha256": "PENDING",
+      "tokenizer_sha256": "sha256:c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+      "prompt_path": "generator-prompt.v1.txt",
+      "prompt_sha256": "sha256:9203b6c60ecb8f168a84613be557e7aa79ef7338ee068e0fc0e44cd7996c2746",
+      "temperature": 0,
+      "top_p": 1,
+      "seeds": [
+        1,
+        2,
+        3
+      ]
+    },
+    "hardware": {
+      "host_id": "",
+      "cpu": "",
+      "accelerator": "",
+      "ram_bytes": 0,
+      "concurrency": 1
+    },
+    "context_tokens": 3072,
+    "answer_tokens": 256,
+    "k": 10
+  },
+  "dataset_provenance": {
+    "origin": "",
+    "license": "",
+    "split_author": "",
+    "training_overlap_audit_sha256": ""
+  },
+  "arms": [
+    {
+      "id": "ccos",
+      "family": "governed_memory",
+      "runner": {
+        "code_sha": "PENDING",
+        "command": [
+          "PENDING"
+        ]
+      },
+      "measurement": {
+        "wall_seconds": 0,
+        "peak_rss_bytes": 0,
+        "restart_ms": -1,
+        "cost_microunits": -1
+      },
+      "results": {
+        "path": "results/ccos.jsonl",
+        "sha256": ""
+      }
+    },
+    {
+      "id": "lexical",
+      "family": "lexical",
+      "runner": {
+        "code_sha": "PENDING",
+        "command": [
+          "PENDING"
+        ]
+      },
+      "measurement": {
+        "wall_seconds": 0,
+        "peak_rss_bytes": 0,
+        "restart_ms": -1,
+        "cost_microunits": -1
+      },
+      "results": {
+        "path": "results/lexical.jsonl",
+        "sha256": ""
+      }
+    },
+    {
+      "id": "dense",
+      "family": "dense",
+      "runner": {
+        "code_sha": "PENDING",
+        "command": [
+          "PENDING"
+        ]
+      },
+      "measurement": {
+        "wall_seconds": 0,
+        "peak_rss_bytes": 0,
+        "restart_ms": -1,
+        "cost_microunits": -1
+      },
+      "results": {
+        "path": "results/dense.jsonl",
+        "sha256": ""
+      }
+    },
+    {
+      "id": "hybrid",
+      "family": "hybrid",
+      "runner": {
+        "code_sha": "PENDING",
+        "command": [
+          "PENDING"
+        ]
+      },
+      "measurement": {
+        "wall_seconds": 0,
+        "peak_rss_bytes": 0,
+        "restart_ms": -1,
+        "cost_microunits": -1
+      },
+      "results": {
+        "path": "results/hybrid.jsonl",
+        "sha256": ""
+      }
+    },
+    {
+      "id": "reranked",
+      "family": "reranked",
+      "runner": {
+        "code_sha": "PENDING",
+        "command": [
+          "PENDING"
+        ]
+      },
+      "measurement": {
+        "wall_seconds": 0,
+        "peak_rss_bytes": 0,
+        "restart_ms": -1,
+        "cost_microunits": -1
+      },
+      "results": {
+        "path": "results/reranked.jsonl",
+        "sha256": ""
+      }
+    }
+  ],
+  "decision_rule": {
+    "primary_baseline": "reranked",
+    "primary_metric": "task_success"
+  },
+  "comparisons": [
+    {
+      "candidate": "ccos",
+      "baseline": "lexical"
+    },
+    {
+      "candidate": "ccos",
+      "baseline": "dense"
+    },
+    {
+      "candidate": "ccos",
+      "baseline": "hybrid"
+    },
+    {
+      "candidate": "ccos",
+      "baseline": "reranked"
+    }
+  ],
+  "judgments": {
+    "path": "",
+    "sha256": ""
+  }
+}

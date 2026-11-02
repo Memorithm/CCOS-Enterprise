@@ -48,4 +48,8 @@ regexes = [
   # recorded as a fingerprint in the ingest-guard FPR v11 raw.jsonl. A public
   # file checksum, not a credential.
   '''2c3387be76557bd40970cec13153b3bbf80407865484b209e655e5e4729076b8''',
+  # SHA-256 of the PUBLIC Qwen/Qwen2.5-7B-Instruct tokenizer.json at Hub
+  # revision a09a35458c702b33eeacc393d103063234e8bc28 — a prereg pin, not a credential
+  # (docs/campaigns/2026-11-02-rag-e2e-prereg.md).
+  '''c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539''',
 ]

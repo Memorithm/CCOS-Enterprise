@@ -10,9 +10,12 @@ on:
   workflow_dispatch:
     inputs:
       cache_dir:
-        description: "Runner-local HF cache dir"
-        required: true
-        default: "/opt/ccos/models/hf"
+        # Empty = "$HOME/.cache/huggingface/hub" (runner-writable, no sudo).
+        # /opt/ccos/models/hf may still be passed when the operator has
+        # prepared it as a shared cache writable by the runner user.
+        description: "HF cache dir (empty = $HOME/.cache/huggingface/hub)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -33,6 +36,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Download pinned snapshot
         shell: bash
+        env:
+          INPUT_CACHE_DIR: ${{ inputs.cache_dir }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           # Runner Python is externally managed (PEP 668): use an isolated venv
@@ -41,7 +47,15 @@ jobs:
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
           export PATH="$RUNNER_TEMP/venv/bin:$PATH"
           python3 -m pip install -q "huggingface_hub>=0.24"
-          SNAP=$(python3 -c "from huggingface_hub import snapshot_download as s; print(s('$MODEL', revision='$REV', cache_dir='${{ inputs.cache_dir }}', allow_patterns=['*.safetensors','tokenizer.json','config.json']))")
+          CACHE_DIR="${INPUT_CACHE_DIR:-$HOME/.cache/huggingface/hub}"
+          mkdir -p "$CACHE_DIR" 2>/dev/null || true
+          if [ ! -d "$CACHE_DIR" ] || [ ! -w "$CACHE_DIR" ]; then
+            echo "::error::cache_dir '$CACHE_DIR' is not writable by $(id -un); leave cache_dir empty or prepare a writable shared cache"
+            exit 1
+          fi
+          echo "HF_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+          [ -n "${HF_TOKEN:-}" ] || { unset HF_TOKEN; echo "HF_TOKEN not set: unauthenticated Hub requests"; }
+          SNAP=$(CACHE_DIR="$CACHE_DIR" python3 -c "import os; from huggingface_hub import snapshot_download as s; print(s(os.environ['MODEL'], revision=os.environ['REV'], cache_dir=os.environ['CACHE_DIR'], allow_patterns=['*.safetensors','tokenizer.json','config.json']))")
           echo "SNAP=$SNAP" >> "$GITHUB_ENV"
       - name: Hash + pin
         shell: bash

@@ -44,7 +44,7 @@ otherwise **INCONCLUSIVE**. A CONFIRMED result still only supports the scoped cl
 | `lexical` | lexical | Core BM25, k1 = 1.2, b = 0.75, depth 100 |
 | `dense` | dense | all-MiniLM-L6-v2 @ `c9745ed1d9f207416be6d2e6f8de32d1f16199bf`, exact search |
 | `hybrid` | hybrid | BM25 + same MiniLM, RRF (as `hybrid_bm25_minilm_rrf`, BEIR v5) |
-| `reranked` | reranked | `hybrid` top-100 → frozen cross-encoder `cross-encoder/ms-marco-MiniLM-L-6-v2` (SHA pinned at download) → top-10. **Primary baseline**, preselected as strongest RAG reference by construction (not chosen after results). |
+| `reranked` | reranked | `hybrid` top-100 → frozen cross-encoder `cross-encoder/ms-marco-MiniLM-L6-v2` @ `233902d2` (see Pins) → top-10. **Primary baseline**, preselected as strongest RAG reference by construction (not chosen after results). |
 | `ccos` | governed_memory | `DocumentMemory` fused (α = 0.5 frozen from SciFact train, v3), same MiniLM; tenant/loadout/lineage recorded; citations mapped back to source paragraph IDs |
 
 Every arm gets the identical generator, prompt, budgets, lifecycle status and tenant/ACL info.
@@ -53,9 +53,9 @@ Every arm gets the identical generator, prompt, budgets, lifecycle status and te
 
 ```
 generator.model_id        = Qwen/Qwen2.5-7B-Instruct
-generator.hf_revision     = <commit SHA — PENDING download>
-generator.weights_sha256  = <sha256 over sorted safetensors shards — PENDING>
-generator.tokenizer_sha256= <sha256 of tokenizer.json — PENDING>
+generator.hf_revision     = a09a35458c702b33eeacc393d103063234e8bc28
+generator.weights_sha256  = <aggregate sha256 over sorted shards — PENDING (compute on host, see Pins)>
+generator.tokenizer_sha256= c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539
 generator.prompt_sha256   = <sha256 of frozen prompt template file — PENDING>
 generator.temperature     = 0 ; top_p = 1 ; seed ∈ {1,2,3}
 runtime                   = <runner name + version, e.g. transformers/vLLM/llama.cpp — PENDING>
@@ -64,6 +64,32 @@ hardware                  = host_id, cpu, accelerator, ram_bytes, concurrency = 
 
 The first campaign run must pin the exact SHA and hashes in the manifest **before** launch; a
 missing pin fails the readiness gate and the run does not start.
+
+## Pins (resolved 2026-11-02, Hub API — not yet verified on the run host)
+
+Provenance: `GET https://huggingface.co/api/{models,datasets}/<id>` (`sha`) and
+`GET .../tree/<sha>?recursive=true` (LFS `oid` = SHA-256 of file content). Weight shards were
+**not** downloaded; their SHA-256 are Hub LFS oids. Tokenizer files and the SQuAD dev JSON were
+downloaded at the pinned revision and hashed with `sha256sum`.
+
+| Artifact | Id | Revision (commit) | File SHA-256 |
+| --- | --- | --- | --- |
+| Generator | `Qwen/Qwen2.5-7B-Instruct` | `a09a35458c702b33eeacc393d103063234e8bc28` | shards 1–4: `a1333e6293854747c481288ea83b348226af178dd565c49b6f9495ba1966aba7`, `f5d25a2772cb825164a2a2c0fb6d51a87e282abf21e4dd75bc5cfb3cd0ea6185`, `8efdec4c1bc12317ae1a38dc42b595ce777738a64deea3fcb8a0a91381bcdfd5`, `1a72d403cdf0c1ec3cb7f289f17b394a01e64394c2e9b3c0f94dbce3faf879bd`; tokenizer.json `c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539` |
+| Judge | `mistralai/Mistral-7B-Instruct-v0.3` | `c170c708c41dac9275d15a8fff4eca08d52bab71` | HF shards 1–3: `ce6fb6f6f4d0183f4813cbf4ece24109da629a08d4210da46f77e1d8b0bd5c19`, `8c0e72f148366b6a3709e002a98706a33d31aec8515090c856c95b2044f92ae0`, `905dd405363e43d95779c1c1155a2dbfd36155914ae95dbd934e12e490cfb4ca`; consolidated.safetensors `76d5729be995fb6510c7f103c5b8825d3d82f8126ac949db6be367a638694d1f`; tokenizer.json `e553af6fff7d7ad76e830608b218c5c0b0822998d5a1a96099a74cd3c1cb1a49` |
+| Reranker | `cross-encoder/ms-marco-MiniLM-L6-v2` (Hub canonical; `…-L-6-v2` redirects) | `233902d25c440f23af6f7d6e94d2946bac0bee0a` | model.safetensors `821d1aa69520101d6e0737f78a042ae25b19e5cb9160701909d10434f4aeb0ae`; tokenizer.json `d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66` |
+| Dataset (Hub) | `rajpurkar/squad_v2` | `3ffb306f725f7d2ce8394bc1873b24868140c412` | train parquet `f6da32ffb482ff463ad056477740d1bb284b96a45db3a08bee6a225ca6abf291`; validation parquet `0560174ab095c5ac0a8c8dc8da05f1625453c45a77e4ce9cabc6947ddfdd24cb` |
+| Dataset (Stanford) | `https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json` | ETag `"6529af84-42b060"`, Last-Modified 2023-10-13, 4,370,528 B | `80a5225e94905956a6446d296ca1093975c4d3b3260f1d6c8f68bc2ab77182d8` |
+
+Still PENDING (not invented): `generator.weights_sha256` aggregate, judge/reranker aggregates,
+`prompt_sha256`, runtime, and host-side verification. On the run host, after
+`hf download <id> --revision <sha> --local-dir <dir>`:
+
+```
+cd <dir> && sha256sum $(ls *.safetensors | sort) | tee shards.sha256 && sha256sum shards.sha256
+```
+
+Each per-shard line must equal the table above; the last line is the aggregate `weights_sha256`.
+Which judge weight layout (HF shards vs consolidated) is loaded must be recorded in the manifest.
 
 ## Adjudication
 
@@ -109,8 +135,8 @@ manifest `protocol.rubric_sha256` and every judgment row before any judgment is 
 
 ## Dataset, splits and contamination audit
 
-- Source: SQuAD 2.0 (Rajpurkar et al., 2018), CC BY-SA 4.0. Dataset file SHA-256 recorded at
-  download (PENDING). `dataset_provenance.origin`, `.license`, `.split_author` filled accordingly.
+- Source: SQuAD 2.0 (Rajpurkar et al., 2018), CC BY-SA 4.0. Dataset file SHA-256s: see *Pins (resolved
+  2026-11-02)* below. `dataset_provenance.origin`, `.license`, `.split_author` filled accordingly.
 - Splits by Wikipedia **article** (document family): SQuAD train articles → train/dev (tuning only
   on dev, e.g. abstention prompt), SQuAD dev articles → test. Query clusters = article id.
 - Controls added identically for all arms: deleted and superseded paragraphs, a forbidden second
@@ -135,8 +161,8 @@ runs are reported, not re-run with changes.
 | Item | State |
 | --- | --- |
 | Protocol, arms, decision rule, budgets, seeds | drafted (this doc) |
-| Generator / judge / reranker SHAs | **PENDING download** |
-| Dataset file hashes, inventory, controls | **PENDING** |
+| Generator / judge / reranker SHAs | revisions + per-file SHA-256 resolved from Hub (see Pins); aggregate weights hash + host verification **PENDING** |
+| Dataset file hashes | resolved (see Pins); inventory, controls **PENDING** |
 | Contamination audit file | **PENDING** |
 | Rubric file + hash | draft above, file **PENDING** |
 | Generator runner (retrieval JSONL → answer JSONL) | scaffold PR (`feat/rag-e2e-generator-runner`) |

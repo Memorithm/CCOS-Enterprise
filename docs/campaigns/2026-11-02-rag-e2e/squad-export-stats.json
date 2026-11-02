@@ -1,0 +1,23 @@
+{
+  "_inputs": {
+    "dev_sha256": "sha256:80a5225e94905956a6446d296ca1093975c4d3b3260f1d6c8f68bc2ab77182d8",
+    "train_sha256": "sha256:68dcfbb971bd3e96d5b46c7177b16c1a4e7d4bdef19fb204502738552dede002"
+  },
+  "corpus": {
+    "path": "corpus.jsonl",
+    "rows": 20233,
+    "sha256": "sha256:046f8f92505a4f3b51886f1806c466d2f328c214ce97783089bab7acd4307869"
+  },
+  "corpus_splits": "train,dev,test",
+  "qrels": {
+    "path": "qrels.jsonl",
+    "rows": 5928,
+    "sha256": "sha256:d699e297ffdff971e060a706e7864928250c0287644ba17d99e54d874a921f14"
+  },
+  "queries": {
+    "answerable": 5928,
+    "path": "queries.jsonl",
+    "rows": 11873,
+    "sha256": "sha256:c6728d991e719e93a30994a75f4eb473d3fefaafdd8eb6970e92c6b2d282a612"
+  }
+}

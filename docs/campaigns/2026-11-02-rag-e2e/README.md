@@ -37,3 +37,7 @@ The 4.9 MB inventory is regenerable and not committed; `squad-provenance.stub.js
 2. Run the five arms on a declared host: runner code SHA, command, wall/RSS/restart/cost, results path+sha256.
 3. Blind adjudication (`scripts/rag-e2e-adjudicate.py`) → judgments path+sha256.
 4. `weights_sha256` from the Thor workflow (not checked by the readiness gate itself — reviewers must check it).
+
+## SQuAD export and overlap audit
+- `scripts/rag-e2e-squad-export.py --train train-v2.0.json --dev dev-v2.0.json --out-dir OUT` writes `corpus.jsonl` (20233 docs, all splits), `queries.jsonl` (11873 test questions, 5928 answerable), `qrels.jsonl`; hashes in `squad-export-stats.json` (JSONL not committed).
+- `scripts/rag-e2e-overlap-audit.py` fails closed: without training 13-gram indexes for both generator and judge it writes `overlap-audit.pending.json` (status PENDING) and exits 2. Training corpora of the pinned models are unpublished, so `training_overlap_audit_sha256` stays PENDING and readiness stays closed.

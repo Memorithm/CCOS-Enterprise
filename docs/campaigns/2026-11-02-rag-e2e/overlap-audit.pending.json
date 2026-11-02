@@ -1,0 +1,12 @@
+{
+  "dev_sha256": "sha256:80a5225e94905956a6446d296ca1093975c4d3b3260f1d6c8f68bc2ab77182d8",
+  "models": {
+    "generator": "Qwen/Qwen2.5-7B-Instruct",
+    "judge": "mistralai/Mistral-7B-Instruct-v0.3"
+  },
+  "n": 13,
+  "protocol": "13-gram overlap, test split (SQuAD dev file)",
+  "reason": "training corpora of the pinned generator and judge are not published; no n-gram index available for every role, so overlap cannot be measured. SQuAD contexts are Wikipedia and should be presumed seen in pretraining.",
+  "status": "PENDING",
+  "training_overlap_audit_sha256": "PENDING"
+}

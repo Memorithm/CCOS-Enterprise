@@ -1,0 +1,16 @@
+{
+  "_duplicate_paragraphs_dropped": {
+    "dev_file": 0,
+    "train_file": 6
+  },
+  "_inputs": {
+    "dev_sha256": "sha256:80a5225e94905956a6446d296ca1093975c4d3b3260f1d6c8f68bc2ab77182d8",
+    "train_sha256": "sha256:68dcfbb971bd3e96d5b46c7177b16c1a4e7d4bdef19fb204502738552dede002"
+  },
+  "_inventory_sha256": "sha256:9a5c8e0e74c5a814755acff4e20545752a9346b7857797ea75a0e2cb8286dbd9",
+  "_status": "overlap/contamination audit not performed; readiness must stay closed",
+  "license": "CC-BY-SA-4.0 (SQuAD 2.0, Rajpurkar et al. 2018)",
+  "origin": "SQuAD 2.0 train-v2.0.json + dev-v2.0.json (rajpurkar.github.io/SQuAD-explorer)",
+  "split_author": "scripts/rag-e2e-squad-inventory.py (dev articles->test; sha256(title)%10==0->dev)",
+  "training_overlap_audit_sha256": "PENDING"
+}

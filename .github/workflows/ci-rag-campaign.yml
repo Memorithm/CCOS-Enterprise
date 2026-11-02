@@ -28,6 +28,7 @@ jobs:
       - run: python3 scripts/test-rag-e2e-generate.py
       - run: python3 scripts/test-rag-e2e-adjudicate.py
       - run: python3 scripts/test-rag-e2e-pins.py
+      - run: python3 scripts/test-rag-e2e-adapters.py
       - name: Reproduce synthetic protocol smoke (not system performance)
         run: |
           python3 scripts/evaluate-rag-campaign.py fixtures/rag-campaign-smoke/manifest.json > "$RUNNER_TEMP/rag-smoke-report.json"

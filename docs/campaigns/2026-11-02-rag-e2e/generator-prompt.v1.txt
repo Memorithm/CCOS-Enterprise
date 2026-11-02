@@ -1,0 +1,6 @@
+Answer the question using only the numbered sources. Cite sources by id. If the sources do not contain the answer, abstain.
+
+{sources}
+
+Question: {question}
+Answer:

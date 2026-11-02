@@ -66,10 +66,19 @@ jobs:
       - name: Readiness (expected FAIL until arms run)
         shell: bash
         run: |
+          # `shell: bash` runs with -e; readiness is EXPECTED to fail (exit!=0)
+          # until the arms run, so record its exit code instead of aborting.
+          set +e
           set -uo pipefail
-          python3 scripts/check-rag-campaign-readiness.py "$RUNNER_TEMP/manifest.pinned.json" 2> "$RUNNER_TEMP/readiness.txt"; echo "exit=$?" >> "$RUNNER_TEMP/readiness.txt"
+          python3 scripts/check-rag-campaign-readiness.py "$RUNNER_TEMP/manifest.pinned.json" > "$RUNNER_TEMP/readiness.txt" 2>&1
+          rc=$?
+          echo "exit=$rc" >> "$RUNNER_TEMP/readiness.txt"
           cat "$RUNNER_TEMP/readiness.txt"
+          # Any non-zero exit is recorded as data, not a workflow error; the
+          # gate verdict lives in readiness.txt (fail-closed, never forced to PASS).
+          exit 0
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: rag-e2e-pins
           path: |

@@ -31,10 +31,17 @@
     "k": 10
   },
   "dataset_provenance": {
-    "origin": "",
-    "license": "",
-    "split_author": "",
-    "training_overlap_audit_sha256": ""
+    "origin": "SQuAD 2.0 train-v2.0.json + dev-v2.0.json (rajpurkar.github.io/SQuAD-explorer)",
+    "license": "CC-BY-SA-4.0 (SQuAD 2.0, Rajpurkar et al. 2018)",
+    "split_author": "scripts/rag-e2e-squad-inventory.py (dev articles->test; sha256(title)%10==0->dev)",
+    "training_overlap_audit_sha256": "PENDING",
+    "_inventory_sha256": "sha256:9a5c8e0e74c5a814755acff4e20545752a9346b7857797ea75a0e2cb8286dbd9",
+    "_provenance_stub": "squad-provenance.stub.json",
+    "_split_doc_counts": {
+      "train": 16935,
+      "dev": 2094,
+      "test": 1204
+    }
   },
   "arms": [
     {

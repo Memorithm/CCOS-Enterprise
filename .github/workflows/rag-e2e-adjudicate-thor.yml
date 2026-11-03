@@ -1,0 +1,164 @@
+name: RAG E2E blind adjudication, pinned LLM judge (Thor, manual)
+
+# Manual-only, not a required check. Downloads a rag-e2e-answers-<run_id> artifact, verifies its
+# SHA256SUMS, re-exports the pinned SQuAD 2.0 split + gold sidecar, writes the blind shuffled packet
+# (seed 20261102, no arm id) with scripts/rag-e2e-adjudicate.py, runs the prereg judge
+# mistralai/Mistral-7B-Instruct-v0.3 @ c170c708 (HF shards, each verified against the prereg Pins,
+# greedy / temperature 0) via scripts/rag_e2e_mistral_judge.py, then imports the reviews (stale/missing
+# reviews fail closed). Uploads packet, key, raw judge output, reviews, judgments + SHA256SUMS.
+# It computes NO metric and fills NO manifest field. LLM judgments are not yet dual-reviewed (kappa
+# needs the human subsample per prereg). Artifact is uploaded even when judge/import exit non-zero.
+on:
+  workflow_dispatch:
+    inputs:
+      answers_run_id:
+        description: "Generate run id providing artifact rag-e2e-answers-<id>"
+        required: true
+        default: "41554086307"
+      arms:
+        description: "Space-separated arms present in the answers artifact"
+        required: true
+        default: "lexical dense hybrid ccos"
+      cache_dir:
+        description: "HF cache dir (empty = $HOME/.cache/huggingface/hub)"
+        required: false
+        default: ""
+      torch_index:
+        description: "pip index for the CUDA torch wheel (isolated venv)"
+        required: false
+        default: "https://download.pytorch.org/whl/cu130"
+      timeout_minutes:
+        description: "Job timeout"
+        required: true
+        default: "360"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: thor-rag-e2e-adjudicate
+  cancel-in-progress: false
+
+jobs:
+  adjudicate:
+    runs-on: [self-hosted, Linux, ARM64, jetson-thor, internal]
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    env:
+      JUDGE: mistralai/Mistral-7B-Instruct-v0.3
+      JREV: c170c708c41dac9275d15a8fff4eca08d52bab71
+      JSHARDS: "ce6fb6f6f4d0183f4813cbf4ece24109da629a08d4210da46f77e1d8b0bd5c19 8c0e72f148366b6a3709e002a98706a33d31aec8515090c856c95b2044f92ae0 905dd405363e43d95779c1c1155a2dbfd36155914ae95dbd934e12e490cfb4ca"
+      JTOK: e553af6fff7d7ad76e830608b218c5c0b0822998d5a1a96099a74cd3c1cb1a49
+      JPROMPT_SHA: d32c17fe34fa449b0a8233d65b6cb1e34e0d0410a252a06cb1654af6c2ff590b
+      D: docs/campaigns/2026-11-02-rag-e2e
+      RUBRIC: docs/campaigns/rag-e2e/rubric.md
+      TRAIN_SHA: 68dcfbb971bd3e96d5b46c7177b16c1a4e7d4bdef19fb204502738552dede002
+      DEV_SHA: 80a5225e94905956a6446d296ca1093975c4d3b3260f1d6c8f68bc2ab77182d8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Frozen prompt + model-free tests
+        run: |
+          set -euo pipefail
+          echo "$JPROMPT_SHA  $D/judge-prompt.v1.txt" | sha256sum -c -
+          python3 scripts/test-rag-e2e-mistral-judge.py
+          python3 scripts/test-rag-e2e-adjudicate.py
+      - name: Fetch + verify SQuAD 2.0, export, gold
+        shell: bash
+        run: |
+          set -euo pipefail
+          S="$RUNNER_TEMP/squad"; mkdir -p "$S"
+          base=https://rajpurkar.github.io/SQuAD-explorer/dataset
+          curl -fsSL "$base/train-v2.0.json" -o "$S/train-v2.0.json"
+          curl -fsSL "$base/dev-v2.0.json" -o "$S/dev-v2.0.json"
+          echo "$TRAIN_SHA  $S/train-v2.0.json" | sha256sum -c -
+          echo "$DEV_SHA  $S/dev-v2.0.json" | sha256sum -c -
+          python3 scripts/rag-e2e-squad-export.py --train "$S/train-v2.0.json" --dev "$S/dev-v2.0.json" --out-dir "$RUNNER_TEMP/export"
+          cmp <(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])),sort_keys=True))" "$RUNNER_TEMP/export/export-stats.json") \
+              <(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])),sort_keys=True))" "$D/squad-export-stats.json") \
+            || { echo "::error::export-stats differ from committed squad-export-stats.json"; exit 1; }
+          python3 scripts/rag-e2e-squad-gold.py --dev "$S/dev-v2.0.json" --out "$RUNNER_TEMP/export/gold.jsonl"
+      - uses: actions/download-artifact@v4
+        with:
+          name: rag-e2e-answers-${{ inputs.answers_run_id }}
+          run-id: ${{ inputs.answers_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/answers
+      - name: Verify answers + blind export
+        shell: bash
+        env:
+          ARMS: ${{ inputs.arms }}
+        run: |
+          set -euo pipefail
+          A="$RUNNER_TEMP/answers"; O="$RUNNER_TEMP/adjudication"; mkdir -p "$O"
+          (cd "$A" && grep -E '^[0-9a-f]{64}  [a-z]+\.answers\.jsonl$' SHA256SUMS.txt | sha256sum -c -)
+          args=()
+          for arm in $ARMS; do
+            case "$arm" in lexical|dense|hybrid|ccos|reranked) ;; *) echo "::error::unknown arm $arm"; exit 1;; esac
+            args+=(--arm "$arm=$A/$arm.answers.jsonl")
+          done
+          echo "${args[*]}" > "$O/arm-args.txt"
+          first=$(echo $ARMS | cut -d' ' -f1)
+          python3 - "$A/$first.answers.jsonl" "$RUNNER_TEMP/export/queries.jsonl" "$O/queries.subset.jsonl" <<'PY'
+          import json, sys
+          ids = {json.loads(l)["query_id"] for l in open(sys.argv[1]) if l.strip()}
+          with open(sys.argv[3], "w") as o:
+              n = 0
+              for l in open(sys.argv[2]):
+                  if json.loads(l)["id"] in ids:
+                      o.write(l); n += 1
+          assert n == len(ids), (n, len(ids))
+          print("subset queries", n)
+          PY
+          python3 scripts/rag-e2e-adjudicate.py export --gold "$RUNNER_TEMP/export/gold.jsonl" \
+            --queries "$O/queries.subset.jsonl" --corpus "$RUNNER_TEMP/export/corpus.jsonl" "${args[@]}" \
+            --packet "$O/packet.jsonl" --key "$O/key.private.jsonl"
+          python3 scripts/rag-e2e-adjudicate.py rubric-hash "$RUBRIC" | tee "$O/rubric_sha256.txt"
+      - name: Python env + pinned judge snapshot
+        shell: bash
+        env:
+          INPUT_CACHE_DIR: ${{ inputs.cache_dir }}
+          TORCH_INDEX: ${{ inputs.torch_index }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/venv/bin:$PATH"
+          python3 -m pip install -q torch --index-url "$TORCH_INDEX"
+          python3 -m pip install -q "huggingface_hub>=0.24" "transformers>=4.45,<5" accelerate sentencepiece
+          python3 -c "import torch, transformers; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-', 'transformers', transformers.__version__)" | tee "$RUNNER_TEMP/adjudication/env.txt"
+          python3 -c "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)" || { echo "::error::CUDA torch unavailable"; exit 1; }
+          CACHE_DIR="${INPUT_CACHE_DIR:-$HOME/.cache/huggingface/hub}"
+          mkdir -p "$CACHE_DIR"; [ -w "$CACHE_DIR" ] || { echo "::error::cache_dir not writable"; exit 1; }
+          [ -n "${HF_TOKEN:-}" ] || unset HF_TOKEN
+          SNAP=$(CACHE_DIR="$CACHE_DIR" python3 -c "import os; from huggingface_hub import snapshot_download as s; print(s(os.environ['JUDGE'], revision=os.environ['JREV'], cache_dir=os.environ['CACHE_DIR'], allow_patterns=['model-*.safetensors','*.json','tokenizer.model']))")
+          echo "JSNAP=$SNAP" >> "$GITHUB_ENV"
+          P="$RUNNER_TEMP/adjudication/judge-pins.txt"
+          (cd "$SNAP" && for f in $(ls model-*.safetensors | sort); do sha256sum "$f"; done) > "$P"
+          for h in $JSHARDS; do grep -q "^$h " "$P" || { echo "::error::judge shard $h missing/mismatch"; cat "$P"; exit 1; }; done
+          [ "$(wc -l < "$P")" -eq 3 ] || { echo "::error::expected 3 HF shards"; exit 1; }
+          echo "$JTOK  $SNAP/tokenizer.json" | sha256sum -c -
+          echo "judge_layout=hf_shards weights_sha256=sha256:$(sha256sum < "$P" | cut -d' ' -f1)" | tee -a "$P"
+      - name: Judge + import (non-zero recorded, artifact still uploaded)
+        shell: bash
+        run: |
+          set +e
+          O="$RUNNER_TEMP/adjudication"; read -r -a args < "$O/arm-args.txt"
+          t0=$(date +%s)
+          python3 scripts/rag_e2e_mistral_judge.py --packet "$O/packet.jsonl" --rubric "$RUBRIC" \
+            --prompt "$D/judge-prompt.v1.txt" --snapshot "$JSNAP" --out "$O/reviews.llm.jsonl" --raw-out "$O/judge-raw.jsonl" \
+            2> "$O/judge-stderr.txt" | tee "$O/judge-log.txt"
+          jrc=${PIPESTATUS[0]}
+          echo "judge_rc=$jrc wall_seconds=$(( $(date +%s) - t0 ))" | tee -a "$O/judge-log.txt"
+          python3 scripts/rag-e2e-adjudicate.py import --key "$O/key.private.jsonl" --reviews "$O/reviews.llm.jsonl" \
+            "${args[@]}" --rubric "$RUBRIC" --adjudicator "llm:$JUDGE@$JREV" --out "$O/judgments.llm.jsonl" 2>&1 | tee "$O/import-log.txt"
+          irc=${PIPESTATUS[0]}
+          echo "import_rc=$irc" | tee -a "$O/judge-log.txt"
+          { echo "code_sha=$GITHUB_SHA"; echo "answers_run_id=${{ inputs.answers_run_id }}"; echo "judge=$JUDGE@$JREV"; echo "judge_prompt_sha256=sha256:$JPROMPT_SHA"; echo "seed=20261102"; (cd "$O" && sha256sum *); } | tee "$O/SHA256SUMS.txt"
+          [ "$jrc" -eq 0 ] && [ "$irc" -eq 0 ]
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rag-e2e-judgments-${{ github.run_id }}
+          path: ${{ runner.temp }}/adjudication
+          retention-days: 30

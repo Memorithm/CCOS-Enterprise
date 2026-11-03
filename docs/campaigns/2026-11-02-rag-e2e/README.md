@@ -86,3 +86,15 @@ overlap audit PENDING; readiness stays closed.
   Disk: ~15 GB weights in the HF cache + small JSONL outputs.
 - Nothing computes metrics; answers are not judgments. Readiness stays **FAIL/closed** until blind adjudication
   (`scripts/rag-e2e-adjudicate.py` export → human reviews → import → kappa) exists; overlap audit **PENDING**.
+
+## Blind LLM adjudication workflow (2026-11-03, tooling only — no judgments yet)
+- `scripts/rag-e2e-squad-gold.py` writes the gold-answer sidecar (`queries.jsonl` carries no gold text; a
+  local dry export of the smoke answers without it showed empty `gold_answers` on answerable rows).
+  `rag-e2e-adjudicate.py export --gold` now fails closed if an answerable query has no gold answer.
+- `scripts/rag_e2e_mistral_judge.py` = prereg judge `mistralai/Mistral-7B-Instruct-v0.3` @ `c170c708`, greedy,
+  frozen `judge-prompt.v1.txt` (`sha256:d32c17fe34fa449b0a8233d65b6cb1e34e0d0410a252a06cb1654af6c2ff590b`) with
+  `rubric.md` embedded. Unparsable replies are kept in raw output, not written as reviews → import fails closed.
+- `.github/workflows/rag-e2e-adjudicate-thor.yml` (manual): verifies answers SHA256SUMS, SQuAD, the three HF judge
+  shards + tokenizer against prereg Pins, exports the blind packet (seed 20261102), judges, imports, uploads
+  `rag-e2e-judgments-<run_id>`. Smoke: `gh workflow run rag-e2e-adjudicate-thor.yml -R Memorithm/CCOS-Enterprise -f answers_run_id=41554086307`
+- Computes no metric. κ still needs the human-reviewed subsample (prereg); readiness stays **FAIL/closed**.

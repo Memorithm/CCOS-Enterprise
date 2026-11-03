@@ -29,6 +29,7 @@ jobs:
       - run: python3 scripts/test-rag-e2e-generate.py
       - run: python3 scripts/test-rag-e2e-qwen-backend.py
       - run: python3 scripts/test-rag-e2e-adjudicate.py
+      - run: python3 scripts/test-rag-e2e-mistral-judge.py
       - run: python3 scripts/test-rag-e2e-pins.py
       - run: python3 scripts/test-rag-e2e-adapters.py
       - run: python3 scripts/test-rag-e2e-squad-export.py

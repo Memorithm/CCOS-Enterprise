@@ -3,7 +3,9 @@
 
 Subcommands
   rubric-hash RUBRIC                      -> sha256:<hex> of the rubric bytes (LF, no trailing ws)
-  export   --queries Q --corpus C --arm ID=RESULTS ... --seed S --packet OUT --key OUT
+  export   --queries Q --corpus C --arm ID=RESULTS ... --seed S --packet OUT --key OUT [--gold G]
+           G = JSONL {"query_id", "answers": [...]} (rag-e2e-squad-gold.py); when given, every
+           answerable query must have >= 1 gold answer (fail closed), since queries.jsonl carries none.
            Shuffles every (arm, query) row with a fixed seed, writes a blind packet (no arm id)
            and a private key capturing result_sha256 at export time.
   import   --key K --reviews R --arm ID=RESULTS ... --rubric RUBRIC --adjudicator NAME --out J
@@ -66,8 +68,22 @@ def parse_arms(specs):
     return arms
 
 
-def export(queries, corpus, arms, seed):
+def load_gold(path):
+    gold = {}
+    for r in read_jsonl(path):
+        need(r["query_id"] not in gold, f"duplicate gold {r['query_id']}")
+        need(isinstance(r["answers"], list) and all(isinstance(x, str) for x in r["answers"]),
+             f"bad gold answers for {r['query_id']}")
+        gold[r["query_id"]] = r["answers"]
+    return gold
+
+
+def export(queries, corpus, arms, seed, gold=None):
     qmap = {q["id"]: q for q in queries}
+    if gold is not None:
+        for q in queries:
+            if q["answerable"]:
+                need(gold.get(q["id"]), f"{q['id']}: answerable query has no gold answer")
     docs = {d["id"]: d for d in corpus}
     items = []
     for arm_id in sorted(arms):
@@ -84,7 +100,8 @@ def export(queries, corpus, arms, seed):
             raw = docs[c["doc_id"]]["text"].encode() if c["doc_id"] in docs else b""
             quotes.append(raw[c["start"]:c["end"]].decode("utf-8", "replace"))
         packet.append({"review_id": review_id, "question": q["text"],
-                       "gold_answers": q.get("gold_answers", []) if q["answerable"] else "UNANSWERABLE",
+                       "gold_answers": (gold[qid] if gold is not None else q.get("gold_answers", []))
+                       if q["answerable"] else "UNANSWERABLE",
                        "abstained": row["answer"]["abstained"], "answer": row["answer"]["text"],
                        "cited_quotes": quotes})
         key.append({"review_id": review_id, "arm_id": arm_id, "query_id": qid,
@@ -139,6 +156,7 @@ def main(argv=None):
     for f in ("queries", "corpus", "packet", "key"):
         s.add_argument(f"--{f}", required=True)
     s.add_argument("--arm", action="append", default=[]); s.add_argument("--seed", type=int, default=20261102)
+    s.add_argument("--gold")
     s = sub.add_parser("import")
     for f in ("key", "reviews", "rubric", "adjudicator", "out"):
         s.add_argument(f"--{f}", required=True)
@@ -151,7 +169,8 @@ def main(argv=None):
         if a.cmd == "rubric-hash":
             print(rubric_hash(a.rubric))
         elif a.cmd == "export":
-            packet, key = export(read_jsonl(a.queries), read_jsonl(a.corpus), parse_arms(a.arm), a.seed)
+            packet, key = export(read_jsonl(a.queries), read_jsonl(a.corpus), parse_arms(a.arm), a.seed,
+                                 load_gold(a.gold) if a.gold else None)
             write_jsonl(a.packet, packet); write_jsonl(a.key, key)
         elif a.cmd == "import":
             write_jsonl(a.out, import_reviews(read_jsonl(a.key), read_jsonl(a.reviews), parse_arms(a.arm),

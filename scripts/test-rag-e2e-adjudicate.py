@@ -42,6 +42,12 @@ def main():
     assert kit.export(q, c, a, 1)[1] != key, "seed changes order"
     assert all("arm" not in json.dumps(sorted(p)) for p in packet), "packet is blind"
     assert len(packet) == len(ARMS) * len(q)
+    js = [{"arm_id": k["arm_id"], "answer_correct": i % 2 == 0, "total_claims": 2, "supported_claims": 1,
+           "blinded": True} for i, k in enumerate(key)]
+    sm = kit.summarize(js, key, [{"review_id": key[0]["review_id"], "reason": "x"}])
+    assert sm["judge_abstain_total"] == 1 and sum(m["n"] for m in sm["arms"].values()) == len(key)
+    assert sm["arms"][key[0]["arm_id"]]["judge_abstain"] == [key[0]["review_id"]]
+    assert raises(lambda: kit.summarize(js, key, [{"review_id": "nope"}]))
     for k in key:
         assert k["result_sha256"] == kit.ev.judgment_result_hash(k["arm_id"], a[k["arm_id"]][k["query_id"]])
 

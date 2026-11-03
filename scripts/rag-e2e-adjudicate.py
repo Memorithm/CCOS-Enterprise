@@ -148,6 +148,28 @@ def kappa(primary, secondary):
     return {"n": n, "observed_agreement": po, "kappa": k}
 
 
+def summarize(judgments, key, abstain):
+    """Descriptive per-arm counts from imported judgments. Not the prereg evaluator; no CI, no claim."""
+    kmap = {k["review_id"]: k for k in key}
+    ab = {}
+    for a in abstain:
+        need(a.get("review_id") in kmap, f"judge_abstain unknown review_id {a.get('review_id')}")
+        ab.setdefault(kmap[a["review_id"]]["arm_id"], []).append(a["review_id"])
+    arms = {}
+    for j in judgments:
+        need(j.get("blinded") is True, "judgment not blinded")
+        m = arms.setdefault(j["arm_id"], {"n": 0, "answer_correct": 0, "total_claims": 0, "supported_claims": 0})
+        m["n"] += 1; m["answer_correct"] += j["answer_correct"]
+        m["total_claims"] += j["total_claims"]; m["supported_claims"] += j["supported_claims"]
+    for arm, m in arms.items():
+        m["answer_correct_rate"] = m["answer_correct"] / m["n"]
+        m["supported_claim_rate"] = (m["supported_claims"] / m["total_claims"]) if m["total_claims"] else None
+        m["judge_abstain"] = sorted(ab.get(arm, []))
+    need(set(ab) <= set(arms), "judge_abstain arm without judgments")
+    return {"arms": dict(sorted(arms.items())), "judge_abstain_total": sum(len(v) for v in ab.values()),
+            "note": "descriptive LLM-judge counts; judge_abstain counted incorrect; not EM/F1; no superiority claim"}
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -164,6 +186,9 @@ def main(argv=None):
     s = sub.add_parser("kappa")
     s.add_argument("--primary", required=True); s.add_argument("--secondary", required=True)
     s.add_argument("--threshold", type=float, default=0.6)
+    s = sub.add_parser("summarize")
+    for f in ("judgments", "key", "abstain", "out"):
+        s.add_argument(f"--{f}", required=True)
     a = p.parse_args(argv)
     try:
         if a.cmd == "rubric-hash":
@@ -172,6 +197,9 @@ def main(argv=None):
             packet, key = export(read_jsonl(a.queries), read_jsonl(a.corpus), parse_arms(a.arm), a.seed,
                                  load_gold(a.gold) if a.gold else None)
             write_jsonl(a.packet, packet); write_jsonl(a.key, key)
+        elif a.cmd == "summarize":
+            res = summarize(read_jsonl(a.judgments), read_jsonl(a.key), read_jsonl(a.abstain))
+            Path(a.out).write_text(json.dumps(res, indent=2, sort_keys=True) + "\n")
         elif a.cmd == "import":
             write_jsonl(a.out, import_reviews(read_jsonl(a.key), read_jsonl(a.reviews), parse_arms(a.arm),
                                               rubric_hash(a.rubric), a.adjudicator))

@@ -98,3 +98,22 @@ overlap audit PENDING; readiness stays closed.
   shards + tokenizer against prereg Pins, exports the blind packet (seed 20261102), judges, imports, uploads
   `rag-e2e-judgments-<run_id>`. Smoke: `gh workflow run rag-e2e-adjudicate-thor.yml -R Memorithm/CCOS-Enterprise -f answers_run_id=41554086307`
 - Computes no metric. κ still needs the human-reviewed subsample (prereg); readiness stays **FAIL/closed**.
+
+## Smoke adjudication summary (2026-11-03, descriptive only)
+`rag-e2e-adjudicate.py summarize --judgments J --key K --abstain A --out S` gives per-arm counts of imported
+judgments (no CI, not EM/F1, not the prereg evaluator). Smoke: adjudicate run 41567332468 on answers 41554086307
+(LIMIT=50 × 4 arms), judge Mistral-7B-Instruct-v0.3 @ `c170c708`, seed 20261102.
+Inputs: judgments `sha256:3b3fcabf0429e9cee7cefd4a1d80cabb1f15f4b5fd9dde63d0732ca9f9b5417d`,
+key `sha256:4a50e8192bee8bf9483cc778e5a29c441d5e5a5d84a3d9a72dc72900d6e7652f`,
+judge-abstain `sha256:20008a04b818c210396d29ba392e0e15f9fd9466f64be4f04f8005fb0c0ffffc`.
+Output `summary.smoke.json` `sha256:c65ae59b5fb17c3030d83cae230b0ace00917e6781ee91e64fc3db6d897d219d`.
+
+| arm | n | answer_correct (LLM judge) | supported/total claims | judge_abstain |
+|---|---|---|---|---|
+| lexical | 50 | 24 (0.48) | 31/57 | 2 (r000009, r000089; counted incorrect) |
+| dense | 50 | 33 (0.66) | 42/60 | 0 |
+| hybrid | 50 | 32 (0.64) | 32/54 | 0 |
+| ccos (DocumentMemory α=0.5) | 50 | 30 (0.60) | 33/53 | 0 |
+
+n=50 smoke, single LLM judge, no κ (human subsample pending), `reranked` arm absent, overlap audit PENDING.
+superiority_claim=false; readiness stays FAIL/closed.

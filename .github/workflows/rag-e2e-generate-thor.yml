@@ -27,7 +27,7 @@ on:
         required: false
         default: ""
       torch_index:
-        description: "pip index for torch if not importable from system python"
+        description: "pip index for the CUDA torch wheel (isolated venv)"
         required: false
         default: "https://download.pytorch.org/whl/cu130"
       timeout_minutes:
@@ -97,11 +97,12 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
-          python3 -m venv --system-site-packages "$RUNNER_TEMP/venv"
+          # Isolated venv: Thor's system site has a CPU-only torch (+ tensorrt-llm pins) that would
+          # shadow the CUDA wheel (run 41552142969: torch 2.10.0+cpu, cuda False).
+          python3 -m venv "$RUNNER_TEMP/venv"
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
           export PATH="$RUNNER_TEMP/venv/bin:$PATH"
-          python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null \
-            || python3 -m pip install -q torch --index-url "$TORCH_INDEX"
+          python3 -m pip install -q torch --index-url "$TORCH_INDEX"
           python3 -m pip install -q "huggingface_hub>=0.24" "transformers>=4.45,<5" accelerate
           python3 -c "import torch, transformers; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-', 'transformers', transformers.__version__)" | tee "$RUNNER_TEMP/env.txt"
           python3 -c "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)" || { echo "::error::CUDA torch unavailable"; exit 1; }

@@ -11,6 +11,7 @@ on:
       - 'fixtures/rag-campaign-smoke/**'
       - 'scripts/rag-e2e-*.py'
       - 'scripts/test-rag-e2e-*.py'
+      - 'scripts/rag_e2e_*.py'
       - 'docs/campaigns/2026-11-02-rag-e2e/**'
       - '.github/workflows/ci-rag-campaign.yml'
   workflow_dispatch:
@@ -26,6 +27,7 @@ jobs:
       - run: python3 scripts/test-rag-campaign-readiness.py
       - run: python3 scripts/test-rag-dataset-inventory.py
       - run: python3 scripts/test-rag-e2e-generate.py
+      - run: python3 scripts/test-rag-e2e-qwen-backend.py
       - run: python3 scripts/test-rag-e2e-adjudicate.py
       - run: python3 scripts/test-rag-e2e-pins.py
       - run: python3 scripts/test-rag-e2e-adapters.py

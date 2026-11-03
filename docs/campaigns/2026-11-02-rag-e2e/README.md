@@ -69,3 +69,20 @@ Still blocked: `reranked` (primary baseline) needs a cross-encoder runner for
 `cross-encoder/ms-marco-MiniLM-L6-v2` @ `233902d2` (none in repo); generation needs a pinned Qwen backend
 module for `rag-e2e-generate.py --backend` (none in repo); MiniLM dir must exist on Thor;
 overlap audit PENDING; readiness stays closed.
+
+## Rankings pinned + generation workflow (2026-11-03)
+- Rankings from Thor run 41547494628 are pinned in `rankings-pins.md` / `rankings-pins.sha256`.
+  Mapping: `ccos` = `DocumentMemory` fused α=0.5 (the prereg's CCOS DocumentMemory arm); `reranked` still absent.
+- `scripts/rag_e2e_qwen_backend.py` = pinned Qwen2.5-7B-Instruct @ `a09a3545` backend for
+  `rag-e2e-generate.py --backend rag_e2e_qwen_backend:make_backend` (chat template around the frozen v1 prompt,
+  greedy, bf16; frozen abstain regex; citations = `[doc_id]` markers bound to whole-document spans).
+  Parse rule tested model-free by `scripts/test-rag-e2e-qwen-backend.py`.
+- `.github/workflows/rag-e2e-generate-thor.yml` (manual): verifies prompt sha, SQuAD + export stats, ranking pins
+  and `weights_sha256`, then generates per arm and uploads `rag-e2e-answers-<run_id>` with `SHA256SUMS.txt`.
+  Smoke: `gh workflow run rag-e2e-generate-thor.yml -R Memorithm/CCOS-Enterprise -f limit=50`
+  Full: `-f limit=0 -f arms=lexical -f timeout_minutes=4320` (one arm per dispatch recommended).
+  Cost note: sequential HF `generate`, batch 1, ≤256 new tokens; 11,873 queries × 4 arms ≈ 47.5k generations —
+  expect days of Thor time for the full set (measure from the smoke `wall_seconds` before dispatching full).
+  Disk: ~15 GB weights in the HF cache + small JSONL outputs.
+- Nothing computes metrics; answers are not judgments. Readiness stays **FAIL/closed** until blind adjudication
+  (`scripts/rag-e2e-adjudicate.py` export → human reviews → import → kappa) exists; overlap audit **PENDING**.

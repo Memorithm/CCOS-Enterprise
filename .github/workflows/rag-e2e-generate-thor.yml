@@ -1,0 +1,140 @@
+name: RAG E2E generation over pinned rankings (Thor, manual)
+
+# Manual-only, not a required check. Re-exports the pinned SQuAD 2.0 split, downloads the
+# rag-e2e-arm-rankings artifact of a given arms run, verifies every ranking JSONL against the
+# SHA-256 pins recorded in docs/campaigns/2026-11-02-rag-e2e/rankings-pins.md, loads
+# Qwen/Qwen2.5-7B-Instruct @ a09a3545 from a writable HF cache, checks weights_sha256, and runs
+# scripts/rag-e2e-generate.py (frozen prompt v1) per arm. Uploads answer JSONL + SHA256SUMS.
+# It computes NO metric, writes NO manifest result field; readiness stays fail-closed until
+# blind judgments exist. `limit` > 0 = documented smoke subset (first N rows, input order).
+on:
+  workflow_dispatch:
+    inputs:
+      rankings_run_id:
+        description: "Arms run id providing artifact rag-e2e-arm-rankings"
+        required: true
+        default: "41547494628"
+      arms:
+        description: "Space-separated subset of: lexical dense hybrid ccos"
+        required: true
+        default: "lexical dense hybrid ccos"
+      limit:
+        description: "Rows per arm (0 = all 11873; e.g. 50 for smoke)"
+        required: true
+        default: "50"
+      cache_dir:
+        description: "HF cache dir (empty = $HOME/.cache/huggingface/hub)"
+        required: false
+        default: ""
+      torch_index:
+        description: "pip index for torch if not importable from system python"
+        required: false
+        default: "https://download.pytorch.org/whl/cu130"
+      timeout_minutes:
+        description: "Job timeout (full 4-arm run is multi-day; see README)"
+        required: true
+        default: "360"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: thor-rag-e2e-generate
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: [self-hosted, Linux, ARM64, jetson-thor, internal]
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    env:
+      MODEL: Qwen/Qwen2.5-7B-Instruct
+      REV: a09a35458c702b33eeacc393d103063234e8bc28
+      WEIGHTS_SHA: sha256:016771b384d7f005d173cf0067d3e4b8802f5e249beb5670dfed0b0c9936c6d6
+      PROMPT_SHA: 9203b6c60ecb8f168a84613be557e7aa79ef7338ee068e0fc0e44cd7996c2746
+      D: docs/campaigns/2026-11-02-rag-e2e
+      TRAIN_SHA: 68dcfbb971bd3e96d5b46c7177b16c1a4e7d4bdef19fb204502738552dede002
+      DEV_SHA: 80a5225e94905956a6446d296ca1093975c4d3b3260f1d6c8f68bc2ab77182d8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Frozen prompt check
+        run: |
+          set -euo pipefail
+          echo "$PROMPT_SHA  $D/generator-prompt.v1.txt" | sha256sum -c -
+          python3 scripts/test-rag-e2e-pins.py
+          python3 scripts/test-rag-e2e-qwen-backend.py
+      - name: Fetch + verify SQuAD 2.0, export
+        shell: bash
+        run: |
+          set -euo pipefail
+          S="$RUNNER_TEMP/squad"; mkdir -p "$S"
+          base=https://rajpurkar.github.io/SQuAD-explorer/dataset
+          curl -fsSL "$base/train-v2.0.json" -o "$S/train-v2.0.json"
+          curl -fsSL "$base/dev-v2.0.json" -o "$S/dev-v2.0.json"
+          echo "$TRAIN_SHA  $S/train-v2.0.json" | sha256sum -c -
+          echo "$DEV_SHA  $S/dev-v2.0.json" | sha256sum -c -
+          python3 scripts/rag-e2e-squad-export.py --train "$S/train-v2.0.json" --dev "$S/dev-v2.0.json" --out-dir "$RUNNER_TEMP/export"
+          cmp <(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])),sort_keys=True))" "$RUNNER_TEMP/export/export-stats.json") \
+              <(python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])),sort_keys=True))" "$D/squad-export-stats.json") \
+            || { echo "::error::export-stats differ from committed squad-export-stats.json"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          name: rag-e2e-arm-rankings
+          run-id: ${{ inputs.rankings_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/rankings
+      - name: Verify ranking pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/rankings"
+          grep -E '^[0-9a-f]{64}  [a-z]+\.ranking\.jsonl$' "$GITHUB_WORKSPACE/$D/rankings-pins.sha256" | sha256sum -c -
+      - name: Python env + pinned snapshot
+        shell: bash
+        env:
+          INPUT_CACHE_DIR: ${{ inputs.cache_dir }}
+          TORCH_INDEX: ${{ inputs.torch_index }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 -m venv --system-site-packages "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/venv/bin:$PATH"
+          python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null \
+            || python3 -m pip install -q torch --index-url "$TORCH_INDEX"
+          python3 -m pip install -q "huggingface_hub>=0.24" "transformers>=4.45,<5" accelerate
+          python3 -c "import torch, transformers; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-', 'transformers', transformers.__version__)" | tee "$RUNNER_TEMP/env.txt"
+          python3 -c "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)" || { echo "::error::CUDA torch unavailable"; exit 1; }
+          CACHE_DIR="${INPUT_CACHE_DIR:-$HOME/.cache/huggingface/hub}"
+          mkdir -p "$CACHE_DIR"; [ -w "$CACHE_DIR" ] || { echo "::error::cache_dir not writable"; exit 1; }
+          [ -n "${HF_TOKEN:-}" ] || unset HF_TOKEN
+          SNAP=$(CACHE_DIR="$CACHE_DIR" python3 -c "import os; from huggingface_hub import snapshot_download as s; print(s(os.environ['MODEL'], revision=os.environ['REV'], cache_dir=os.environ['CACHE_DIR'], allow_patterns=['*.safetensors','*.json','*.txt']))")
+          echo "SNAP=$SNAP" >> "$GITHUB_ENV"
+          python3 scripts/rag-e2e-pin-generator.py --snapshot "$SNAP" --manifest "$D/manifest.skeleton.json" --out "$RUNNER_TEMP/manifest.pinned.json" > "$RUNNER_TEMP/pins.json"
+          grep -q "${WEIGHTS_SHA#sha256:}" "$RUNNER_TEMP/pins.json" || { echo "::error::weights_sha256 mismatch vs recorded pin"; cat "$RUNNER_TEMP/pins.json"; exit 1; }
+      - name: Generate per arm
+        shell: bash
+        env:
+          ARMS: ${{ inputs.arms }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          set -euo pipefail
+          O="$RUNNER_TEMP/answers"; mkdir -p "$O"; cp "$RUNNER_TEMP/env.txt" "$RUNNER_TEMP/pins.json" "$O/"
+          export PYTHONPATH="$GITHUB_WORKSPACE/scripts" RAG_E2E_SNAPSHOT="$SNAP" RAG_E2E_CORPUS="$RUNNER_TEMP/export/corpus.jsonl"
+          for arm in $ARMS; do
+            case "$arm" in lexical|dense|hybrid|ccos) ;; *) echo "::error::unknown arm $arm"; exit 1;; esac
+            in="$RUNNER_TEMP/rankings/$arm.ranking.jsonl"
+            if [ "$LIMIT" -gt 0 ]; then head -n "$LIMIT" "$in" > "$O/$arm.input.jsonl"; else cp "$in" "$O/$arm.input.jsonl"; fi
+            t0=$(date +%s)
+            python3 scripts/rag-e2e-generate.py --retrieval "$O/$arm.input.jsonl" --queries "$RUNNER_TEMP/export/queries.jsonl" \
+              --corpus "$RUNNER_TEMP/export/corpus.jsonl" --backend rag_e2e_qwen_backend:make_backend \
+              --k 10 --context-tokens 3072 --answer-tokens 256 > "$O/$arm.answers.jsonl" 2> "$O/$arm.stderr.txt"
+            echo "arm=$arm rows=$(wc -l < "$O/$arm.answers.jsonl") limit=$LIMIT wall_seconds=$(( $(date +%s) - t0 ))" | tee -a "$O/generate-log.txt"
+          done
+          { echo "code_sha=$GITHUB_SHA"; echo "rankings_run_id=${{ inputs.rankings_run_id }}"; echo "model=$MODEL@$REV"; echo "weights_sha256=$WEIGHTS_SHA"; echo "prompt_sha256=sha256:$PROMPT_SHA"; echo "limit=$LIMIT"; (cd "$O" && sha256sum *); } | tee "$O/SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rag-e2e-answers-${{ github.run_id }}
+          path: ${{ runner.temp }}/answers
+          retention-days: 30

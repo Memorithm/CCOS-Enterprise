@@ -146,7 +146,7 @@ jobs:
           O="$RUNNER_TEMP/adjudication"; read -r -a args < "$O/arm-args.txt"
           t0=$(date +%s)
           python3 scripts/rag_e2e_mistral_judge.py --packet "$O/packet.jsonl" --rubric "$RUBRIC" \
-            --prompt "$D/judge-prompt.v1.txt" --snapshot "$JSNAP" --out "$O/reviews.llm.jsonl" --raw-out "$O/judge-raw.jsonl" \
+            --prompt "$D/judge-prompt.v1.txt" --snapshot "$JSNAP" --out "$O/reviews.llm.jsonl" --raw-out "$O/judge-raw.jsonl" --abstain-out "$O/judge-abstain.jsonl" \
             2> "$O/judge-stderr.txt" | tee "$O/judge-log.txt"
           jrc=${PIPESTATUS[0]}
           echo "judge_rc=$jrc wall_seconds=$(( $(date +%s) - t0 ))" | tee -a "$O/judge-log.txt"

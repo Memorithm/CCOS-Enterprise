@@ -7,7 +7,7 @@ from pathlib import Path
 
 S = Path(__file__).resolve().parent
 sys.path.insert(0, str(S))
-from rag_e2e_mistral_judge import parse_review, render  # noqa: E402
+from rag_e2e_mistral_judge import judge_abstain, parse_failure_reason, parse_review, render  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("gold", S / "rag-e2e-squad-gold.py")
 gold = importlib.util.module_from_spec(spec); spec.loader.exec_module(gold)
@@ -28,6 +28,14 @@ assert parse_review("no json", row) is None
 assert parse_review('{"answer_correct": "yes", "total_claims": 1, "supported_claims": 1}', row) is None
 assert parse_review('{"answer_correct": true, "total_claims": 0, "supported_claims": 0}', row) is None
 assert parse_review('{"answer_correct": true, "total_claims": 1, "supported_claims": 2}', row) is None
+# run 41562914847 r000009/r000089: valid JSON, non-abstained, total_claims=0 -> explicit abstain, never dropped
+bad = '{"answer_correct": false, "total_claims": 0, "supported_claims": 0, "note": "n"}'
+assert parse_review(bad, row) is None
+assert parse_failure_reason(bad, row) == "non_abstained_total_claims_lt_1"
+assert parse_failure_reason("no json", row) == "no_json_object"
+ja = judge_abstain(row, "non_abstained_total_claims_lt_1")
+assert ja["answer_correct"] is False and (ja["total_claims"], ja["supported_claims"]) == (1, 0) and ja["judge_abstain"]
+assert (judge_abstain(ab, "answer_correct_not_bool")["total_claims"]) == 0
 dev = {"data": [{"paragraphs": [{"qas": [{"id": "a", "answers": [{"text": "x"}, {"text": "x"}, {"text": "y"}]},
                                          {"id": "b", "answers": [], "is_impossible": True}]}]}]}
 assert list(gold.gold_rows(dev)) == [{"query_id": "a", "answers": ["x", "y"]}, {"query_id": "b", "answers": []}]
